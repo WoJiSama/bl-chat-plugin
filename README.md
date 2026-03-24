@@ -207,6 +207,8 @@ systemPrompt: |
 
 > **重要提示**：开启知识库需要配置 `embeddingAiConfig`，用于调用 Embedding 模型生成文本向量。
 
+**自动导入**：插件内置了 1400+ 条中文互联网热梗知识（来自 [CHIME](https://github.com/yuboxie/chime) 数据集）。首次启动时如果知识库为空，会自动在后台导入，无需手动操作，导入过程不影响其他功能使用。
+
 **使用方式**：
 1. 单条添加：`#知识库添加 yyds是"永远的神"的拼音缩写，表示某人或某物非常厉害`
 2. 批量导入：在 Yunzai 根目录执行 `node plugins/bl-chat-plugin/scripts/import-knowledge.js <文件路径>`

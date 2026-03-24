@@ -60,7 +60,6 @@ class KnowledgeExpander {
       const hash = this.hashText(text)
 
       await this.appendKnowledgeItem({ text, hash, embedding })
-      console.log(chalk.green(`添加成功：${text}`))
       return true
     } catch (error) {
       console.error(chalk.red('生成Embedding失败：'), error.message)
@@ -94,8 +93,9 @@ class KnowledgeExpander {
         const hash = this.hashText(text)
 
         await this.appendKnowledgeItem({ text, hash, embedding })
-        console.log(chalk.green(`添加成功：${text}`))
       }
+
+      console.log(chalk.green(`添加成功：${newTexts.length} 条，跳过重复：${knowledgeTexts.length - newTexts.length} 条`))
 
       return {
         added: newTexts.length,

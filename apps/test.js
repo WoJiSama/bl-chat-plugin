@@ -203,17 +203,22 @@ function initializeSharedState(config) {
       const batchSize = 50
       ;(async () => {
         let totalAdded = 0
+        let totalSkipped = 0
+        const totalBatches = Math.ceil(texts.length / batchSize)
         for (let i = 0; i < texts.length; i += batchSize) {
           const batch = texts.slice(i, i + batchSize)
+          const batchNum = Math.floor(i / batchSize) + 1
           try {
             const result = await expander.expand(batch)
             totalAdded += result.added
+            totalSkipped += batch.length - result.added
+            logger.info(`[知识库] [${batchNum}/${totalBatches}] 新增 ${result.added} 条，跳过重复 ${batch.length - result.added} 条`)
           } catch (err) {
-            logger.error(`[知识库] 自动导入批次失败: ${err.message}`)
+            logger.error(`[知识库] [${batchNum}/${totalBatches}] 导入失败: ${err.message}`)
           }
           if (i + batchSize < texts.length) await new Promise(r => setTimeout(r, 1000))
         }
-        logger.info(`[知识库] 自动导入完成，共导入 ${totalAdded} 条`)
+        logger.info(`[知识库] 自动导入完成，共导入 ${totalAdded} 条，跳过重复 ${totalSkipped} 条`)
       })()
     }
   }
