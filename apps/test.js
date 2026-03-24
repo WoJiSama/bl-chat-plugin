@@ -3,6 +3,7 @@ import { EmotionManager } from "../utils/EmotionManager.js"
 import { MemoryManager } from "../utils/MemoryManager.js"
 import { ExpressionLearner } from "../utils/ExpressionLearner.js"
 import KnowledgeSearcher from "../functions/KnowledgeSearcher.js"
+import KnowledgeExpander from "../functions/KnowledgeExpander.js"
 import { SearchInformationTool } from "../functions/functions_tools/SearchInformationTool.js"
 import { SearchVideoTool } from "../functions/functions_tools/SearchVideoTool.js"
 import { SearchMusicTool } from "../functions/functions_tools/SearchMusicTool.js"
@@ -102,7 +103,7 @@ function initializeSharedState(config) {
       sharedState.knowledgeSearcher = new KnowledgeSearcher({
         apiKey: config.embeddingAiConfig?.embeddingApiKey,
         apiUrl: config.embeddingAiConfig?.embeddingApiUrl,
-        dbPath: path.join(_path, 'plugins/bl-chat-plugin/data/knowledge-db.ndjson'),
+        dbPath: path.join(_path, 'plugins/bl-chat-plugin/database/knowledge-db.ndjson'),
         model: config.embeddingAiConfig?.embeddingApiModel || 'text-embedding-3-small',
         topN: config.knowledgeSystem?.topN || 4,
         threshold: config.knowledgeSystem?.threshold || 0.6
@@ -141,7 +142,7 @@ function initializeSharedState(config) {
       ? new KnowledgeSearcher({
           apiKey: config.embeddingAiConfig?.embeddingApiKey,
           apiUrl: config.embeddingAiConfig?.embeddingApiUrl,
-          dbPath: path.join(_path, 'plugins/bl-chat-plugin/data/knowledge-db.ndjson'),
+          dbPath: path.join(_path, 'plugins/bl-chat-plugin/database/knowledge-db.ndjson'),
           model: config.embeddingAiConfig?.embeddingApiModel || 'text-embedding-3-small',
           topN: config.knowledgeSystem?.topN || 4,
           threshold: config.knowledgeSystem?.threshold || 0.6
@@ -183,6 +184,39 @@ function initializeSharedState(config) {
   }))
 
   sharedState.functionMap = new Map(sharedState.functions.map(func => [func.name, func]))
+
+  // 知识库自动导入：首次启动时如果 ndjson 不存在，从 database_default 导入
+  if (config.knowledgeSystem?.enabled && sharedState.knowledgeSearcher) {
+    const dbPath = path.join(_path, 'plugins/bl-chat-plugin/database/knowledge-db.ndjson')
+    const defaultTxt = path.join(_path, 'plugins/bl-chat-plugin/database_default/knowledge-base.txt')
+    if (!fs.existsSync(dbPath) && fs.existsSync(defaultTxt)) {
+      const dbDir = path.dirname(dbPath)
+      if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true })
+      logger.info('[知识库] 首次启动，正在从默认知识库导入...')
+      const expander = new KnowledgeExpander({
+        apiKey: config.embeddingAiConfig?.embeddingApiKey,
+        apiUrl: config.embeddingAiConfig?.embeddingApiUrl,
+        dbPath,
+        model: config.embeddingAiConfig?.embeddingApiModel || 'text-embedding-3-small'
+      })
+      const texts = fs.readFileSync(defaultTxt, 'utf8').split('\n').filter(Boolean)
+      const batchSize = 50
+      ;(async () => {
+        let totalAdded = 0
+        for (let i = 0; i < texts.length; i += batchSize) {
+          const batch = texts.slice(i, i + batchSize)
+          try {
+            const result = await expander.expand(batch)
+            totalAdded += result.added
+          } catch (err) {
+            logger.error(`[知识库] 自动导入批次失败: ${err.message}`)
+          }
+          if (i + batchSize < texts.length) await new Promise(r => setTimeout(r, 1000))
+        }
+        logger.info(`[知识库] 自动导入完成，共导入 ${totalAdded} 条`)
+      })()
+    }
+  }
 
   // 如果启用了 searchMusicTool，初始化音乐 cookie 刷新定时任务
   if (config.oneapi_tools?.includes('searchMusicTool')) {

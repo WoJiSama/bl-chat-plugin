@@ -98,7 +98,7 @@ console.log(`文件: ${filePath}`)
 console.log(`共 ${texts.length} 条，开始导入...\n`)
 
 // 确保 data 目录存在
-const dataDir = path.join(_path, 'plugins/bl-chat-plugin/data')
+const dataDir = path.join(_path, 'plugins/bl-chat-plugin/database')
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true })
 }

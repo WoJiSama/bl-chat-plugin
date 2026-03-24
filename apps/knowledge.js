@@ -17,7 +17,7 @@ function getKnowledgeConfig() {
 }
 
 function getDbPath() {
-  return path.join(_path, 'plugins/bl-chat-plugin/data/knowledge-db.ndjson')
+  return path.join(_path, 'plugins/bl-chat-plugin/database/knowledge-db.ndjson')
 }
 
 function createExpander(config) {
@@ -41,7 +41,7 @@ function createSearcher(config) {
 }
 
 async function ensureDataDir() {
-  const dataDir = path.join(_path, 'plugins/bl-chat-plugin/data')
+  const dataDir = path.join(_path, 'plugins/bl-chat-plugin/database')
   try {
     await access(dataDir)
   } catch {
