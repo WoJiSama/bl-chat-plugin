@@ -166,7 +166,8 @@ export class LocalToolRegistry {
         const candidates = this.getExportCandidates(moduleExports)
 
         if (!candidates.length) {
-          logWarn(`跳过 ${this.relativePath(filePath)}：未找到 default 或命名导出`)
+          const exportNames = Object.keys(moduleExports || {}).join(", ") || "空"
+          logWarn(`跳过 ${this.relativePath(filePath)}：未找到可用的工具导出，实际导出项：${exportNames}`)
           continue
         }
 
@@ -233,14 +234,30 @@ export class LocalToolRegistry {
   getExportCandidates(moduleExports) {
     const seen = new Set()
     const candidates = []
-
-    for (const value of [moduleExports.default, ...Object.values(moduleExports)]) {
-      if (!value || seen.has(value)) continue
+    const addCandidate = value => {
+      if (!value || seen.has(value)) return
       seen.add(value)
       candidates.push(value)
     }
 
+    for (const value of [moduleExports?.default, ...Object.values(moduleExports || {})]) {
+      addCandidate(value)
+
+      if (this.isPlainExportContainer(value)) {
+        for (const nestedValue of Object.values(value)) {
+          addCandidate(nestedValue)
+        }
+      }
+    }
+
     return candidates
+  }
+
+  isPlainExportContainer(value) {
+    if (!value || typeof value !== "object") return false
+    if (typeof value.execute === "function" || typeof value.func === "function") return false
+    if (value.name && value.description && value.parameters) return false
+    return Object.getPrototypeOf(value) === Object.prototype
   }
 
   instantiateCandidate(candidate) {
