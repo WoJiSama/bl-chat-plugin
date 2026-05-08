@@ -15,7 +15,7 @@ export const removeToolPromptsFromMessages = (messages = []) => {
             // // 清理末尾可能残留的标点和空格
             // content = content.replace(/[，,\s]+$/g, "").trim()
 
-            return { ...msg, content }
+            return { ...msg, role: "system", content }
         }
 
         // 处理 system 消息

@@ -70,8 +70,17 @@ pluginSettings:
     enabled: false
     maxFactsPerUser: 100
     maxFactsPerGroup: 50
-    importanceThreshold: 0.3
+    importanceThreshold: 0.5
     memoryDecayDays: 7
+    userExtractDebounceSeconds: 90
+    userExtractMaxBatchMessages: 6
+    groupExtractMinIntervalMinutes: 10
+    groupExtractMaxBatchMessages: 12
+    promptMaxUserFacts: 8
+    promptMaxGroupFacts: 6
+    promptMaxChars: 1200
+    semanticRecallEnabled: false
+    semanticRecallTopK: 20
   expressionLearning:
     enabled: true
     minWordFrequency: 3

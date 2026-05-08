@@ -1,32 +1,9 @@
-import { JinyanTool } from "../functions/functions_tools/JinyanTool.js"
 import { EmotionManager } from "../utils/EmotionManager.js"
 import { MemoryManager } from "../utils/MemoryManager.js"
 import { ExpressionLearner } from "../utils/ExpressionLearner.js"
 import KnowledgeSearcher from "../functions/KnowledgeSearcher.js"
 import KnowledgeExpander from "../functions/KnowledgeExpander.js"
-import { SearchInformationTool } from "../functions/functions_tools/SearchInformationTool.js"
-import { SearchVideoTool } from "../functions/functions_tools/SearchVideoTool.js"
-import { SearchMusicTool } from "../functions/functions_tools/SearchMusicTool.js"
-import { EmojiSearchTool } from "../functions/functions_tools/EmojiSearchTool.js"
-import { BingImageSearchTool } from "../functions/functions_tools/BingImageSearchTool.js"
-import { GoogleImageAnalysisTool } from "../functions/functions_tools/GoogleAnalysisTool.js"
-import { ChatHistoryTool } from "../functions/functions_tools/ChatHistoryTool.js"
-import { PokeTool } from "../functions/functions_tools/PokeTool.js"
-import { LikeTool } from "../functions/functions_tools/LikeTool.js"
-import { AiMindMapTool } from "../functions/functions_tools/AiMindMapTool.js"
-import { GoogleImageEditTool } from "../functions/functions_tools/GoogleImageEditTool.js"
-import { WebParserTool } from "../functions/functions_tools/webParserTool.js"
-import { GitHubRepoTool } from "../functions/functions_tools/GithubTool.js"
-import { VideoAnalysisTool } from "../functions/functions_tools/VideoAnalysisTool.js"
-import { QQZoneTool } from "../functions/functions_tools/QQZoneTool.js"
-import { ChangeCardTool } from "../functions/functions_tools/ChangeCardTool.js"
-import { VoiceTool } from "../functions/functions_tools/VoiceTool.js"
-import { BananaTool } from "../functions/functions_tools/BananaTool.js"
-import { ReactionTool } from "../functions/functions_tools/ReactionTool.js"
-import { MemberInfoTool } from "../functions/functions_tools/MemberInfoTool.js"
-import { RecallTool } from "../functions/functions_tools/RecallTool.js"
-import { GrabRedBagTool } from "../functions/functions_tools/GrabRedBagTool.js"
-import { ReminderTool, checkPendingReminders } from "../functions/functions_tools/ReminderTool.js"
+import { checkPendingReminders } from "../functions/functions_tools/ReminderTool.js"
 import { TakeImages } from "../utils/fileUtils.js"
 import { loadData, saveData } from "../utils/redisClient.js"
 import { YTapi } from "../utils/apiClient.js"
@@ -34,11 +11,13 @@ import { MessageManager } from "../utils/MessageManager.js"
 import { ThinkingProcessor } from "../utils/providers/ThinkingProcessor.js"
 import { TotalTokens } from "../functions/tools/CalculateToken.js"
 import { mcpManager } from "../utils/MCPClient.js"
+import { localToolRegistry } from "../utils/LocalToolRegistry.js"
 import { removeToolPromptsFromMessages } from "../utils/textUtils.js"
 import { getRedBagType, isExclusiveForUser } from "../utils/redBagUtils.js"
 import fs from "fs"
 import YAML from "yaml"
 import path from "path"
+import common from "../../../lib/common/common.js"
 import chokidar from "chokidar"
 import { randomUUID } from "crypto"
 import pLimit from "p-limit"
@@ -77,6 +56,31 @@ let pluginInitialized = false
 let sharedState = null
 let configWatcher = null
 
+function applyToolRegistrySnapshot(state, snapshot = localToolRegistry.getSnapshot()) {
+  state.toolInstances = snapshot.toolInstances
+  state.functions = snapshot.functions
+  state.functionMap = snapshot.functionMap
+  state.customToolCount = snapshot.customToolCount || 0
+  state.builtInToolCount = snapshot.builtInToolCount || 0
+  return state
+}
+
+async function refreshLocalTools(state, options = {}) {
+  const snapshot = await localToolRegistry.reload(options)
+  return applyToolRegistrySnapshot(state, snapshot)
+}
+
+function buildMemoryConfig(config) {
+  const memorySystem = config.memorySystem || {}
+  return {
+    ...memorySystem,
+    memoryAiConfig: config.memoryAiConfig || null,
+    embeddingAiConfig: config.embeddingAiConfig || null,
+    groupExtractMinIntervalMinutes:
+      memorySystem.groupExtractMinIntervalMinutes ?? memorySystem.groupExtractMinInterval ?? 10
+  }
+}
+
 function initializeSharedState(config) {
   if (sharedState) {
     // 热更新：直接覆盖各 Manager 的 config，无需 Manager 侧改动
@@ -89,15 +93,7 @@ function initializeSharedState(config) {
         ...config.emotionSystem?.eventWeights
       }
     })
-    Object.assign(sharedState.memoryManager.config, {
-      maxFactsPerUser: config.memorySystem?.maxFactsPerUser || 100,
-      maxFactsPerGroup: config.memorySystem?.maxFactsPerGroup || 50,
-      importanceThreshold: config.memorySystem?.importanceThreshold || 0.5,
-      memoryDecayDays: config.memorySystem?.memoryDecayDays || 7,
-      memoryAiConfig: config.memoryAiConfig || null,
-      groupExtractMinInterval: (config.memorySystem?.groupExtractMinInterval || 5) * 60 * 1000,
-      minFactsPerCategory: config.memorySystem?.minFactsPerCategory || 2
-    })
+    sharedState.memoryManager.updateConfig(buildMemoryConfig(config))
     Object.assign(sharedState.expressionLearner.config, {
       ...config.expressionLearning || {},
       memoryAiConfig: config.memoryAiConfig || null
@@ -121,7 +117,10 @@ function initializeSharedState(config) {
     } else if (!config.knowledgeSystem?.enabled) {
       sharedState.knowledgeSearcher = null
     }
-    return sharedState
+    refreshLocalTools(sharedState, { force: true }).catch(error => {
+      logger.error('[LocalToolRegistry] 热更新工具失败:', error)
+    })
+    return applyToolRegistrySnapshot(sharedState)
   }
   sharedState = {
     messageManager: new MessageManager({
@@ -133,15 +132,7 @@ function initializeSharedState(config) {
     // 情感系统
     emotionManager: new EmotionManager(config.emotionSystem || {}),
     // 长期记忆
-    memoryManager: new MemoryManager({
-      maxFactsPerUser: config.memorySystem?.maxFactsPerUser || 100,
-      maxFactsPerGroup: config.memorySystem?.maxFactsPerGroup || 50,
-      importanceThreshold: config.memorySystem?.importanceThreshold || 0.5,
-      memoryDecayDays: config.memorySystem?.memoryDecayDays || 7,
-      memoryAiConfig: config.memoryAiConfig || null,
-      groupExtractMinInterval: (config.memorySystem?.groupExtractMinInterval || 5) * 60 * 1000,
-      minFactsPerCategory: config.memorySystem?.minFactsPerCategory || 2
-    }),
+    memoryManager: new MemoryManager(buildMemoryConfig(config)),
     // 表达学习
     expressionLearner: new ExpressionLearner({
       ...config.expressionLearning || {},
@@ -158,42 +149,13 @@ function initializeSharedState(config) {
           threshold: config.knowledgeSystem?.threshold || 0.6
         })
       : null,
-    toolInstances: {
-      jinyanTool: new JinyanTool(),
-      searchInformationTool: new SearchInformationTool(),
-      searchVideoTool: new SearchVideoTool(),
-      searchMusicTool: new SearchMusicTool(),
-      emojiSearchTool: new EmojiSearchTool(),
-      bingImageSearchTool: new BingImageSearchTool(),
-      googleImageAnalysisTool: new GoogleImageAnalysisTool(),
-      pokeTool: new PokeTool(),
-      likeTool: new LikeTool(),
-      chatHistoryTool: new ChatHistoryTool(),
-      aiMindMapTool: new AiMindMapTool(),
-      webParserTool: new WebParserTool(),
-      googleImageEditTool: new GoogleImageEditTool(),
-      githubRepoTool: new GitHubRepoTool(),
-      videoAnalysisTool: new VideoAnalysisTool(),
-      qqZoneTool: new QQZoneTool(),
-      changeCardTool: new ChangeCardTool(),
-      voiceTool: new VoiceTool(),
-      bananaTool: new BananaTool(),
-      reactionTool: new ReactionTool(),
-      memberInfoTool: new MemberInfoTool(),
-      recallTool: new RecallTool(),
-      grabRedBagTool: new GrabRedBagTool(),
-      reminderTool: new ReminderTool()
-    },
     sessionMap: new Map()
   }
 
-  sharedState.functions = Object.values(sharedState.toolInstances).map(tool => ({
-    name: tool.name,
-    description: tool.description,
-    parameters: tool.parameters
-  }))
-
-  sharedState.functionMap = new Map(sharedState.functions.map(func => [func.name, func]))
+  applyToolRegistrySnapshot(sharedState)
+  refreshLocalTools(sharedState, { force: true }).catch(error => {
+    logger.error('[LocalToolRegistry] 初始化自定义工具失败:', error)
+  })
 
   // 知识库自动导入：首次启动时如果 ndjson 不存在，从 database_default 导入
   if (config.knowledgeSystem?.enabled && sharedState.knowledgeSearcher) {
@@ -290,6 +252,15 @@ export class ExamplePlugin extends plugin {
       priority: 9999,
       rule: [
         { reg: "^#tool\\s*(.*)", fnc: "handleTool" },
+        { reg: "^#记忆状态$", fnc: "memoryStatus" },
+        { reg: "^#我的记忆$", fnc: "listMyMemory" },
+        { reg: "^#群记忆$", fnc: "listGroupMemory" },
+        { reg: "^#搜索记忆\\s+[\\s\\S]+$", fnc: "searchMemory" },
+        { reg: "^#删除记忆\\s+\\S+$", fnc: "deleteMemory" },
+        { reg: "^#清空我的记忆$", fnc: "clearMyMemory" },
+        { reg: "^#清空群记忆$", fnc: "clearGroupMemory" },
+        { reg: "^#禁用我的记忆$", fnc: "disableMyMemory" },
+        { reg: "^#启用我的记忆$", fnc: "enableMyMemory" },
         { reg: "^#mcp\\s+重载", fnc: "reloadMCP" },
         { reg: "^#mcp\\s+列表", fnc: "listMCPTools" },
         { reg: "^#清除群记忆$", fnc: "clearGroupMemory" },
@@ -322,7 +293,21 @@ export class ExamplePlugin extends plugin {
     }
   }
 
+  async refreshLocalToolRegistry(options = {}) {
+    const state = await refreshLocalTools(sharedState, options)
+    this.toolInstances = state.toolInstances
+    this.functions = state.functions
+    this.functionMap = state.functionMap
+    this.updateToolsList()
+    return state
+  }
+
   initTools() {
+    applyToolRegistrySnapshot(sharedState)
+    this.toolInstances = sharedState.toolInstances
+    this.functions = sharedState.functions
+    this.functionMap = sharedState.functionMap
+
     const provider = this.config.providers.toLowerCase()
     const toolConfig = {
       oneapi: this.config.oneapi_tools
@@ -401,10 +386,47 @@ export class ExamplePlugin extends plugin {
     })
   }
 
+  async scanRedisKeys(pattern) {
+    try {
+      if (typeof redis.scanIterator === "function") {
+        const keys = []
+        for await (const key of redis.scanIterator({ MATCH: pattern, COUNT: 200 })) {
+          if (Array.isArray(key)) keys.push(...key)
+          else keys.push(key)
+        }
+        return keys
+      }
+
+      if (typeof redis.scan === "function") {
+        const keys = []
+        let cursor = "0"
+        do {
+          const [nextCursor, batch = []] = await redis.scan(cursor, "MATCH", pattern, "COUNT", 200)
+          cursor = String(nextCursor)
+          keys.push(...batch)
+        } while (cursor !== "0")
+        return keys
+      }
+    } catch (error) {
+      logger.warn(`[Redis] SCAN 扫描失败，回退使用 KEYS：${pattern}，原因：${error.message}`)
+    }
+
+    return await redis.keys(pattern)
+  }
+
+  async deleteRedisKeys(keys = []) {
+    for (let i = 0; i < keys.length; i += 200) {
+      const chunk = keys.slice(i, i + 200).filter(Boolean)
+      if (chunk.length) {
+        await redis.del(...chunk)
+      }
+    }
+  }
+
   async clearAllMessages() {
-    const keys = await redis.keys(`${this.REDIS_KEY_PREFIX}*`)
+    const keys = await this.scanRedisKeys(`${this.REDIS_KEY_PREFIX}*`)
     if (keys?.length) {
-      await redis.del(...keys)
+      await this.deleteRedisKeys(keys)
       logger.info(`已清除${keys.length}条消息历史记录`)
     }
   }
@@ -416,7 +438,7 @@ export class ExamplePlugin extends plugin {
       .map(name => {
         const func = this.functionMap.get(name)
         if (!func) {
-          console.warn(`Tool "${name}" not found.`)
+          console.warn(`未找到工具 "${name}"`)
           return null
         }
         return {
@@ -542,7 +564,10 @@ export class ExamplePlugin extends plugin {
             const state = initializeSharedState(this.config)
             this.knowledgeSearcher = state.knowledgeSearcher
             this.MAX_HISTORY = this.config.groupMaxMessages || 100
-            this.initTools()
+            this.refreshLocalToolRegistry({ force: true }).catch(error => {
+              logger.error(`[bl-chat-plugin][热更新] 重新加载本地工具失败: ${error}`)
+              this.initTools()
+            })
 
             logger.mark(`[bl-chat-plugin][热更新] message.yaml 配置已重新加载`)
           } catch (err) {
@@ -1167,7 +1192,9 @@ ${recentHistory || '(无)'}
       if (!e.group_id) await e.reply("该命令只能在群聊中使用。")
       return false
     }
-    
+
+    await this.refreshLocalToolRegistry()
+
     const { group_id: groupId, user_id: userId, msg } = e
     const sessionId = randomUUID()
     e.sessionId = sessionId
@@ -1216,10 +1243,10 @@ ${recentHistory || '(无)'}
         ? await limit(() => this.emotionManager.getEmotionPromptForGroup(groupId))
         : ''
       const memoryPrompt = this.config.memorySystem?.enabled
-        ? await limit(() => this.memoryManager.getMemoryPromptForUser(groupId, userId))
+        ? await limit(() => this.memoryManager.getMemoryPromptForUser(groupId, userId, e.msg || ""))
         : ''
       const groupMemoryPrompt = this.config.memorySystem?.enabled && groupId
-        ? await limit(() => this.memoryManager.getGroupMemoryPrompt(groupId))
+        ? await limit(() => this.memoryManager.getGroupMemoryPrompt(groupId, e.msg || ""))
         : ''
       const expressionPrompt = this.config.expressionLearning?.enabled
         ? await limit(() => this.expressionLearner.getExpressionPromptForGroup(groupId))
@@ -1658,6 +1685,171 @@ ${mcpPrompts}
   /**
    * 执行工具 - 统一处理本地工具和MCP工具
    */
+  normalizeAssistantToolMessage(message) {
+    return {
+      role: "assistant",
+      content: message.content || "",
+      tool_calls: (message.tool_calls || []).map(toolCall => ({
+        id: toolCall.id,
+        type: toolCall.type || "function",
+        function: {
+          name: toolCall.function?.name,
+          arguments: toolCall.function?.arguments || "{}"
+        }
+      }))
+    }
+  }
+
+  serializeToolResult(result) {
+    if (result?.content && Array.isArray(result.content)) {
+      return result.content
+        .map(item => item.type === "text" ? item.text : JSON.stringify(item))
+        .join("\n")
+    }
+
+    if (typeof result === "string") return result
+    return JSON.stringify(result ?? "")
+  }
+
+  async runToolCall(toolCall, e, session, senderRole, limit) {
+    const { type, function: funcData } = toolCall
+    if (type !== "function" || !funcData?.name) return null
+
+    const toolName = funcData.name
+    const isMCPTool = mcpManager.isMCPTool(toolName)
+    const isLocalTool = !isMCPTool && this.toolInstances[toolName]
+    const isValidTool = session.tools?.some(t => t.function?.name === toolName)
+
+    if (!isValidTool || (!isMCPTool && !isLocalTool)) {
+      return {
+        toolCall,
+        toolName,
+        result: `error: tool ${toolName} is not available in this session`
+      }
+    }
+
+    let params
+    try {
+      params = JSON.parse(funcData.arguments || "{}")
+    } catch (error) {
+      return {
+        toolCall,
+        toolName,
+        result: `error: invalid JSON arguments: ${error.message}`
+      }
+    }
+
+    if (toolName === "jinyanTool" && senderRole) {
+      params.senderRole = senderRole
+    }
+    if (toolName === "changeCardTool" && senderRole) {
+      params.senderRole = senderRole
+    }
+
+    try {
+      logger.info(`[工具调用] ${isMCPTool ? "MCP" : "本地"} ${toolName}: ${JSON.stringify(params)}`)
+      const rawResult = isMCPTool
+        ? await this.executeTool(toolName, params, e, limit)
+        : await this.executeTool(this.toolInstances[toolName], params, e, limit)
+      const result = this.serializeToolResult(rawResult)
+      return {
+        toolCall,
+        toolName,
+        result: result?.trim() ? result : `工具 ${toolName} 执行成功`
+      }
+    } catch (error) {
+      logger.error(`[工具调用] ${toolName} 执行失败:`, error)
+      return {
+        toolCall,
+        toolName,
+        result: `error: ${error.message}`
+      }
+    }
+  }
+
+  dedupeToolCalls(toolCalls = []) {
+    const seen = new Set()
+    return toolCalls.filter(toolCall => {
+      const key = `${toolCall.function?.name}:${toolCall.function?.arguments || "{}"}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+  }
+
+  async processToolCalls(message, e, session, groupUserMessages, atQq, senderRole, limit) {
+    const MAX_TOOL_ROUNDS = this.config.maxToolRounds || 5
+    let currentMessage = message
+    let currentMessages = [...groupUserMessages]
+    let round = 0
+    const allToolResults = []
+
+    while (currentMessage.tool_calls?.length && round < MAX_TOOL_ROUNDS) {
+      round++
+      const toolCalls = this.dedupeToolCalls(currentMessage.tool_calls)
+      logger.info(`[工具调用] 第 ${round} 轮，共 ${toolCalls.length} 个工具`)
+
+      currentMessages.push(this.normalizeAssistantToolMessage({
+        ...currentMessage,
+        tool_calls: toolCalls
+      }))
+
+      const validResults = (await Promise.all(
+        toolCalls.map(toolCall => this.runToolCall(toolCall, e, session, senderRole, limit))
+      )).filter(Boolean)
+
+      if (validResults.length === 0) break
+
+      allToolResults.push(...validResults)
+      session.toolName = validResults[validResults.length - 1]?.toolName
+
+      currentMessages.push(...validResults.map(({ toolCall, toolName, result }) => ({
+        role: "tool",
+        tool_call_id: toolCall.id,
+        name: toolName,
+        content: result
+      })))
+
+      const nextRequest = this.buildRequestData(currentMessages, session.tools, "auto")
+      const nextResponse = await this.retryRequest(limit, nextRequest, session.toolContent, 1, session.toolName)
+      const nextMessage = nextResponse?.choices?.[0]?.message
+      if (!nextMessage) break
+
+      currentMessage = nextMessage
+      if (!currentMessage.tool_calls?.length && currentMessage.content) {
+        session.toolResults = allToolResults
+        await this.handleTextResponse(
+          currentMessage.content,
+          e,
+          session,
+          currentMessages,
+          limit,
+          session.toolName
+        )
+        return
+      }
+    }
+
+    if (round >= MAX_TOOL_ROUNDS) {
+      logger.warn(`[工具调用] 已达到最大轮数：${MAX_TOOL_ROUNDS}`)
+    }
+
+    session.toolResults = allToolResults
+    const finalRequest = this.buildRequestData(currentMessages, [], "none")
+    const finalResponse = await this.retryRequest(limit, finalRequest, session.toolContent, 1, session.toolName)
+
+    if (finalResponse?.choices?.[0]?.message?.content) {
+      await this.handleTextResponse(
+        finalResponse.choices[0].message.content,
+        e,
+        session,
+        currentMessages,
+        limit,
+        session.toolName
+      )
+    }
+  }
+
   async executeTool(tool, params, e, limit, isRetry = false) {
     try {
       if (typeof tool === "string" && mcpManager.isMCPTool(tool)) {
@@ -1767,11 +1959,19 @@ ${mcpPrompts}
 
     // 保存到 messages 数组
     if (session.toolResults?.length) {
+      const existingToolResultIds = new Set(
+        messages
+          .filter(msg => msg.role === "tool" && msg.tool_call_id)
+          .map(msg => msg.tool_call_id)
+      )
       for (const { toolCall, toolName: tName, result } of session.toolResults) {
         if (result && result.trim() !== '') {
+          const toolCallId = toolCall?.id || randomUUID()
+          if (existingToolResultIds.has(toolCallId)) continue
+          existingToolResultIds.add(toolCallId)
           messages.push({
             role: "tool",
-            tool_call_id: toolCall?.id || randomUUID(),
+            tool_call_id: toolCallId,
             name: tName,
             content: result
           })
@@ -1795,22 +1995,37 @@ ${mcpPrompts}
    */
   async updateEnhancedSystems(e, userMessage, botReply) {
     const { group_id: groupId, user_id: userId } = e
+    let emotionState = null
 
     // 1. 更新情感系统
     if (this.config.emotionSystem?.enabled) {
       const isAtBot = e.message?.some(m => m.type === 'at' && m.qq === Bot.uin)
-      await this.emotionManager.updateEmotionFromMessage(groupId, userMessage, isAtBot)
+      emotionState = await this.emotionManager.updateEmotionFromMessage(groupId, userMessage, isAtBot)
     }
 
     // 2. 提取并保存长期记忆（后台异步）
-    if (this.config.memorySystem?.enabled && this.config.memoryAiConfig) {
+    if (this.config.memorySystem?.enabled) {
       // 不 await，让它在后台执行
-      this.memoryManager.extractAndSaveMemories(groupId, userId, userMessage, botReply)
+      this.memoryManager.extractAndSaveMemories(groupId, userId, userMessage, botReply, {
+        source: "user",
+        messageId: e.message_id,
+        senderName: e.sender?.card || e.sender?.nickname
+      })
+      const latestEmotionEvent = emotionState?.recentEvents?.[0]
+      if (latestEmotionEvent && Number.isFinite(latestEmotionEvent.delta)) {
+        const relationDelta = Math.max(-0.03, Math.min(0.03, latestEmotionEvent.delta * 0.2))
+        if (relationDelta !== 0) {
+          this.memoryManager.updateRelationship(groupId, userId, relationDelta).catch(err => {
+            logger.error('[MemoryManager] 根据情绪更新关系分失败:', err)
+          })
+        }
+      }
       // 提取群全局记忆（传入聊天记录）
       if (groupId) {
         const history = await this.messageManager.getMessages('group', groupId)
-        const chatHistory = (history || []).slice(-20).map(msg => ({
+        const chatHistory = (history || []).slice(0, 40).map(msg => ({
           role: msg.sender?.user_id === Bot.uin ? 'assistant' : 'user',
+          source: msg.source || (msg.sender?.user_id === Bot.uin ? "send" : "user"),
           content: `${msg.sender?.nickname || '未知'}(QQ:${msg.sender?.user_id}): ${msg.content}`
         }))
         this.memoryManager.extractAndSaveGroupMemories(groupId, chatHistory)
@@ -2108,11 +2323,11 @@ ${mcpPrompts}
       // 群全局记忆
       const groupKey = this.memoryManager.getGroupRedisKey(groupId)
       // 该群下所有用户记忆 ytbot:memory:{groupId}:*
-      const userKeys = await redis.keys(`${prefix}${groupId}:*`)
+      const userKeys = await this.scanRedisKeys(`${prefix}${groupId}:*`)
 
       const allKeys = [groupKey, ...userKeys]
       if (allKeys.length) {
-        await redis.del(allKeys)
+        await this.deleteRedisKeys(allKeys)
       }
       await e.reply(`已清除本群记忆（群共识 + ${userKeys.length} 条用户记忆）`)
     } catch (error) {
@@ -2125,6 +2340,253 @@ ${mcpPrompts}
   /**
    * 重载MCP配置（管理员命令）
    */
+  isGroupMemoryAdmin(e) {
+    return Boolean(e.isMaster || ["owner", "admin"].includes(e.sender?.role))
+  }
+
+  formatMemoryTime(timestamp) {
+    if (!timestamp) return "无"
+    return new Date(timestamp).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })
+  }
+
+  formatMemoryFactLines(facts = []) {
+    return facts.map(fact => {
+      const shortId = String(fact.id).slice(0, 8)
+      const score = Number(fact.score ?? fact.importance ?? 0).toFixed(2)
+      return `ID:${shortId} [${fact.category}] ${fact.content} (${score})`
+    })
+  }
+
+  formatMemoryFacts(title, facts = []) {
+    if (!facts.length) return `${title}\n暂无记忆`
+    const lines = this.formatMemoryFactLines(facts)
+    return `${title}\n${lines.join("\n")}\n\n删除单条记忆可发送：#删除记忆 <ID>`.slice(0, 4500)
+  }
+
+  async replyMemoryForward(e, title, sections = []) {
+    const msgs = []
+    for (const section of sections) {
+      const facts = section.facts || []
+      if (!facts.length) {
+        msgs.push(`${section.title}\n暂无记忆`)
+        continue
+      }
+
+      const lines = this.formatMemoryFactLines(facts)
+      for (let i = 0; i < lines.length; i += 12) {
+        const page = Math.floor(i / 12) + 1
+        const total = Math.ceil(lines.length / 12)
+        const header = total > 1 ? `${section.title} (${page}/${total})` : section.title
+        msgs.push(`${header}\n${lines.slice(i, i + 12).join("\n")}`)
+      }
+    }
+
+    msgs.push("删除单条记忆可发送：#删除记忆 <ID>")
+
+    try {
+      const forwardMsg = await common.makeForwardMsg(e, msgs, title)
+      await e.reply(forwardMsg)
+    } catch (error) {
+      logger.warn("[记忆管理] 转发消息发送失败，回退为普通文本:", error)
+      await e.reply(msgs.join("\n\n").slice(0, 4500))
+    }
+  }
+
+  async memoryStatus(e) {
+    try {
+      const status = await this.memoryManager.adminStatus({
+        groupId: e.group_id,
+        userId: e.user_id
+      })
+      const lines = [
+        `记忆系统：${status.enabled ? "开启" : "关闭"}`,
+        `用户记忆：${status.user?.disabled ? "已禁用" : "启用"}，${status.user?.factCount || 0} 条，关系分 ${Number(status.user?.relationshipScore ?? 0.5).toFixed(2)}`,
+        `群记忆：${status.group?.disabled ? "已禁用" : "启用"}，${status.group?.factCount || 0} 条`,
+        `用户上次抽取：${this.formatMemoryTime(status.user?.lastAttemptAt)}`,
+        `群上次抽取：${this.formatMemoryTime(status.group?.lastAttemptAt)}`,
+        `阈值：${status.config.importanceThreshold}，语义召回：${status.config.semanticRecallEnabled ? "开启" : "关闭"}`
+      ]
+      await e.reply(lines.join("\n"))
+    } catch (error) {
+      logger.error("[记忆管理] 读取记忆状态失败:", error)
+      await e.reply("记忆状态读取失败，请看日志")
+    }
+    return true
+  }
+
+  async listMyMemory(e) {
+    try {
+      const result = await this.memoryManager.adminListMemories({
+        scope: "user",
+        groupId: e.group_id,
+        userId: e.user_id,
+        limit: 30
+      })
+      await this.replyMemoryForward(e, "我的记忆", [
+        { title: "我的记忆", facts: result.facts }
+      ])
+    } catch (error) {
+      logger.error("[记忆管理] 读取我的记忆失败:", error)
+      await e.reply("读取我的记忆失败，请看日志")
+    }
+    return true
+  }
+
+  async listGroupMemory(e) {
+    if (!e.group_id) {
+      await e.reply("请在群聊中使用这个命令")
+      return true
+    }
+
+    try {
+      const result = await this.memoryManager.adminListMemories({
+        scope: "group",
+        groupId: e.group_id,
+        limit: 30
+      })
+      await this.replyMemoryForward(e, "群记忆", [
+        { title: "群记忆", facts: result.facts }
+      ])
+    } catch (error) {
+      logger.error("[记忆管理] 读取群记忆失败:", error)
+      await e.reply("读取群记忆失败，请看日志")
+    }
+    return true
+  }
+
+  async searchMemory(e) {
+    const query = String(e.msg || "").replace(/^#搜索记忆\s+/, "").trim()
+    if (!query) {
+      await e.reply("请输入要搜索的关键词")
+      return true
+    }
+
+    try {
+      const myResult = await this.memoryManager.adminListMemories({
+        scope: "user",
+        groupId: e.group_id,
+        userId: e.user_id,
+        query,
+        limit: 10
+      })
+      const groupResult = e.group_id
+        ? await this.memoryManager.adminListMemories({
+            scope: "group",
+            groupId: e.group_id,
+            query,
+            limit: 10
+          })
+        : { facts: [] }
+      await this.replyMemoryForward(e, "搜索记忆", [
+        { title: "我的匹配记忆", facts: myResult.facts },
+        { title: "群匹配记忆", facts: groupResult.facts }
+      ])
+    } catch (error) {
+      logger.error("[记忆管理] 搜索记忆失败:", error)
+      await e.reply("搜索记忆失败，请看日志")
+    }
+    return true
+  }
+
+  async deleteMemory(e) {
+    const id = String(e.msg || "").replace(/^#删除记忆\s+/, "").trim()
+    if (!id) {
+      await e.reply("请输入要删除的记忆 id")
+      return true
+    }
+
+    try {
+      let result = await this.memoryManager.adminDeleteMemory({
+        scope: "user",
+        groupId: e.group_id,
+        userId: e.user_id,
+        id
+      })
+
+      if (!result.deleted && this.isGroupMemoryAdmin(e)) {
+        result = await this.memoryManager.adminDeleteMemory({
+          scope: "group",
+          groupId: e.group_id,
+          id
+        })
+      }
+
+      await e.reply(result.deleted ? `已删除记忆 ${id}` : "没有找到可删除的记忆，普通用户只能删除自己的记忆")
+    } catch (error) {
+      logger.error("[记忆管理] 删除记忆失败:", error)
+      await e.reply("删除记忆失败，请看日志")
+    }
+    return true
+  }
+
+  async clearMyMemory(e) {
+    try {
+      const result = await this.memoryManager.adminClearMemories({
+        scope: "user",
+        groupId: e.group_id,
+        userId: e.user_id
+      })
+      await e.reply(`已清空我的记忆，共 ${result.cleared} 条`)
+    } catch (error) {
+      logger.error("[记忆管理] 清空我的记忆失败:", error)
+      await e.reply("清空我的记忆失败，请看日志")
+    }
+    return true
+  }
+
+  async clearGroupMemory(e) {
+    if (!e.group_id) {
+      await e.reply("请在群聊中使用这个命令")
+      return true
+    }
+    if (!this.isGroupMemoryAdmin(e)) {
+      await e.reply("只有群主、管理员或主人可以清空群记忆")
+      return true
+    }
+
+    try {
+      const result = await this.memoryManager.adminClearMemories({
+        scope: "group",
+        groupId: e.group_id
+      })
+      await e.reply(`已清空本群群记忆，共 ${result.cleared} 条`)
+    } catch (error) {
+      logger.error("[记忆管理] 清空群记忆失败:", error)
+      await e.reply("清空群记忆失败，请看日志")
+    }
+    return true
+  }
+
+  async disableMyMemory(e) {
+    try {
+      await this.memoryManager.adminSetUserMemoryEnabled({
+        groupId: e.group_id,
+        userId: e.user_id,
+        enabled: false
+      })
+      await e.reply("已禁用你的长期记忆")
+    } catch (error) {
+      logger.error("[记忆管理] 禁用我的记忆失败:", error)
+      await e.reply("禁用失败，请看日志")
+    }
+    return true
+  }
+
+  async enableMyMemory(e) {
+    try {
+      await this.memoryManager.adminSetUserMemoryEnabled({
+        groupId: e.group_id,
+        userId: e.user_id,
+        enabled: true
+      })
+      await e.reply("已启用你的长期记忆")
+    } catch (error) {
+      logger.error("[记忆管理] 启用我的记忆失败:", error)
+      await e.reply("启用失败，请看日志")
+    }
+    return true
+  }
+
   async reloadMCP(e) {
     if (!e.isMaster) {
       await e.reply("只有主人才能执行此操作")

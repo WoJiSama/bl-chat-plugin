@@ -38,6 +38,7 @@ export class ExpressionLearner {
     this.messageCounters = new Map()
     // 消息缓存（用于 AI 学习）
     this.pendingMessages = new Map()
+    this.messageBuffers = new Map()
   }
 
   /**
@@ -231,6 +232,83 @@ export class ExpressionLearner {
   /**
    * 使用 AI 从消息样本中提取场景化表达
    */
+  async updateGroupExpressions(groupId, content) {
+    try {
+      const nextCounter = (this.messageCounters.get(groupId) || 0) + 1
+      this.messageCounters.set(groupId, nextCounter)
+
+      if (this.config.aiLearningEnabled && content) {
+        const pending = this.pendingMessages.get(groupId) || []
+        pending.push(content)
+        if (pending.length > this.config.aiLearningMessageThreshold) {
+          pending.shift()
+        }
+        this.pendingMessages.set(groupId, pending)
+      }
+
+      if (!this.messageBuffers) this.messageBuffers = new Map()
+      const buffer = this.messageBuffers.get(groupId) || []
+      if (content) buffer.push(content)
+      if (buffer.length > 50) buffer.shift()
+      this.messageBuffers.set(groupId, buffer)
+
+      if (nextCounter % 5 === 0 && buffer.length) {
+        const expressions = await this.getGroupExpressions(groupId)
+        expressions.messageCount = (expressions.messageCount || 0) + buffer.length
+
+        for (const message of buffer) {
+          const words = this.extractWords(message)
+          const emojis = this.extractEmojis(message)
+          const patterns = this.extractPatterns(message)
+
+          for (const word of words) {
+            expressions.words[word] = (expressions.words[word] || 0) + 1
+          }
+
+          for (const emoji of emojis) {
+            expressions.emojis[emoji] = (expressions.emojis[emoji] || 0) + 1
+          }
+
+          for (const pattern of patterns) {
+            if (!expressions.patterns.includes(pattern)) {
+              expressions.patterns.push(pattern)
+            }
+          }
+        }
+
+        this.messageBuffers.set(groupId, [])
+
+        if (Object.keys(expressions.words).length > this.config.maxWords * 2) {
+          const sorted = Object.entries(expressions.words)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, this.config.maxWords)
+          expressions.words = Object.fromEntries(sorted)
+        }
+
+        if (Object.keys(expressions.emojis).length > 20) {
+          const sorted = Object.entries(expressions.emojis)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 20)
+          expressions.emojis = Object.fromEntries(sorted)
+        }
+
+        await this.saveGroupExpressions(groupId, expressions)
+      }
+
+      if (this.config.aiLearningEnabled && this.config.memoryAiConfig) {
+        const pending = this.pendingMessages.get(groupId) || []
+        if (pending.length >= this.config.aiLearningMessageThreshold) {
+          this.learnStyleWithAI(groupId, [...pending]).catch(err => {
+            logger.error(`[ExpressionLearner] AI 风格学习失败: ${err}`)
+          })
+          this.pendingMessages.set(groupId, [])
+        }
+      }
+    } catch (error) {
+      logger.error(`[ExpressionLearner] 更新群表达习惯失败: ${error}`)
+    }
+  }
+
   async learnStyleWithAI(groupId, messages) {
     const { memoryAiUrl, memoryAiModel, memoryAiApikey } = this.config.memoryAiConfig
 

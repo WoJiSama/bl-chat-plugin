@@ -53,7 +53,19 @@ async function loadNdjson(dbPath) {
   try {
     await access(dbPath)
     const data = await readFile(dbPath, 'utf-8')
-    return data.trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+    return data
+      .split('\n')
+      .map((line, index) => {
+        const trimmed = line.trim()
+        if (!trimmed) return null
+        try {
+          return JSON.parse(trimmed)
+        } catch (error) {
+          logger.warn(`[KnowledgePlugin] 跳过无效的 ndjson 第 ${index + 1} 行：${error.message}`)
+          return null
+        }
+      })
+      .filter(Boolean)
   } catch {
     return []
   }

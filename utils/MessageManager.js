@@ -1,6 +1,7 @@
 import { dependencies } from '../dependence/dependencies.js';
 const { axios, moment } = dependencies;
 import schedule from 'node-schedule';
+import { refreshTencentImageUrl } from './fileUtils.js';
 
 export class MessageManager {
   /**
@@ -45,13 +46,50 @@ export class MessageManager {
    * 清除所有消息历史记录
    * @returns {Promise<void>}
    */
+  async scanRedisKeys(pattern) {
+    try {
+      if (typeof redis.scanIterator === "function") {
+        const keys = [];
+        for await (const key of redis.scanIterator({ MATCH: pattern, COUNT: 200 })) {
+          if (Array.isArray(key)) keys.push(...key);
+          else keys.push(key);
+        }
+        return keys;
+      }
+
+      if (typeof redis.scan === "function") {
+        const keys = [];
+        let cursor = "0";
+        do {
+          const [nextCursor, batch = []] = await redis.scan(cursor, "MATCH", pattern, "COUNT", 200);
+          cursor = String(nextCursor);
+          keys.push(...batch);
+        } while (cursor !== "0");
+        return keys;
+      }
+    } catch (error) {
+      logger.warn(`[MessageManager] SCAN 扫描失败，回退使用 KEYS：${pattern}，原因：${error.message}`);
+    }
+
+    return await redis.keys(pattern);
+  }
+
+  async deleteRedisKeys(keys = []) {
+    for (let i = 0; i < keys.length; i += 200) {
+      const chunk = keys.slice(i, i + 200).filter(Boolean);
+      if (chunk.length) {
+        await redis.del(...chunk);
+      }
+    }
+  }
+
   async clearAllMessages() {
     try {
       // 获取所有以消息前缀开头的键
-      const keys = await redis.keys(`${this.REDIS_KEY_PREFIX}*`);
+      const keys = await this.scanRedisKeys(`${this.REDIS_KEY_PREFIX}*`);
       if (keys && keys.length > 0) {
         // 批量删除所有消息记录
-        await redis.del(...keys);
+        await this.deleteRedisKeys(keys);
         logger.info(`已清除${keys.length}条消息历史记录`);
       } else {
         logger.info('没有需要清除的消息历史记录');
@@ -68,27 +106,9 @@ export class MessageManager {
    * @returns {Promise<string|null>} 处理后的图片URL
    */
   async getImageUrl(message) {
-    const processUrl = async (url, fid) => {
-      if (url.includes('rkey=') && !url.includes('fileid=') && !url.includes(fid)) {
-        const rkey = await this.getRKey(url);
-        const host = await this.extractDomain(url);
-        let appid = 1407;
-        let attempts = 0;
-        while (attempts < 5) {
-          const customUrl = `${host}/download?appid=${appid}&fileid=${fid}&spec=0&rkey=${rkey}`;
-          if (await this.isUrlAvailable(customUrl)) {
-            return customUrl;
-          }
-          appid--;
-          attempts++;
-        }
-      }
-      return url;
-    };
-
     for (const { type, url, fid } of message) {
       if ((type === "image" || type === "file") && url) {
-        return await processUrl(url, fid);
+        return await refreshTencentImageUrl(url, fid);
       }
     }
     return null;
@@ -324,6 +344,7 @@ export class MessageManager {
       content: await this.formatMessageContent(message),
       message_id: message.message_id,
       message_type: message.message_type,
+      source: message.source || null,
       group_id: isGroup ? message.group_id : null,
       group_name: isGroup ? message.group_name : null,
       message: message.message, // 保存原始消息用于后续处理

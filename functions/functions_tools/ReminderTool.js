@@ -7,6 +7,36 @@ const eventCache = new Map()
 const REDIS_KEY_PREFIX = 'bl-chat:reminder:'
 const PENDING_LIST_KEY = `${REDIS_KEY_PREFIX}pending:list`
 const LOCK_KEY = `${REDIS_KEY_PREFIX}lock`
+const EXTRA_ACTION_ALLOWLIST = new Set(['searchMusicTool', 'pokeTool', 'voiceTool'])
+
+function isExtraActionAllowed(toolName) {
+  return typeof toolName === 'string' && EXTRA_ACTION_ALLOWLIST.has(toolName)
+}
+
+async function tryAcquireReminderLock(lockValue, allowExpiredTakeover = false) {
+  try {
+    const result = await redis.set(LOCK_KEY, lockValue, { PX: LOCK_TIMEOUT, NX: true })
+    if (result === 'OK' || result === true) return true
+
+    if (allowExpiredTakeover) {
+      const existing = await redis.get(LOCK_KEY)
+      const lockTime = Number(existing)
+      if (existing && Number.isFinite(lockTime) && Date.now() - lockTime > LOCK_TIMEOUT) {
+        await redis.set(LOCK_KEY, lockValue, { PX: LOCK_TIMEOUT })
+        return true
+      }
+    }
+  } catch (error) {
+    logger.warn(`[ReminderTool] 原子锁获取失败，回退使用旧版锁：${error.message}`)
+    const existing = await redis.get(LOCK_KEY)
+    if (!existing) {
+      await redis.set(LOCK_KEY, lockValue)
+      return true
+    }
+  }
+
+  return false
+}
 const LOCK_TIMEOUT = 5000 // 锁超时时间（毫秒）
 
 /**
@@ -24,8 +54,9 @@ async function acquireLock(timeout = LOCK_TIMEOUT) {
       const lockTime = parseInt(existing)
       if (Date.now() - lockTime > LOCK_TIMEOUT) {
         // 锁已过期，强制获取
-        await redis.set(LOCK_KEY, lockValue)
-        return lockValue
+        if (await tryAcquireReminderLock(lockValue, true)) {
+          return lockValue
+        }
       }
       // 等待一小段时间后重试
       await new Promise(resolve => setTimeout(resolve, 50))
@@ -33,8 +64,10 @@ async function acquireLock(timeout = LOCK_TIMEOUT) {
     }
 
     // 尝试获取锁
-    await redis.set(LOCK_KEY, lockValue)
-    return lockValue
+    if (await tryAcquireReminderLock(lockValue)) {
+      return lockValue
+    }
+    await new Promise(resolve => setTimeout(resolve, 50))
   }
 
   return null // 获取锁超时
@@ -193,6 +226,10 @@ export class ReminderTool extends AbstractTool {
     }
     if (!content) {
       return '创建提醒失败：未提供提醒内容'
+    }
+
+    if (extraAction?.tool && !isExtraActionAllowed(extraAction.tool)) {
+      return `extra_action tool is not allowed: ${extraAction.tool}`
     }
 
     const triggerTime = this.parseTime(timeStr)
@@ -487,6 +524,11 @@ async function triggerReminder(reminderId, toolInstances) {
 
   try {
     // 先处理额外操作（调用工具）
+    if (reminder.extra_action?.tool && !isExtraActionAllowed(reminder.extra_action.tool)) {
+      logger.warn(`[ReminderTool] 已拦截未允许的额外操作工具：${reminder.extra_action.tool}`)
+      reminder.extra_action = null
+    }
+
     if (reminder.extra_action?.tool) {
       const { tool, params } = reminder.extra_action
 

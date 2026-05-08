@@ -1,5 +1,5 @@
 import { AbstractTool } from './AbstractTool.js';
-import { getBase64Image } from '../../utils/fileUtils.js';
+import { getBase64Image, normalizeImageUrls } from '../../utils/fileUtils.js';
 import { dependencies } from "../../dependence/dependencies.js";
 const { mimeTypes } = dependencies;
 import fs from "fs";
@@ -163,15 +163,12 @@ export class GoogleImageAnalysisTool extends AbstractTool {
             const configPath = path.join(process.cwd(), 'plugins/bl-chat-plugin/config/message.yaml');
             const configFile = fs.readFileSync(configPath, 'utf8');
             const config = YAML.parse(configFile).pluginSettings;
-            console.log(opts.images);
             // 确保 opts.images 是数组并处理每个URL
             const rawImages = Array.isArray(opts.images) ? opts.images :
                 typeof opts.images === 'string' ? [opts.images] : [];
 
             // 处理所有图片URL
-            const images = await Promise.all(
-                rawImages.map(url => this.processImageUrl(url))
-            );
+            const images = await normalizeImageUrls(rawImages);
             const prompt = opts.prompt;
 
             if (images.length === 0) {

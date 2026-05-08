@@ -1,9 +1,9 @@
-import { readFile, appendFile, access } from 'fs/promises'
-import crypto from 'crypto'
-import chalk from 'chalk'
+import { access, appendFile, readFile } from "fs/promises"
+import crypto from "crypto"
+import chalk from "chalk"
 
 class KnowledgeExpander {
-  constructor({ apiKey, apiUrl, dbPath = './knowledge-db.ndjson', model = 'text-embedding-3-small' }) {
+  constructor({ apiKey, apiUrl, dbPath = "./knowledge-db.ndjson", model = "text-embedding-3-small" }) {
     this.dbPath = dbPath
     this.model = model
     this.apiKey = apiKey
@@ -12,22 +12,24 @@ class KnowledgeExpander {
 
   async getEmbedding(input) {
     const response = await fetch(this.apiUrl, {
-      method: 'POST',
+      method: "POST",
       headers: {
-        'Authorization': `Bearer ${this.apiKey}`,
-        'Content-Type': 'application/json'
+        Authorization: `Bearer ${this.apiKey}`,
+        "Content-Type": "application/json"
       },
       body: JSON.stringify({ model: this.model, input })
     })
+
     if (!response.ok) {
-      const errorText = await response.text().catch(() => '')
-      throw new Error(`Embedding API 请求失败: ${response.status} ${errorText}`)
+      const errorText = await response.text().catch(() => "")
+      throw new Error(`Embedding API 请求失败：${response.status} ${errorText}`)
     }
+
     return await response.json()
   }
 
   hashText(text) {
-    return crypto.createHash('sha256').update(text).digest('hex')
+    return crypto.createHash("sha256").update(String(text).trim()).digest("hex")
   }
 
   async fileExists(filepath) {
@@ -39,75 +41,111 @@ class KnowledgeExpander {
     }
   }
 
-  async loadKnowledgeDB() {
-    if (!(await this.fileExists(this.dbPath))) {
-      console.log(chalk.yellow(`未找到知识库 ${this.dbPath}，初始化新库。`))
-      return []
+  parseKnowledgeLine(line, index) {
+    if (!line) return null
+
+    try {
+      const item = JSON.parse(line)
+      if (!item?.text || !Array.isArray(item.embedding)) return null
+      return item
+    } catch (error) {
+      globalThis.logger?.warn?.(`[KnowledgeExpander] 跳过无效的 ndjson 第 ${index + 1} 行：${error.message}`)
+      return null
     }
-    const data = await readFile(this.dbPath, 'utf-8')
-    return data.trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
   }
 
-  async appendKnowledgeItem(item) {
-    const line = JSON.stringify(item) + '\n'
-    await appendFile(this.dbPath, line, 'utf-8')
+  async loadKnowledgeDB() {
+    if (!(await this.fileExists(this.dbPath))) {
+      console.log(chalk.yellow(`[KnowledgeExpander] 未找到知识库文件：${this.dbPath}`))
+      return []
+    }
+
+    const data = await readFile(this.dbPath, "utf-8")
+    return data
+      .split("\n")
+      .map((line, index) => this.parseKnowledgeLine(line.trim(), index))
+      .filter(Boolean)
+  }
+
+  async appendKnowledgeItems(items) {
+    if (!items.length) return
+    const lines = items.map(item => JSON.stringify(item)).join("\n") + "\n"
+    await appendFile(this.dbPath, lines, "utf-8")
   }
 
   async expandSingle(text) {
     try {
-      const res = await this.getEmbedding(text)
-      const embedding = res.data[0].embedding
-      const hash = this.hashText(text)
+      const normalizedText = String(text || "").trim()
+      if (!normalizedText) return false
 
-      await this.appendKnowledgeItem({ text, hash, embedding })
+      const res = await this.getEmbedding(normalizedText)
+      const embedding = res.data?.[0]?.embedding
+      if (!Array.isArray(embedding)) return false
+
+      await this.appendKnowledgeItems([{
+        text: normalizedText,
+        hash: this.hashText(normalizedText),
+        embedding
+      }])
       return true
     } catch (error) {
-      console.error(chalk.red('生成Embedding失败：'), error.message)
+      console.error(chalk.red("[KnowledgeExpander] embedding 生成失败:"), error.message)
       return false
     }
   }
 
   async expand(knowledgeTexts) {
-    if (!Array.isArray(knowledgeTexts)) {
-      knowledgeTexts = [knowledgeTexts]
+    const incomingTexts = (Array.isArray(knowledgeTexts) ? knowledgeTexts : [knowledgeTexts])
+      .map(text => String(text || "").trim())
+      .filter(Boolean)
+
+    if (!incomingTexts.length) {
+      return { added: 0, total: 0, success: false }
     }
 
     const db = await this.loadKnowledgeDB()
-    const existingHashes = new Set(db.map(item => item.hash))
-    const newTexts = knowledgeTexts.filter(text => !existingHashes.has(this.hashText(text)))
+    const existingHashes = new Set(db.map(item => item.hash || this.hashText(item.text)))
+    const seenHashes = new Set(existingHashes)
+    const newTexts = []
 
-    if (newTexts.length === 0) {
-      console.log(chalk.green('知识库无新增。'))
-      return { added: 0, total: knowledgeTexts.length }
+    for (const text of incomingTexts) {
+      const hash = this.hashText(text)
+      if (seenHashes.has(hash)) continue
+      seenHashes.add(hash)
+      newTexts.push(text)
     }
 
-    console.log(chalk.blue(`发现 ${newTexts.length} 条新知识，开始添加到 ${this.dbPath}...`))
+    if (newTexts.length === 0) {
+      console.log(chalk.green("[KnowledgeExpander] 所有知识都已存在"))
+      return { added: 0, total: incomingTexts.length, success: true }
+    }
+
+    console.log(chalk.blue(`[KnowledgeExpander] 正在写入 ${newTexts.length} 条知识到 ${this.dbPath}`))
 
     try {
       const res = await this.getEmbedding(newTexts)
-      const embeddings = res.data.map(d => d.embedding)
+      const embeddings = res.data?.map(d => d.embedding) || []
+      const items = newTexts
+        .map((text, index) => ({
+          text,
+          hash: this.hashText(text),
+          embedding: embeddings[index]
+        }))
+        .filter(item => Array.isArray(item.embedding))
 
-      for (let i = 0; i < newTexts.length; i++) {
-        const text = newTexts[i]
-        const embedding = embeddings[i]
-        const hash = this.hashText(text)
+      await this.appendKnowledgeItems(items)
 
-        await this.appendKnowledgeItem({ text, hash, embedding })
-      }
-
-      console.log(chalk.green(`添加成功：${newTexts.length} 条，跳过重复：${knowledgeTexts.length - newTexts.length} 条`))
-
+      console.log(chalk.green(`[KnowledgeExpander] 已新增 ${items.length} 条，跳过 ${incomingTexts.length - items.length} 条`))
       return {
-        added: newTexts.length,
-        total: knowledgeTexts.length,
-        success: true
+        added: items.length,
+        total: incomingTexts.length,
+        success: items.length > 0
       }
     } catch (error) {
-      console.error(chalk.red('批量生成Embedding失败：'), error.message)
-      console.log(chalk.yellow('降级为逐条添加...'))
+      console.error(chalk.red("[KnowledgeExpander] 批量 embedding 失败:"), error.message)
+      console.log(chalk.yellow("[KnowledgeExpander] 回退为逐条生成 embedding"))
 
       let successCount = 0
-
       for (const text of newTexts) {
         const success = await this.expandSingle(text)
         if (success) successCount++
@@ -115,7 +153,7 @@ class KnowledgeExpander {
 
       return {
         added: successCount,
-        total: knowledgeTexts.length,
+        total: incomingTexts.length,
         success: successCount > 0
       }
     }

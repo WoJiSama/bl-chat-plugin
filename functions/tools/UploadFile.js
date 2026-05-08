@@ -1,5 +1,6 @@
 import axios from '../../node_modules/axios/index.js';
 import { dependencies } from "../../dependence/dependencies.js";
+import { refreshTencentImageUrl } from '../../utils/fileUtils.js';
 const { mimeTypes } = dependencies;
 
 /**
@@ -76,7 +77,7 @@ async function TakeImages(e) {
 
     for (const { type, url, fid } of message) {
       if ((type === "image" || type === "file") && url) {
-        return await processUrl(url, fid);
+        return await refreshTencentImageUrl(url, fid);
       }
     }
     return null;

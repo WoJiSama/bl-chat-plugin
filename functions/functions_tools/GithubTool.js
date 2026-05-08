@@ -80,7 +80,7 @@ export class GitHubRepoTool extends AbstractTool {
       const data = await this.fetchGitHubAPI(apiPath);
       return Array.isArray(data) ? data : [];
     } catch (error) {
-      console.error(`[safeGetArray] ${apiPath} 失败:`, error.message);
+      console.error(`[安全获取数组] ${apiPath} 失败:`, error.message);
       return [];
     }
   }
@@ -111,7 +111,7 @@ export class GitHubRepoTool extends AbstractTool {
           this.safeGetArray(`${basePath}/contributors?per_page=5`)
         ]);
 
-      logger.info(`[数据统计] commits: ${commitsData.length}, issues: ${issuesData.length}, pulls: ${pullsData.length}, branches: ${branchesData.length}, contributors: ${contributorsData.length}`);
+      logger.info(`[数据统计] 提交: ${commitsData.length}, Issues: ${issuesData.length}, PR: ${pullsData.length}, 分支: ${branchesData.length}, 贡献者: ${contributorsData.length}`);
 
       // 格式化提交信息
       const commits = commitsData.map((commit, index) => ({

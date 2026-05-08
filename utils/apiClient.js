@@ -17,7 +17,7 @@ export async function YTapi(requestData, config, toolContent, toolName) {
             // useTools 开启，先调用 OpenAI API
             const openaiUrl = `${config.toolsAiConfig.toolsAiUrl}`;
             // 确保使用OpenAiModel的模型
-            if (!config.toolsAiConfig.toolsAiApikey) return { error: "OpenAI stoken is not configured" };
+            if (!config.toolsAiConfig.toolsAiApikey) return { error: "OpenAI Token 未配置" };
 
             const openaiHeaders = {
                 'Authorization': `Bearer ${config.toolsAiConfig.toolsAiApikey}`,
@@ -41,24 +41,24 @@ export async function YTapi(requestData, config, toolContent, toolName) {
                 });
 
                 if (!openaiResponse.ok) {
-                    const errorText = await openaiResponse.text().catch(() => 'Unable to read error text');
-                    logger.error(`OpenAI API request failed: ${openaiResponse.status} ${openaiResponse.statusText} - ${errorText}`);
+                    const errorText = await openaiResponse.text().catch(() => '无法读取错误内容');
+                    logger.error(`OpenAI API 请求失败：${openaiResponse.status} ${openaiResponse.statusText} - ${errorText}`);
                     return
-                    return { error: `OpenAI API request failed: ${openaiResponse.status} ${openaiResponse.statusText} - ${errorText}` };
+                    return { error: `OpenAI API 请求失败：${openaiResponse.status} ${openaiResponse.statusText} - ${errorText}` };
                 }
             } catch (openaiFetchError) {
-                logger.error("OpenAI API request failed:", openaiFetchError);
+                logger.error("OpenAI API 请求失败:", openaiFetchError);
                 return
-                return { error: `OpenAI API request failed: ${openaiFetchError.message}` };
+                return { error: `OpenAI API 请求失败：${openaiFetchError.message}` };
             }
 
             let openaiData;
             try {
                 openaiData = await openaiResponse.json();
-                logger.error('OpenAI Response:', JSON.stringify(openaiData, null, 2));
+                logger.error('OpenAI 响应:', JSON.stringify(openaiData, null, 2));
             } catch (openaiJsonError) {
-                console.error("Failed to parse OpenAI response JSON:", openaiJsonError);
-                return { error: `Failed to parse OpenAI response JSON: ${openaiJsonError.message}` };
+                console.error("解析 OpenAI 响应 JSON 失败:", openaiJsonError);
+                return { error: `解析 OpenAI 响应 JSON 失败：${openaiJsonError.message}` };
             }
 
             // 检查是否包含 tool_calls，无论 finish_reason 是什么
@@ -70,7 +70,7 @@ export async function YTapi(requestData, config, toolContent, toolName) {
 
             // 检查 OneAPI 配置
             if (!config.chatAiConfig.chatApiUrl || !config.chatAiConfig.chatApiModel || !config.chatAiConfig.chatApiKey?.length) {
-                return { error: "OneAPI URL, Model, or API Key is not configured" };
+                return { error: "OneAPI URL、模型或 API Key 未配置" };
             }
             url = config.chatAiConfig.chatApiUrl.endsWith('completions') ? config.chatAiConfig.chatApiUrl : `${config.chatAiConfig.chatApiUrl}/v1/chat/completions`;
             const oneApiKey = config.chatAiConfig.chatApiKey;
@@ -82,7 +82,7 @@ export async function YTapi(requestData, config, toolContent, toolName) {
             // 处理消息，过滤并转换 tool_calls 相关内容
             const processedMessages = requestData.messages
                 .map(msg => {
-                    if (msg.role === 'assistant' && msg.tool_calls && toolName) {
+                    if (msg.role === 'assistant' && msg.tool_calls?.length) {
                         //return null; // 跳过含 tool_calls 的 assistant 消息
                         const prefix = `你需要使用 ${toolName} 来处理用户的需求\n`;
                         return {
@@ -102,13 +102,13 @@ export async function YTapi(requestData, config, toolContent, toolName) {
 
             finalRequestData = {
                 model: config.chatAiConfig.chatApiModel,
-                messages: processedMessages,
+                messages: convertToolMessagesForChat(requestData.messages, toolName),
                 stream: false
             };
         } else {
             // useTools 关闭，直接使用 OneAPI
             if (!config.chatAiConfig.chatApiUrl || !config.chatAiConfig.chatApiModel || !config.chatAiConfig.chatApiKey?.length) {
-                return { error: "OneAPI URL, Model, or API Key is not configured" };
+                return { error: "OneAPI URL、模型或 API Key 未配置" };
             }
             url = config.chatAiConfig.chatApiUrl.endsWith('completions') ? config.chatAiConfig.chatApiUrl : `${config.chatAiConfig.chatApiUrl}/v1/chat/completions`;
             const oneApiKey = config.chatAiConfig.chatApiKey[Math.floor(Math.random() * config.chatAiConfig.chatApiKey.length)];
@@ -126,7 +126,7 @@ export async function YTapi(requestData, config, toolContent, toolName) {
         // 发送 API 请求
 
         if (!url || !headers || !finalRequestData) {
-            return { error: "Missing required request parameters (URL, headers, or request data)" };
+            return { error: "缺少必要的请求参数（URL、headers 或请求体）" };
         }
 
         let response;
@@ -134,8 +134,8 @@ export async function YTapi(requestData, config, toolContent, toolName) {
             delete finalRequestData.tools;
             delete finalRequestData.tool_choice;
         }
-        finalRequestData.messages = removeToolPromptsFromMessages(requestData.messages)
-        console.log('Final Request Data:', finalRequestData);
+        finalRequestData.messages = removeToolPromptsFromMessages(finalRequestData.messages || requestData.messages)
+        console.log('最终请求体:', finalRequestData);
         try {
             response = await fetch(url, {
                 method: 'POST',
@@ -144,30 +144,30 @@ export async function YTapi(requestData, config, toolContent, toolName) {
             });
 
             if (!response.ok) {
-                const errorText = await response.text().catch(() => 'Unable to read error text');
-                logger.error(`API request failed: ${response.status} ${response.statusText} - ${errorText}`);
+                const errorText = await response.text().catch(() => '无法读取错误内容');
+                logger.error(`API 请求失败：${response.status} ${response.statusText} - ${errorText}`);
                 return
-                return { error: `API request failed: ${response.status} ${response.statusText} - ${errorText}` };
+                return { error: `API 请求失败：${response.status} ${response.statusText} - ${errorText}` };
             }
         } catch (fetchError) {
-            console.error(`${provider || 'API'} request failed:`, fetchError);
+            console.error(`${provider || 'API'} 请求失败:`, fetchError);
             return
-            return { error: `${provider || 'API'} request failed: ${fetchError.message}` };
+            return { error: `${provider || 'API'} 请求失败：${fetchError.message}` };
         }
 
         let responseData;
         try {
             responseData = await response.json();
-            console.log(`${provider || 'API'} Response:`, JSON.stringify(responseData, null, 2));
+            console.log(`${provider || 'API'} 响应:`, JSON.stringify(responseData, null, 2));
         } catch (jsonError) {
-            console.error(`Failed to parse ${provider || 'API'} response JSON:`, jsonError);
-            return { error: `Failed to parse ${provider || 'API'} response JSON: ${jsonError.message}` };
+            console.error(`解析 ${provider || 'API'} 响应 JSON 失败:`, jsonError);
+            return { error: `解析 ${provider || 'API'} 响应 JSON 失败：${jsonError.message}` };
         }
         return processResponse(responseData);
 
     } catch (error) {
-        console.error('YTapi Error:', error);
-        return { error: `Unexpected error: ${error.message}` };
+        console.error('YTapi 异常:', error);
+        return { error: `发生异常：${error.message}` };
     }
 }
 
@@ -176,6 +176,88 @@ export async function YTapi(requestData, config, toolContent, toolName) {
  * @param {Object|Array} responseData - API 响应数据
  * @returns {Object} - 处理后的响应数据
  */
+function convertToolMessagesForChat(messages = [], fallbackToolName = 'tool') {
+    const converted = [];
+
+    for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i];
+
+        if (msg.role === 'assistant' && msg.tool_calls?.length) {
+            const requests = msg.tool_calls.map((toolCall, index) => {
+                const name = toolCall.function?.name || fallbackToolName || 'tool';
+                const args = toolCall.function?.arguments || '{}';
+                return `${index + 1}. ${name} ${args}`;
+            });
+
+            const results = [];
+            while (messages[i + 1]?.role === 'tool') {
+                i++;
+                const toolMsg = messages[i];
+                const name = toolMsg.name || fallbackToolName || 'tool';
+                results.push(`${results.length + 1}. ${summarizeToolResultForChat(name, toolMsg.content)}`);
+            }
+
+            converted.push({
+                role: 'system',
+                content: [
+                    '[tool_execution]',
+                    'requests:',
+                    ...requests,
+                    results.length ? 'results:' : null,
+                    ...results
+                ].filter(Boolean).join('\n')
+            });
+            continue;
+        }
+
+        if (msg.role === 'tool') {
+            const name = msg.name || fallbackToolName || 'tool';
+            converted.push({
+                role: 'system',
+                content: `[tool_execution]\nresults:\n1. ${summarizeToolResultForChat(name, msg.content)}`
+            });
+            continue;
+        }
+
+        converted.push(msg);
+    }
+
+    return converted.filter(Boolean);
+}
+
+function summarizeToolResultForChat(toolName, content = '') {
+    const text = String(content || '');
+
+    if (toolName === 'voiceTool') {
+        const match = text.match(/发送语音内容\(([\s\S]*?)\)成功/) || text.match(/é™æˆ¦â‚¬ä½½î‡¢é—Šå†²å”´ç€¹\?([\s\S]*?)\)/);
+        const spokenText = match?.[1] || '';
+        return [
+            `name: ${toolName}`,
+            'status: success',
+            spokenText ? `spoken_text: ${spokenText}` : null
+        ].filter(Boolean).join('\n');
+    }
+
+    if (toolName === 'pokeTool') {
+        try {
+            const parsed = JSON.parse(text);
+            const targets = parsed.success?.targets || [];
+            const totalTimes = targets.reduce((sum, item) => sum + (Number(item.times) || 0), 0);
+            return [
+                `name: ${toolName}`,
+                `status: ${parsed.errors?.length ? 'partial_success' : 'success'}`,
+                `target_count: ${targets.length}`,
+                `total_times: ${totalTimes}`,
+                `raw: ${text}`
+            ].join('\n');
+        } catch {
+            return `name: ${toolName}\ncontent: ${text}`;
+        }
+    }
+
+    return `name: ${toolName}\ncontent: ${text}`;
+}
+
 function processResponse(responseData) {
     // 处理数组响应（兼容某些 API 返回数组的情况）
     if (Array.isArray(responseData) && responseData.length > 0) {

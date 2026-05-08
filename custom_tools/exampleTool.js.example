@@ -1,0 +1,75 @@
+// 使用方法：
+// 1. 复制本文件，并改名为 customEchoTool.js 这类 .js 文件
+// 2. 修改下面的类名、this.name、this.description、this.parameters
+// 3. 在 plugins/bl-chat-plugin/config/message.yaml 的 oneapi_tools 里加入 this.name
+//
+// 注意：
+// - 自定义工具文件放在 custom_tools 目录，默认不会被 git 跟踪，插件更新不会覆盖
+// - this.name 不要和内置工具重名，例如 pokeTool、voiceTool、searchMusicTool 等
+// - 模型只会看到 name、description、parameters，不会看到你的代码注释
+// - func(opts, e) 里的 opts 是模型传入的参数，e 是当前 Yunzai 消息事件
+
+import { AbstractTool } from "../functions/functions_tools/AbstractTool.js"
+
+export class CustomExampleTool extends AbstractTool {
+  constructor() {
+    super()
+
+    // 工具唯一名称：必须和 oneapi_tools 里填写的名字一致
+    // 建议使用 custom 开头，避免和内置工具重名
+    this.name = "customExampleTool"
+
+    // 工具描述：写给模型看的，决定模型什么时候会调用这个工具
+    // 描述要清楚说明“这个工具能做什么、什么时候该用”
+    this.description = "示例自定义工具：把用户传入的文本整理成一段回复，可选择是否附带发送者信息"
+
+    // 参数 schema：写给模型看的，模型会按这个结构传参
+    // type 常用 string / number / boolean / array / object
+    this.parameters = {
+      type: "object",
+      properties: {
+        text: {
+          type: "string",
+          description: "需要处理的文本"
+        },
+        includeSender: {
+          type: "boolean",
+          description: "是否在结果里附带发送者昵称，默认 false"
+        },
+        repeatTimes: {
+          type: "number",
+          description: "重复输出次数，1 到 5 之间，默认 1",
+          minimum: 1,
+          maximum: 5
+        }
+      },
+      // required 里写必填参数；不写进去就是可选参数
+      required: ["text"]
+    }
+  }
+
+  // opts 是模型根据 parameters 传进来的参数
+  // e 是当前消息事件，可读取 e.group_id、e.user_id、e.sender、e.reply() 等
+  async func(opts, e) {
+    const text = String(opts.text || "").trim()
+    const repeatTimes = Math.min(Math.max(Number(opts.repeatTimes || 1), 1), 5)
+
+    if (!text) {
+      return "error: text 不能为空"
+    }
+
+    const lines = Array.from({ length: repeatTimes }, () => `收到：${text}`)
+
+    if (opts.includeSender) {
+      const senderName = e?.sender?.card || e?.sender?.nickname || e?.user_id || "未知用户"
+      lines.unshift(`发送者：${senderName}`)
+    }
+
+    // 返回字符串即可，插件会把结果交给模型整理成自然回复
+    // 如果这里直接 await e.reply("xxx") 也可以，但通常更建议 return 结果
+    return lines.join("\n")
+  }
+}
+
+// 也可以使用默认导出，注册器同样能识别：
+// export default CustomExampleTool

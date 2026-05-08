@@ -24,6 +24,14 @@ pnpm install
 
 
 # 插件指令
+### 更新插件（仅主人）
+#bl更新
+#bl强制更新
+#对话插件更新
+#对话插件强制更新
+
+> 强制更新会放弃插件目录内的本地修改后再拉取远程更新，平时建议优先使用 `#bl更新`。
+
 ### 添加ai对话白名单
 #全局方案添加白名单群组 xxx
 
@@ -58,6 +66,16 @@ pnpm install
 ### 查看知识库统计
 #知识库统计
 
+### 记忆系统管理
+#记忆状态
+#我的记忆
+#群记忆
+#搜索记忆 [关键词]
+#删除记忆 [记忆ID]
+#清空我的记忆
+#清空群记忆
+#禁用我的记忆
+#启用我的记忆
 
 # mcp-servers.yaml配置说明
 已实现MCP官方3种标准连接方式（Stdio、SSE、Streamable HTTP）设置type即可("sse","stdio","http")，默认stdio。例sse链接：
@@ -129,17 +147,32 @@ systemPrompt: |
 
 ### 长期记忆系统 (`memorySystem`)
 
-让机器人记住用户的喜好、身份等信息，按类别分组存储。**每个群的每个用户独立**。
+长期记忆系统可以让机器人记住用户喜好、身份、习惯、群内常聊话题和群共识。**每个群的每个用户独立记忆**，群记忆则作为本群公共记忆单独维护。
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
 | `enabled` | boolean | `false` | **长期记忆开关** |
 | `maxFactsPerUser` | int | `100` | **每用户最大记忆条数**（所有类别总计） |
 | `maxFactsPerGroup` | int | `50` | **每群最大全局记忆条数**（所有类别总计） |
-| `importanceThreshold` | float | `0.5` | **重要性阈值**：低于此值的记忆会被遗忘 |
-| `memoryDecayDays` | int | `7` | **记忆衰减天数**：超过此天数未使用的记忆会降低重要性 |
+| `importanceThreshold` | float | `0.5` | **重要性阈值**：低于此值的事实不会保存 |
+| `memoryDecayDays` | int | `7` | 记忆召回时参考的时效天数 |
+| `userExtractDebounceSeconds` | int | `90` | 用户记忆多久整理一次 |
+| `userExtractMaxBatchMessages` | int | `6` | 用户累计多少条消息后立即整理 |
+| `groupExtractMinIntervalMinutes` | int | `10` | 群记忆最小整理间隔 |
+| `groupExtractMaxBatchMessages` | int | `12` | 群累计多少条消息后立即整理 |
+| `promptMaxUserFacts` | int | `8` | 注入 prompt 的用户记忆最大条数 |
+| `promptMaxGroupFacts` | int | `6` | 注入 prompt 的群记忆最大条数 |
+| `promptMaxChars` | int | `1200` | 记忆 prompt 总字符上限 |
+| `semanticRecallEnabled` | boolean | `false` | 是否启用 embedding 语义召回，默认关闭 |
+| `semanticRecallTopK` | int | `20` | 语义召回时先筛选多少条候选记忆，只有开启语义召回时才会用到 |
 
 > **重要提示**：开启长期记忆系统需要配置 `memoryAiConfig`，用于调用 AI 提取值得记忆的信息。
+> 如果开启 `semanticRecallEnabled: true`，还需要配置 `embeddingAiConfig`；不确定的话保持默认关闭即可。
+
+**使用说明**：
+- 记忆整理是后台异步执行的，不会阻塞正常聊天。
+- 工具调用结果、机器人自己的回复、系统提示不会被保存进记忆。
+- 旧版记忆会自动兼容迁移，不需要手动清空。
 
 **用户记忆分类**：提取的记忆会自动归类到以下类别：
 - `identity` 身份（职业、学历、性别、所在地）
@@ -156,6 +189,15 @@ systemPrompt: |
 - `meme` 群内梗/流行语
 - `event` 群内重要事件
 - `member` 群成员相关共识（如"小明是群里的技术大佬"）
+
+**管理命令与权限**：
+- `#记忆状态`：查看当前用户和本群记忆状态。
+- `#我的记忆`：查看自己的用户记忆，结果会以合并转发返回，避免刷屏。
+- `#群记忆`：查看本群群记忆，结果会以合并转发返回，避免刷屏。
+- `#搜索记忆 <关键词>`：搜索自己的用户记忆和本群群记忆，结果会以合并转发返回，避免刷屏。
+- `#删除记忆 <ID>`：ID 可以从 `#我的记忆`、`#群记忆` 或 `#搜索记忆 <关键词>` 的结果里看到，例如 `ID:1a2b3c4d`，删除时发送 `#删除记忆 1a2b3c4d`。普通用户只能删除自己的记忆；群主、管理员、主人可删除群记忆。
+- `#清空我的记忆` / `#禁用我的记忆` / `#启用我的记忆`：管理自己的用户记忆。
+- `#清空群记忆`：仅群主、管理员、主人可用。
 
 **效果示例**：
 - 用户说"我是程序员，喜欢原神，养了只猫叫咪咪"
@@ -179,6 +221,7 @@ systemPrompt: |
 | `aiLearningMessageThreshold` | int | `50` | **AI 学习消息阈值**：积累多少条消息后触发一次 AI 学习 |
 
 > **说明**：AI 场景化学习复用 `memoryAiConfig` 配置。如果未配置 `memoryAiConfig`，则自动降级为词频统计模式。
+> 当前实现会自动积累一段时间的群聊样本再学习，不会每条消息都调用模型。
 
 **效果示例**（AI 场景化学习）：
 - 群友常用"绝绝子"表示赞叹、"笑死"表示无语
@@ -206,8 +249,11 @@ systemPrompt: |
 | `threshold` | float | `0.35` | **相似度阈值**：0~1，只有相似度 ≥ 此值的知识才会被返回，建议 0.3~0.5 |
 
 > **重要提示**：开启知识库需要配置 `embeddingAiConfig`，用于调用 Embedding 模型生成文本向量。
+> 如果知识库文件里有少量损坏数据，插件会自动跳过，不会影响整体检索。
 
 **自动导入**：插件内置了 1400+ 条中文互联网热梗知识（来自 [CHIME](https://github.com/yuboxie/chime) 数据集）。首次启动时如果知识库为空，会自动在后台导入，无需手动操作，导入过程不影响其他功能使用。
+
+**检索优化**：知识库会自动缓存和去重，批量添加失败时会尝试逐条添加，日常使用无需手动维护。
 
 **使用方式**：
 1. 单条添加：`#知识库添加 yyds是"永远的神"的拼音缩写，表示某人或某物非常厉害`
@@ -329,11 +375,11 @@ memoryAiModel: "gpt-4o-mini"    # 推荐使用小模型，省钱且响应快
 memoryAiApikey: "sk-xxxxx"
 ```
 
-**说明**：每次对话后会异步调用此模型，提取用户消息中值得记忆的信息（如喜好、身份等）。推荐使用 `gpt-4o-mini`、`gemini-2.0-flash` 等小模型。
+**说明**：用户记忆和群记忆会按 debounce 批处理异步调用此模型，提取值得长期保存的事实。推荐使用 `gpt-4o-mini`、`gemini-2.0-flash` 等小模型。
 
 ### Embedding 模型配置 (`embeddingAiConfig`)
 
-> ⚠️ **仅在开启 `knowledgeSystem.enabled: true` 时需要配置**
+> ⚠️ **开启 `knowledgeSystem.enabled: true` 或 `memorySystem.semanticRecallEnabled: true` 时需要配置**
 
 ```yaml
 embeddingApiUrl: "https://api.openai.com/v1/embeddings"
@@ -341,7 +387,7 @@ embeddingApiModel: "text-embedding-3-small"
 embeddingApiKey: "sk-xxxxx"
 ```
 
-**说明**：知识库使用 Embedding 模型将文本转为向量进行语义检索。URL 为完整路径（`/v1/embeddings`），不是 `/v1/chat/completions`。大部分 OpenAI 兼容的中转站都支持此接口。
+**说明**：知识库使用 Embedding 模型将文本转为向量进行语义检索；记忆系统在开启语义召回时也会复用此配置。URL 为完整路径（`/v1/embeddings`），不是 `/v1/chat/completions`。大部分 OpenAI 兼容的中转站都支持此接口。
 
 ### 启用工具列表 (`oneapi_tools`)
 ```yaml
@@ -370,9 +416,84 @@ embeddingApiKey: "sk-xxxxx"
 - reminderTool      # 定时提醒工具
 ```
 
+**工具调用说明**：
+- 支持连续多次调用工具，例如先搜索再解析网页、先查资料再生成回复。
+- 插件会自动整理工具结果，尽量避免机器人把工具函数名、代码格式或内部执行细节说出来。
+- 语音、戳一戳等工具执行后，机器人会更自然地回复，不会反复强调“我已经调用了某某工具”。
+- 工具结果不会进入长期记忆。
+
+### 自定义本地工具
+
+如果你想自己写工具，不要修改 `functions/functions_tools` 里的自带工具文件。请把自己的工具放到：
+
+```text
+plugins/bl-chat-plugin/custom_tools/
+```
+
+这个目录下的 `.js` 工具文件默认不会被 Git 跟踪，后续使用 `#bl更新` 或 `git pull` 更新插件时不会覆盖你的自定义工具。
+
+**使用步骤**：
+1. 复制 `custom_tools/exampleTool.js.example` 为新的 `.js` 文件，例如 `customEchoTool.js`。
+2. 修改工具类名> export class [请修改此处类名]、`this.name`、`description`、`parameters`。
+3. 你自行实现func()方法，return返回某个值或错误。
+4. 在 `config/message.yaml` 的 `oneapi_tools` 里加入你的工具名，例如 `customEchoTool`。
+5. 重启机器人，或修改一次 `message.yaml` 触发配置热更新。
+
+**最简模板**：
+```js
+import { AbstractTool } from "../functions/functions_tools/AbstractTool.js"
+
+export class CustomWeatherTool extends AbstractTool {
+  constructor() {
+    super()
+    this.name = "customWeatherTool"
+    this.description = "查询指定城市的当前天气，当用户询问天气、温度、湿度或风速时使用"
+    this.parameters = {
+      type: "object",
+      properties: {
+        city: {
+          type: "string",
+          description: "要查询天气的城市名称，例如：上海、北京、广州"
+        }
+      },
+      required: ["city"]
+    }
+  }
+
+  async func(opts, e) {
+    const city = String(opts.city || "").trim()
+    if (!city) return "error: city 不能为空"
+
+    try {
+      const url = `https://wttr.in/${encodeURIComponent(city)}?format=j1&lang=zh`
+      const res = await fetch(url)
+      if (!res.ok) return `error: 查询天气失败，HTTP ${res.status}`
+
+      const data = await res.json()
+      const now = data.current_condition?.[0]
+      if (!now) return "error: 没有获取到天气数据"
+
+      const desc = now.weatherDesc?.[0]?.value || "未知"
+      return `${city}当前天气：${desc}，气温 ${now.temp_C}℃，体感 ${now.FeelsLikeC}℃，湿度 ${now.humidity}%，风速 ${now.windspeedKmph} km/h`
+    } catch (error) {
+      return `error: 查询天气失败：${error.message}`
+    }
+  }
+}
+```
+
+**注意事项**：
+- 推荐继承 `../functions/functions_tools/AbstractTool.js`，和内置工具使用同一套写法。
+- 自定义工具名不能和内置工具重复，重复时会拒绝加载自定义版本并保留内置工具。
+- 工具文件写错或执行报错只会记录日志/返回 `error`，不会影响其它工具和正常聊天。
+
 ---
 
 ## 特别说明
+
+### 定时提醒工具 (reminderTool)
+
+提醒工具支持到点后发送提醒，也可以附带少量安全动作。目前附带动作只允许 `searchMusicTool`、`pokeTool`、`voiceTool`，避免误触发高风险工具。多实例运行时会自动避免重复触发。
 
 ### 抢红包工具 (grabRedBagTool)
 

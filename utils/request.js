@@ -8,7 +8,7 @@ const POSTMAN_UA = "PostmanRuntime/7.29.0"
 
 class HTTPResponseError extends Error {
   constructor(response) {
-    super(`HTTP Error Response: ${response.status} ${response.statusText}`)
+    super(`HTTP 响应错误：${response.status} ${response.statusText}`)
     this.response = response
   }
 }
@@ -82,7 +82,7 @@ export default new class {
     options = this._prepareRequest(options)
 
     if (options.data) {
-      logger.debug(`POST request params data: `, JSON.stringify(options))
+      logger.debug("POST 请求参数：", JSON.stringify(options))
       if (/json/.test(options.headers["Content-Type"])) {
         options.body = JSON.stringify(options.data)
       } else if (/x-www-form-urlencoded/.test(options.headers["Content-Type"])) {
@@ -184,9 +184,9 @@ export default new class {
       headers,
       responseType: "buffer"
     }).catch(err => logger.error(err))
-    const kb = Request ? logger.magenta((Request?.length / 1024).toFixed(2) + "kb") : logger.red("error")
+    const kb = Request ? logger.magenta((Request?.length / 1024).toFixed(2) + "kb") : logger.red("错误")
     const ms = logger.green(Date.now() - start + "ms")
-    logger.debug(`${Log_Prefix}[proxyRequestImg][${_.truncate(url)}] ${kb} ${ms}`)
+    logger.debug(`${Log_Prefix}[图片代理请求][${_.truncate(url)}] ${kb} ${ms}`)
     return segment.image(Request ?? `${Plugin_Path}/resources/img/imgerror.png`, cache, timeout)
   }
 
@@ -195,7 +195,7 @@ export default new class {
     if (options.params) {
       options.url = `${options.url}?${qs(options.params)}`
     }
-    // logger.debug(`${Log_Prefix}[Request][${options.method.toUpperCase()}] ${decodeURI(options.url)}`)
+    // logger.debug(`${Log_Prefix}[请求][${options.method.toUpperCase()}] ${decodeURI(options.url)}`)
     options.headers = {
       "User-Agent": CHROME_UA,
       ...options.headers
@@ -234,7 +234,7 @@ export default new class {
     if (options.origError) throw err
 
     throw new ReplyError(
-        `RequestError: ${options.method.toUpperCase()} Error，${err.message.match(/reason:(.*)/)?.[1] || err.message}`
+        `请求错误：${options.method.toUpperCase()} 失败，${err.message.match(/reason:(.*)/)?.[1] || err.message}`
     )
   }
 

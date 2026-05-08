@@ -1,5 +1,5 @@
 import { AbstractTool } from './AbstractTool.js';
-import { getBase64Image } from '../../utils/fileUtils.js';
+import { getBase64Image, normalizeImageUrls } from '../../utils/fileUtils.js';
 import { dependencies } from "../../dependence/dependencies.js";
 import fs from "fs";
 import YAML from "yaml";
@@ -38,9 +38,7 @@ export class GoogleImageEditTool extends AbstractTool {
             const { prompt } = opts;
 
             // 处理图片URL
-            const images = await Promise.all(
-                this.normalizeArray(opts.images).map(url => this.processImageUrl(url))
-            );
+            const images = await normalizeImageUrls(this.normalizeArray(opts.images));
 
             if (!images.length) {
                 return { error: '未检测到有效的图片链接' };
