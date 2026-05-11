@@ -2539,7 +2539,7 @@ ${mcpPrompts}
   }
 
   async mcpStatus(e) {
-    await e.reply(mcpManager.getStatusSummary())
+    await this.replyLongForward(e, "MCP状态", mcpManager.getStatusSummary())
     return true
   }
 
