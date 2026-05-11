@@ -77,6 +77,106 @@ pnpm install
 #禁用我的记忆
 #启用我的记忆
 
+### 启用工具列表 (`oneapi_tools`)
+```yaml
+- likeTool          # 点赞工具
+- pokeTool          # 戳一戳工具
+- googleImageAnalysisTool  # Google 图片分析
+- aiMindMapTool     # AI 思维导图
+- bananaTool        # 大香蕉文生图
+- bingImageSearchTool # Bing 图片搜索
+- changeCardTool    # QQ群聊名片修改
+- chatHistoryTool   # 获取聊天历史记录
+- githubRepoTool    # GitHub 仓库工具
+- googleImageEditTool # 大香蕉图片编辑
+- jinyanTool        # 禁言工具
+- qqZoneTool        # QQ 空间工具
+- searchInformationTool    # 搜索联网
+- searchMusicTool   # 音乐搜索
+- searchVideoTool   # 视频搜索
+- videoAnalysisTool # 视频分析
+- voiceTool         # 语音工具
+- webParserTool     # 网页解析
+- reactionTool      # 表情回应/贴表情
+- memberInfoTool    # 群成员信息查询
+- recallTool        # 消息撤回
+- grabRedBagTool    # 抢红包工具（需魔改版NapCat）
+- reminderTool      # 定时提醒工具
+```
+
+**工具调用说明**：
+- 支持连续多次调用工具，例如先搜索再解析网页、先查资料再生成回复。
+- 插件会自动整理工具结果，尽量避免机器人把工具函数名、代码格式或内部执行细节说出来。
+- 语音、戳一戳等工具执行后，机器人会更自然地回复，不会反复强调“我已经调用了某某工具”。
+- 工具结果不会进入长期记忆。
+
+### 自定义本地工具
+
+如果你想自己写工具，不要修改 `functions/functions_tools` 里的自带工具文件。请把自己的工具放到：
+
+```text
+plugins/bl-chat-plugin/custom_tools/
+```
+
+这个目录下的 `.js` 工具文件默认不会被 Git 跟踪，后续使用 `#bl更新` 或 `git pull` 更新插件时不会覆盖你的自定义工具。
+
+**使用步骤**：
+1. 复制 `custom_tools/exampleTool.js.example` 为新的 `.js` 文件，例如 `customEchoTool.js`。
+2. 修改工具类名> export class [请修改此处类名]、`this.name`、`description`、`parameters`。
+3. 你自行实现func()方法，return返回某个值或错误。
+4. 在 `config/message.yaml` 的 `oneapi_tools` 里加入你的工具名，例如 `customEchoTool`。
+5. 重启机器人，或修改一次 `message.yaml` 触发配置热更新。
+
+**最简模板**：
+```js
+import { AbstractTool } from "../functions/functions_tools/AbstractTool.js"
+
+export class CustomWeatherTool extends AbstractTool {
+  constructor() {
+    super()
+    this.name = "customWeatherTool"
+    this.description = "查询指定城市的当前天气，当用户询问天气、温度、湿度或风速时使用"
+    this.parameters = {
+      type: "object",
+      properties: {
+        city: {
+          type: "string",
+          description: "要查询天气的城市名称，例如：上海、北京、广州"
+        }
+      },
+      required: ["city"]
+    }
+  }
+
+  async func(opts, e) {
+    const city = String(opts.city || "").trim()
+    if (!city) return "error: city 不能为空"
+
+    try {
+      const url = `https://wttr.in/${encodeURIComponent(city)}?format=j1&lang=zh`
+      const res = await fetch(url)
+      if (!res.ok) return `error: 查询天气失败，HTTP ${res.status}`
+
+      const data = await res.json()
+      const now = data.current_condition?.[0]
+      if (!now) return "error: 没有获取到天气数据"
+
+      const desc = now.weatherDesc?.[0]?.value || "未知"
+      return `${city}当前天气：${desc}，气温 ${now.temp_C}℃，体感 ${now.FeelsLikeC}℃，湿度 ${now.humidity}%，风速 ${now.windspeedKmph} km/h`
+    } catch (error) {
+      return `error: 查询天气失败：${error.message}`
+    }
+  }
+}
+```
+
+**注意事项**：
+- 推荐继承 `../functions/functions_tools/AbstractTool.js`，和内置工具使用同一套写法。
+- 自定义工具名不能和内置工具重复，重复时会拒绝加载自定义版本并保留内置工具。
+- 工具文件写错或执行报错只会记录日志/返回 `error`，不会影响其它工具和正常聊天。
+
+---
+
 # mcp-servers.yaml配置说明
 已实现MCP官方3种标准连接方式（Stdio、SSE、Streamable HTTP）设置type即可("sse","stdio","http")，默认stdio。例sse链接：
 ```yaml
@@ -387,106 +487,6 @@ embeddingApiKey: "sk-xxxxx"
 ```
 
 **说明**：知识库使用 Embedding 模型将文本转为向量进行语义检索；记忆系统在开启语义召回时也会复用此配置。URL 为完整路径（`/v1/embeddings`），不是 `/v1/chat/completions`。大部分 OpenAI 兼容的中转站都支持此接口。
-
-### 启用工具列表 (`oneapi_tools`)
-```yaml
-- likeTool          # 点赞工具
-- pokeTool          # 戳一戳工具
-- googleImageAnalysisTool  # Google 图片分析
-- aiMindMapTool     # AI 思维导图
-- bananaTool        # 大香蕉文生图
-- bingImageSearchTool # Bing 图片搜索
-- changeCardTool    # QQ群聊名片修改
-- chatHistoryTool   # 获取聊天历史记录
-- githubRepoTool    # GitHub 仓库工具
-- googleImageEditTool # 大香蕉图片编辑
-- jinyanTool        # 禁言工具
-- qqZoneTool        # QQ 空间工具
-- searchInformationTool    # 搜索联网
-- searchMusicTool   # 音乐搜索
-- searchVideoTool   # 视频搜索
-- videoAnalysisTool # 视频分析
-- voiceTool         # 语音工具
-- webParserTool     # 网页解析
-- reactionTool      # 表情回应/贴表情
-- memberInfoTool    # 群成员信息查询
-- recallTool        # 消息撤回
-- grabRedBagTool    # 抢红包工具（需魔改版NapCat）
-- reminderTool      # 定时提醒工具
-```
-
-**工具调用说明**：
-- 支持连续多次调用工具，例如先搜索再解析网页、先查资料再生成回复。
-- 插件会自动整理工具结果，尽量避免机器人把工具函数名、代码格式或内部执行细节说出来。
-- 语音、戳一戳等工具执行后，机器人会更自然地回复，不会反复强调“我已经调用了某某工具”。
-- 工具结果不会进入长期记忆。
-
-### 自定义本地工具
-
-如果你想自己写工具，不要修改 `functions/functions_tools` 里的自带工具文件。请把自己的工具放到：
-
-```text
-plugins/bl-chat-plugin/custom_tools/
-```
-
-这个目录下的 `.js` 工具文件默认不会被 Git 跟踪，后续使用 `#bl更新` 或 `git pull` 更新插件时不会覆盖你的自定义工具。
-
-**使用步骤**：
-1. 复制 `custom_tools/exampleTool.js.example` 为新的 `.js` 文件，例如 `customEchoTool.js`。
-2. 修改工具类名> export class [请修改此处类名]、`this.name`、`description`、`parameters`。
-3. 你自行实现func()方法，return返回某个值或错误。
-4. 在 `config/message.yaml` 的 `oneapi_tools` 里加入你的工具名，例如 `customEchoTool`。
-5. 重启机器人，或修改一次 `message.yaml` 触发配置热更新。
-
-**最简模板**：
-```js
-import { AbstractTool } from "../functions/functions_tools/AbstractTool.js"
-
-export class CustomWeatherTool extends AbstractTool {
-  constructor() {
-    super()
-    this.name = "customWeatherTool"
-    this.description = "查询指定城市的当前天气，当用户询问天气、温度、湿度或风速时使用"
-    this.parameters = {
-      type: "object",
-      properties: {
-        city: {
-          type: "string",
-          description: "要查询天气的城市名称，例如：上海、北京、广州"
-        }
-      },
-      required: ["city"]
-    }
-  }
-
-  async func(opts, e) {
-    const city = String(opts.city || "").trim()
-    if (!city) return "error: city 不能为空"
-
-    try {
-      const url = `https://wttr.in/${encodeURIComponent(city)}?format=j1&lang=zh`
-      const res = await fetch(url)
-      if (!res.ok) return `error: 查询天气失败，HTTP ${res.status}`
-
-      const data = await res.json()
-      const now = data.current_condition?.[0]
-      if (!now) return "error: 没有获取到天气数据"
-
-      const desc = now.weatherDesc?.[0]?.value || "未知"
-      return `${city}当前天气：${desc}，气温 ${now.temp_C}℃，体感 ${now.FeelsLikeC}℃，湿度 ${now.humidity}%，风速 ${now.windspeedKmph} km/h`
-    } catch (error) {
-      return `error: 查询天气失败：${error.message}`
-    }
-  }
-}
-```
-
-**注意事项**：
-- 推荐继承 `../functions/functions_tools/AbstractTool.js`，和内置工具使用同一套写法。
-- 自定义工具名不能和内置工具重复，重复时会拒绝加载自定义版本并保留内置工具。
-- 工具文件写错或执行报错只会记录日志/返回 `error`，不会影响其它工具和正常聊天。
-
----
 
 ## 特别说明
 
