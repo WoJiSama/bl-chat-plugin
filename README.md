@@ -89,18 +89,18 @@ pnpm install
 - pokeTool          # 戳一戳工具
 - googleImageAnalysisTool  # Google 图片分析
 - aiMindMapTool     # AI 思维导图
-- bananaTool        # 大香蕉文生图
+- bananaTool(dedupe) # 大香蕉文生图
 - bingImageSearchTool # Bing 图片搜索
 - changeCardTool    # QQ群聊名片修改
 - chatHistoryTool   # 获取聊天历史记录
 - githubRepoTool    # GitHub 仓库工具
-- googleImageEditTool # 大香蕉图片编辑
+- googleImageEditTool(dedupe) # 大香蕉图片编辑
 - jinyanTool        # 禁言工具
 - qqZoneTool        # QQ 空间工具
 - searchInformationTool    # 搜索联网
 - searchMusicTool   # 音乐搜索
 - searchVideoTool   # 视频搜索
-- videoAnalysisTool # 视频分析
+- videoAnalysisTool(dedupe) # 视频分析
 - voiceTool         # 语音工具
 - webParserTool     # 网页解析
 - reactionTool      # 表情回应/贴表情
@@ -109,6 +109,20 @@ pnpm install
 - grabRedBagTool    # 抢红包工具（需魔改版NapCat）
 - reminderTool      # 定时提醒工具
 ```
+
+**工具防重复标记**：
+
+执行时间比较长的工具可以在工具名后面加 `(dedupe)`：
+
+```yaml
+oneapi_tools:
+  - bananaTool(dedupe)
+  - googleImageEditTool(dedupe)
+  - videoAnalysisTool(dedupe)
+  - likeTool
+```
+
+加了 `(dedupe)` 后，模型看到的工具名仍然是原来的 `bananaTool`。这个标记只用于防止同一用户重复触发同一个工具：上一条还在处理时，同一用户的新触发会被静默忽略；其他用户仍然可以正常对话和调用工具。插件也会在上下文里给历史消息追加“工具调用中 / 已完成 / 调用失败”的任务状态，避免模型把已经处理过的历史请求再调用一遍工具。
 
 **工具调用说明**：
 - 支持连续多次调用工具，例如先搜索再解析网页、先查资料再生成回复。

@@ -102,18 +102,18 @@ pluginSettings:
     - pokeTool
     - googleImageAnalysisTool
     - aiMindMapTool
-    - bananaTool
+    - bananaTool(dedupe)
     - bingImageSearchTool
     - changeCardTool
     - chatHistoryTool
     - githubRepoTool
-    - googleImageEditTool
+    - googleImageEditTool(dedupe)
     - jinyanTool
     - qqZoneTool
     - searchInformationTool
     - searchMusicTool
     - searchVideoTool
-    - videoAnalysisTool
+    - videoAnalysisTool(dedupe)
     - voiceTool
     - webParserTool
     - reactionTool

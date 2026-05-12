@@ -46,6 +46,9 @@ const RED_BAG_CONFIG = {
 const redBagCooldowns = new Map() // 红包冷却记录: key: groupId, value: lastGrabTime
 
 const sessionStates = new Map()
+const activeUserRuns = new Map()
+const activeDedupeToolRuns = new Map()
+const taskStatusCache = new Map()
 const activeConversations = new Map() // 会话追踪: key: `${groupId}_${userId}`, value: { lastActiveTime, chatHistory: [], timer: null }
 const trackingThrottle = new Map() // 节流: key: `${groupId}_${userId}`, value: lastCallTime
 const pendingJudgments = [] // 批量判断队列
@@ -59,6 +62,21 @@ let mcpInitPromise = null
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function parseToolConfigEntry(entry) {
+  const raw = String(entry || "").trim()
+  const match = raw.match(/^([A-Za-z_][A-Za-z0-9_-]*)(?:\(([^)]*)\))?$/)
+  if (!match) return { name: raw, dedupe: false, marker: "" }
+  return {
+    name: match[1],
+    dedupe: match[2] !== undefined,
+    marker: match[2] || ""
+  }
+}
+
+function toolConfigHasName(toolNames, name) {
+  return Array.isArray(toolNames) && toolNames.some(item => parseToolConfigEntry(item).name === name)
 }
 
 function applyToolRegistrySnapshot(state, snapshot = localToolRegistry.getSnapshot()) {
@@ -201,7 +219,7 @@ function initializeSharedState(config) {
   }
 
   // 如果启用了 searchMusicTool，初始化音乐 cookie 刷新定时任务
-  if (config.oneapi_tools?.includes('searchMusicTool')) {
+  if (toolConfigHasName(config.oneapi_tools, 'searchMusicTool')) {
     initMusicCookieRefresh(sharedState.toolInstances.searchMusicTool, config)
   }
 
@@ -289,6 +307,8 @@ export class ExamplePlugin extends plugin {
     this.expressionLearner = state.expressionLearner
     this.knowledgeSearcher = state.knowledgeSearcher
     this.REDIS_KEY_PREFIX = 'ytbot:messages:'
+    this.TASK_STATUS_PREFIX = 'ytbot:tool_task_status:'
+    this.dedupeToolNames = new Set()
 
     this.localToolsReady = false
     this.tools = []
@@ -329,6 +349,7 @@ export class ExamplePlugin extends plugin {
       oneapi: this.config.oneapi_tools
     }
 
+    this.syncDedupeToolConfig(this.config.oneapi_tools || [])
     const localTools = this.getToolsByName(toolConfig[provider] || this.config.openai_tools, {
       warnMissing: this.localToolsReady !== false
     })
@@ -449,12 +470,166 @@ export class ExamplePlugin extends plugin {
     }
   }
 
+  getTaskStatusCacheKey(groupId, messageId) {
+    return `${groupId}:${messageId}`
+  }
+
+  getTaskStatusRedisKey(groupId, messageId) {
+    return `${this.TASK_STATUS_PREFIX}${groupId}:${messageId}`
+  }
+
+  getTaskStatusTtlSeconds() {
+    return Math.max(60, Math.floor((this.config.groupChatMemoryDays || 1) * 24 * 60 * 60))
+  }
+
+  async saveTaskStatus({ groupId, userId, messageId, status, toolName = "", error = "" }) {
+    if (!groupId || !messageId || !status) return
+
+    const record = {
+      groupId: String(groupId),
+      userId: userId ? String(userId) : "",
+      messageId: String(messageId),
+      status,
+      toolName,
+      error: error ? String(error).slice(0, 120) : "",
+      updatedAt: Date.now()
+    }
+    const cacheKey = this.getTaskStatusCacheKey(groupId, messageId)
+    taskStatusCache.set(cacheKey, record)
+
+    try {
+      await redis.set(this.getTaskStatusRedisKey(groupId, messageId), JSON.stringify(record), {
+        EX: this.getTaskStatusTtlSeconds()
+      })
+    } catch (error) {
+      logger.warn(`[任务状态] 写入失败：${error.message}`)
+    }
+  }
+
+  async getTaskStatus(groupId, messageId) {
+    if (!groupId || !messageId) return null
+
+    const cacheKey = this.getTaskStatusCacheKey(groupId, messageId)
+    if (taskStatusCache.has(cacheKey)) return taskStatusCache.get(cacheKey)
+
+    try {
+      const raw = await redis.get(this.getTaskStatusRedisKey(groupId, messageId))
+      if (!raw) return null
+      const record = JSON.parse(raw)
+      taskStatusCache.set(cacheKey, record)
+      return record
+    } catch (error) {
+      logger.warn(`[任务状态] 读取失败：${error.message}`)
+      return null
+    }
+  }
+
+  async clearTaskStatus(groupId, messageId) {
+    if (!groupId || !messageId) return
+    taskStatusCache.delete(this.getTaskStatusCacheKey(groupId, messageId))
+    try {
+      await redis.del(this.getTaskStatusRedisKey(groupId, messageId))
+    } catch (error) {
+      logger.warn(`[任务状态] 清理失败：${error.message}`)
+    }
+  }
+
+  formatTaskStatusForPrompt(status) {
+    if (!status?.status) return ""
+    const toolName = status.toolName || "未知工具"
+    if (status.status === "processing") {
+      return "[任务状态: 这条消息已进入处理流程，机器人正在判断是否需要调用工具，禁止把这条历史消息当作当前新任务重复处理]"
+    }
+    if (status.status === "tool_running") {
+      return `[任务状态: 工具调用中，工具 ${toolName} 正在处理这条消息，禁止重复调用工具处理它]`
+    }
+    if (status.status === "tool_success") {
+      return `[任务状态: 工具已完成，工具 ${toolName} 已处理这条消息，禁止再次调用工具处理它]`
+    }
+    if (status.status === "tool_failed") {
+      const reason = status.error ? `，失败原因: ${status.error}` : ""
+      return `[任务状态: 工具调用失败，工具 ${toolName} 处理失败${reason}，除非当前用户明确要求重试，否则禁止替历史消息再次调用工具]`
+    }
+    return ""
+  }
+
+  getUserRunKey(groupId, userId) {
+    return `${groupId}:${userId}`
+  }
+
+  getToolRunKey(groupId, userId, toolName) {
+    return `${groupId}:${userId}:${toolName}`
+  }
+
+  async beginConversationTask(e) {
+    const groupId = e.group_id
+    const userId = e.user_id
+    if (!groupId || !userId) return { groupId, userId, messageId: e.message_id || null }
+
+    const runKey = this.getUserRunKey(groupId, userId)
+    if (activeUserRuns.has(runKey)) return null
+
+    const task = {
+      groupId,
+      userId,
+      messageId: e.message_id || null,
+      startedAt: Date.now()
+    }
+    activeUserRuns.set(runKey, task)
+
+    if (task.messageId) {
+      await this.saveTaskStatus({
+        groupId,
+        userId,
+        messageId: task.messageId,
+        status: "processing"
+      })
+    }
+
+    return task
+  }
+
+  async finishConversationTask(task, session) {
+    if (!task?.groupId || !task?.userId) return
+
+    const runKey = this.getUserRunKey(task.groupId, task.userId)
+    if (activeUserRuns.get(runKey) === task) {
+      activeUserRuns.delete(runKey)
+    }
+
+    if (!task.messageId || session?.taskDedupeToolTouched) return
+
+    const status = await this.getTaskStatus(task.groupId, task.messageId)
+    if (!status || status.status === "processing") {
+      await this.clearTaskStatus(task.groupId, task.messageId)
+    }
+  }
+
+  isDedupeTool(toolName) {
+    return this.dedupeToolNames?.has(toolName)
+  }
+
+  isToolResultError(result) {
+    const text = typeof result === "string" ? result : JSON.stringify(result || "")
+    return /^error[:：]/i.test(text.trim()) || /"error"\s*:/.test(text) || /失败|错误|失敗|錯誤/.test(text)
+  }
+
+  syncDedupeToolConfig(toolNames = this.config.oneapi_tools || []) {
+    this.dedupeToolNames = new Set(
+      (Array.isArray(toolNames) ? toolNames : [])
+        .map(item => parseToolConfigEntry(item))
+        .filter(item => item.name && item.dedupe)
+        .map(item => item.name)
+    )
+  }
+
   getToolsByName(toolNames, options = {}) {
     if (!toolNames || !Array.isArray(toolNames)) return []
     const warnMissing = options.warnMissing !== false
 
     return toolNames
-      .map(name => {
+      .map(item => {
+        const { name } = parseToolConfigEntry(item)
         const func = this.functionMap.get(name)
         if (!func) {
           if (warnMissing) console.warn(`未找到工具 "${name}"`)
@@ -1162,7 +1337,7 @@ ${recentHistory || '(无)'}
 
     // 检测红包消息并随机触发抢红包
     const walletSeg = e.message?.find(m => m.type == 'wallet')
-    if (walletSeg && RED_BAG_CONFIG.enabled && this.config.oneapi_tools?.includes('grabRedBagTool')) {
+    if (walletSeg && RED_BAG_CONFIG.enabled && toolConfigHasName(this.config.oneapi_tools, 'grabRedBagTool')) {
       const wallet = walletSeg.data || walletSeg
       const redBagType = getRedBagType(wallet)
       const botId = e.bot?.uin || Bot.uin
@@ -1259,10 +1434,14 @@ ${recentHistory || '(无)'}
     await this.refreshLocalToolRegistry({ silent: true })
     await this.waitForMCPReady()
 
+    const taskContext = await this.beginConversationTask(e)
+    if (!taskContext) return false
+
     const { group_id: groupId, user_id: userId, msg } = e
     const sessionId = randomUUID()
     e.sessionId = sessionId
     const session = this.getOrCreateSession(sessionId, this.tools)
+    session.taskContext = taskContext
     const limit = pLimit(this.config.concurrentLimit || 5)
 
     let groupUserMessages = session.groupUserMessages
@@ -1387,7 +1566,7 @@ ${mcpPrompts}
           // 使用 message_id 过滤当前消息
           const currentMessageId = e.message_id
 
-          groupUserMessages = chatHistory
+          groupUserMessages = await Promise.all(chatHistory
             .reverse()
             .filter(msg => {
               // 直接用 message_id 判断，过滤掉当前消息
@@ -1399,8 +1578,15 @@ ${mcpPrompts}
             })
             .map(msg => ({
               role: msg.sender.user_id === Bot.uin ? "assistant" : "user",
+              messageId: msg.message_id,
               content: `[${msg.time}] ${msg.sender.nickname}(QQ号:${msg.sender.user_id})[群身份: ${roleMap[msg.sender.role] || "member"}]${msg.message_id ? `[消息ID:${msg.message_id}]` : ''}: ${msg.content}`
             }))
+          )
+          groupUserMessages = await Promise.all(groupUserMessages.map(async msg => {
+            const taskStatus = msg.messageId ? await this.getTaskStatus(groupId, msg.messageId) : null
+            const statusText = this.formatTaskStatusForPrompt(taskStatus)
+            return statusText ? { ...msg, content: `${msg.content}\n${statusText}` } : msg
+          }))
         }
       }
 
@@ -1465,6 +1651,8 @@ ${mcpPrompts}
       this.clearSession(sessionId)
       this.sendEmojiWithProbability(e)
       return true
+    } finally {
+      await this.finishConversationTask(taskContext, session)
     }
   }
 
@@ -1643,23 +1831,81 @@ ${mcpPrompts}
       params.senderRole = senderRole
     }
 
+    const dedupeEnabled = this.isDedupeTool(toolName)
+    const task = session.taskContext || {}
+    const toolRunKey = dedupeEnabled ? this.getToolRunKey(e.group_id, e.user_id, toolName) : ""
+    const toolRunValue = {
+      groupId: e.group_id,
+      userId: e.user_id,
+      messageId: task.messageId || e.message_id || null,
+      toolName,
+      startedAt: Date.now()
+    }
+
+    if (dedupeEnabled) {
+      if (activeDedupeToolRuns.has(toolRunKey)) {
+        return {
+          toolCall,
+          toolName,
+          result: `工具 ${toolName} 正在处理同一用户的上一条请求，已跳过重复调用`
+        }
+      }
+
+      activeDedupeToolRuns.set(toolRunKey, toolRunValue)
+      session.taskDedupeToolTouched = true
+      if (toolRunValue.messageId) {
+        await this.saveTaskStatus({
+          groupId: e.group_id,
+          userId: e.user_id,
+          messageId: toolRunValue.messageId,
+          status: "tool_running",
+          toolName
+        })
+      }
+    }
+
     try {
       logger.info(`[工具调用] ${isMCPTool ? "MCP" : "本地"} ${toolName}: ${JSON.stringify(params)}`)
       const rawResult = isMCPTool
         ? await this.executeTool(toolName, params, e, limit)
         : await this.executeTool(this.toolInstances[toolName], params, e, limit)
       const result = this.serializeToolResult(rawResult)
+      if (dedupeEnabled && toolRunValue.messageId) {
+        const failed = this.isToolResultError(result)
+        await this.saveTaskStatus({
+          groupId: e.group_id,
+          userId: e.user_id,
+          messageId: toolRunValue.messageId,
+          status: failed ? "tool_failed" : "tool_success",
+          toolName,
+          error: failed ? result : ""
+        })
+      }
       return {
         toolCall,
         toolName,
         result: result?.trim() ? result : `工具 ${toolName} 执行成功`
       }
     } catch (error) {
+      if (dedupeEnabled && toolRunValue.messageId) {
+        await this.saveTaskStatus({
+          groupId: e.group_id,
+          userId: e.user_id,
+          messageId: toolRunValue.messageId,
+          status: "tool_failed",
+          toolName,
+          error: error.message
+        })
+      }
       logger.error(`[工具调用] ${toolName} 执行失败:`, error)
       return {
         toolCall,
         toolName,
         result: `error: ${error.message}`
+      }
+    } finally {
+      if (dedupeEnabled && activeDedupeToolRuns.get(toolRunKey) === toolRunValue) {
+        activeDedupeToolRuns.delete(toolRunKey)
       }
     }
   }
@@ -2203,6 +2449,7 @@ ${mcpPrompts}
    * 更新工具列表（合并本地工具和MCP工具）
    */
   updateToolsList(options = {}) {
+    this.syncDedupeToolConfig(this.config.oneapi_tools || [])
     const localTools = this.getToolsByName(this.config.oneapi_tools || [], {
       warnMissing: this.localToolsReady !== false
     })
