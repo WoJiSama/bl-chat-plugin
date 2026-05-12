@@ -290,9 +290,16 @@ export class ExamplePlugin extends plugin {
     this.knowledgeSearcher = state.knowledgeSearcher
     this.REDIS_KEY_PREFIX = 'ytbot:messages:'
 
-    this.initTools()
+    this.localToolsReady = false
+    this.tools = []
     this.initMessageHistory()
     mcpManager.setToolsChangedCallback(() => this.updateToolsList())
+    this.localToolsReadyPromise = this.refreshLocalToolRegistry({ force: true }).catch(error => {
+      logger.error("[LocalToolRegistry] 启动加载本地工具失败:", error)
+      this.localToolsReady = true
+      this.initTools()
+      return null
+    })
 
     if (!pluginInitialized) {
       pluginInitialized = true
@@ -306,7 +313,8 @@ export class ExamplePlugin extends plugin {
     this.toolInstances = state.toolInstances
     this.functions = state.functions
     this.functionMap = state.functionMap
-    this.updateToolsList()
+    this.localToolsReady = true
+    this.updateToolsList({ silent: options.silent === true })
     return state
   }
 
@@ -321,7 +329,9 @@ export class ExamplePlugin extends plugin {
       oneapi: this.config.oneapi_tools
     }
 
-    const localTools = this.getToolsByName(toolConfig[provider] || this.config.openai_tools)
+    const localTools = this.getToolsByName(toolConfig[provider] || this.config.openai_tools, {
+      warnMissing: this.localToolsReady !== false
+    })
     const mcpTools = mcpManager.getAllTools() || []
     this.tools = [...localTools, ...mcpTools]
   }
@@ -439,14 +449,15 @@ export class ExamplePlugin extends plugin {
     }
   }
 
-  getToolsByName(toolNames) {
+  getToolsByName(toolNames, options = {}) {
     if (!toolNames || !Array.isArray(toolNames)) return []
+    const warnMissing = options.warnMissing !== false
 
     return toolNames
       .map(name => {
         const func = this.functionMap.get(name)
         if (!func) {
-          console.warn(`未找到工具 "${name}"`)
+          if (warnMissing) console.warn(`未找到工具 "${name}"`)
           return null
         }
         return {
@@ -1244,7 +1255,8 @@ ${recentHistory || '(无)'}
       return false
     }
 
-    await this.refreshLocalToolRegistry()
+    if (this.localToolsReadyPromise) await this.localToolsReadyPromise
+    await this.refreshLocalToolRegistry({ silent: true })
     await this.waitForMCPReady()
 
     const { group_id: groupId, user_id: userId, msg } = e
@@ -1564,7 +1576,7 @@ ${mcpPrompts}
    * 执行工具 - 统一处理本地工具和MCP工具
    */
   normalizeAssistantToolMessage(message) {
-    return {
+    const normalized = {
       role: "assistant",
       content: message.content || "",
       tool_calls: (message.tool_calls || []).map(toolCall => ({
@@ -1576,6 +1588,12 @@ ${mcpPrompts}
         }
       }))
     }
+
+    if (message.reasoning_content) {
+      normalized.reasoning_content = message.reasoning_content
+    }
+
+    return normalized
   }
 
   serializeToolResult(result) {
@@ -2184,8 +2202,10 @@ ${mcpPrompts}
   /**
    * 更新工具列表（合并本地工具和MCP工具）
    */
-  updateToolsList() {
-    const localTools = this.getToolsByName(this.config.oneapi_tools || [])
+  updateToolsList(options = {}) {
+    const localTools = this.getToolsByName(this.config.oneapi_tools || [], {
+      warnMissing: this.localToolsReady !== false
+    })
     const mcpTools = mcpManager.getAllTools() || []
 
     this.tools = [...localTools, ...mcpTools]
@@ -2194,7 +2214,9 @@ ${mcpPrompts}
       session.tools = this.tools
     }
 
-    logger.info(`[工具] 本地工具: ${localTools.length}, MCP工具: ${mcpTools.length}`)
+    if (!options.silent) {
+      logger.info(`[工具] 本地工具: ${localTools.length}, MCP工具: ${mcpTools.length}`)
+    }
   }
 
   async waitForMCPReady(timeoutMs = 5000) {
