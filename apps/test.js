@@ -46,7 +46,6 @@ const RED_BAG_CONFIG = {
 const redBagCooldowns = new Map() // 红包冷却记录: key: groupId, value: lastGrabTime
 
 const sessionStates = new Map()
-const activeUserRuns = new Map()
 const activeDedupeToolRuns = new Map()
 const taskStatusCache = new Map()
 const activeConversations = new Map() // 会话追踪: key: `${groupId}_${userId}`, value: { lastActiveTime, chatHistory: [], timer: null }
@@ -553,10 +552,6 @@ export class ExamplePlugin extends plugin {
     return ""
   }
 
-  getUserRunKey(groupId, userId) {
-    return `${groupId}:${userId}`
-  }
-
   getToolRunKey(groupId, userId, toolName) {
     return `${groupId}:${userId}:${toolName}`
   }
@@ -566,16 +561,12 @@ export class ExamplePlugin extends plugin {
     const userId = e.user_id
     if (!groupId || !userId) return { groupId, userId, messageId: e.message_id || null }
 
-    const runKey = this.getUserRunKey(groupId, userId)
-    if (activeUserRuns.has(runKey)) return null
-
     const task = {
       groupId,
       userId,
       messageId: e.message_id || null,
       startedAt: Date.now()
     }
-    activeUserRuns.set(runKey, task)
 
     if (task.messageId) {
       await this.saveTaskStatus({
@@ -591,11 +582,6 @@ export class ExamplePlugin extends plugin {
 
   async finishConversationTask(task, session) {
     if (!task?.groupId || !task?.userId) return
-
-    const runKey = this.getUserRunKey(task.groupId, task.userId)
-    if (activeUserRuns.get(runKey) === task) {
-      activeUserRuns.delete(runKey)
-    }
 
     if (!task.messageId || session?.taskDedupeToolTouched) return
 
@@ -1435,7 +1421,6 @@ ${recentHistory || '(无)'}
     await this.waitForMCPReady()
 
     const taskContext = await this.beginConversationTask(e)
-    if (!taskContext) return false
 
     const { group_id: groupId, user_id: userId, msg } = e
     const sessionId = randomUUID()
