@@ -191,9 +191,11 @@ export class CustomWeatherTool extends AbstractTool {
 ```
 
 **注意事项**：
+- bananaTool工具仅支持文生图，googleImageEditTool工具可以图生图。两个工具都兼容/completions格式的生图模型，工具名是历史遗留问题不再修改。
 - 推荐继承 `../functions/functions_tools/AbstractTool.js`，和内置工具使用同一套写法。
 - 自定义工具名不能和内置工具重复，重复时会拒绝加载自定义版本并保留内置工具。
 - 工具文件写错或执行报错只会记录日志/返回 `error`，不会影响其它工具和正常聊天。
+- 更多实际使用可参考`functions/functions_tools` 中的工具文件代码
 
 ---
 
