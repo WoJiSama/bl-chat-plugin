@@ -71,7 +71,7 @@ export class VoiceTool extends AbstractTool {
       voice = file_url ? `${file}${file_url}` : null;
       if (voice) {
         await e.reply(segment.record(voice));
-        return `发送语音内容(${text})成功，你已经发送语音了，所以不需要强调你已经发送语音，继续说之后的事情`;
+        return `发送语音内容(${text})成功，你已经发送语音了，所以不需要强调你已经发送语音，继续说之后的事情，回复的文字内容不要和语音内容重合`;
       } else {
         return `发送语音失败`;
       }
