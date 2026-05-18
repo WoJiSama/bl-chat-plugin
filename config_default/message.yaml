@@ -120,5 +120,6 @@ pluginSettings:
     - memberInfoTool
     - recallTool
     - reminderTool
+    - textImageTool
   githubToken: ""
   qqMusicToken: ""

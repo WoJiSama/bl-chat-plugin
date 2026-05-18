@@ -108,6 +108,7 @@ pnpm install
 - recallTool        # 消息撤回
 - grabRedBagTool    # 抢红包工具（需魔改版NapCat）
 - reminderTool      # 定时提醒工具
+- textImageTool     # 文字转图片发送工具(支持代码/MarkDown格式渲染)
 ```
 
 **工具防重复标记**：
@@ -549,6 +550,12 @@ embeddingApiKey: "sk-xxxxx"
 ### 定时提醒工具 (reminderTool)
 
 提醒工具支持到点后发送提醒，也可以附带执行当前已启用的本地工具或 MCP 工具，例如发歌、戳一戳、语音、搜索等。多实例运行时会自动避免重复触发；如果到点时找不到指定工具，会跳过附带动作并继续发送提醒消息。
+
+### 文字转图片工具 (textImageTool)
+
+当用户要求把文字、Markdown 或代码内容转成图片发送时，模型可以调用 `textImageTool`。它会把内容渲染成类似 QQ 聊天的图片样式发送：左侧头像，右侧文字气泡，并支持基础 Markdown 和代码块语法高亮。遇到可能被 QQ 群管家、风控或敏感词检测撤回的文字，也可以用这个工具改成图片发送。
+
+工具调用结束后，生成的临时图片会立刻自动删除；即使发送图片时报错，也会尽量清理，避免长期堆积在 `resources/bl-chat-plugin/safe_text_images` 目录。
 
 ### 抢红包工具 (grabRedBagTool)
 
