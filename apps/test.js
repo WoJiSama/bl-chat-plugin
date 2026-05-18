@@ -12,7 +12,6 @@ import { ThinkingProcessor } from "../utils/providers/ThinkingProcessor.js"
 import { TotalTokens } from "../functions/tools/CalculateToken.js"
 import { mcpManager } from "../utils/MCPClient.js"
 import { localToolRegistry } from "../utils/LocalToolRegistry.js"
-import { removeToolPromptsFromMessages } from "../utils/textUtils.js"
 import { getRedBagType, isExclusiveForUser } from "../utils/redBagUtils.js"
 import fs from "fs"
 import YAML from "yaml"
@@ -53,16 +52,6 @@ const trackingThrottle = new Map() // 节流: key: `${groupId}_${userId}`, value
 const pendingJudgments = [] // 批量判断队列
 let batchTimer = null // 批量处理定时器
 const roleMap = { owner: "owner", admin: "admin", member: "member" }
-const FINAL_REPLY_TOOL_GUARD_MARKER = "[final_reply_tool_guard]"
-const FINAL_REPLY_TOOL_GUARD_WITH_TOOLS = `${FINAL_REPLY_TOOL_GUARD_MARKER}
-如需调用工具，只能使用接口提供的 tools/tool_calls 字段，禁止把工具调用写进回复正文。
-最终回复只能是发给用户看的自然口语，禁止输出伪工具格式、代码块、函数调用、动作标记。
-禁止示例：[voice]内容、[voice:内容]、[tool]内容、<tool>...</tool>、voiceTool(...)、tool_name(...)、print(...)、|*...*|。`
-const FINAL_REPLY_TOOL_GUARD_NO_TOOLS = `${FINAL_REPLY_TOOL_GUARD_MARKER}
-工具已经执行完成，当前不能再调用任何工具。
-请直接用自然口语回复用户结果，禁止把工具调用写进回复正文。
-禁止输出伪工具格式、代码块、函数调用、动作标记。
-禁止示例：[voice]内容、[voice:内容]、[tool]内容、<tool>...</tool>、voiceTool(...)、tool_name(...)、print(...)、|*...*|。`
 const PSEUDO_TOOL_MARKERS = [
   "tool", "tools", "tool_call", "toolcall", "function", "function_call", "functioncall", "func", "call", "voice", "audio", "tts", "image", "img",
   "video", "file", "send", "reply", "search", "google", "mcp", "banana", "reminder",
@@ -1169,10 +1158,9 @@ export class ExamplePlugin extends plugin {
 
   buildRequestData(messages, tools, toolChoice = "auto") {
     const provider = this.getProvider()
-    const guardedMessages = this.withFinalReplyGuard(messages, tools, toolChoice)
     const data = {
       model: this.getModel(),
-      messages: guardedMessages,
+      messages,
       temperature: 0.7,
       top_p: 0.9
     }
@@ -1182,16 +1170,6 @@ export class ExamplePlugin extends plugin {
       data.tool_choice = toolChoice
     }
     return data
-  }
-
-  withFinalReplyGuard(messages = [], tools = [], toolChoice = "auto") {
-    const hasTools = this.config.useTools && tools?.length && toolChoice !== "none"
-    const guardContent = hasTools ? FINAL_REPLY_TOOL_GUARD_WITH_TOOLS : FINAL_REPLY_TOOL_GUARD_NO_TOOLS
-    const baseMessages = hasTools ? messages : removeToolPromptsFromMessages(messages)
-    const cleanMessages = baseMessages.filter(
-      msg => !(msg.role === "system" && typeof msg.content === "string" && msg.content.includes(FINAL_REPLY_TOOL_GUARD_MARKER))
-    )
-    return [...cleanMessages, { role: "system", content: guardContent }]
   }
 
   async checkTriggers(e) {
