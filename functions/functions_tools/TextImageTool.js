@@ -245,7 +245,7 @@ function pushToken(tokens, text, type = "default") {
 
 function highlightCodeLine(line, language = "") {
   const lang = normalizeLanguage(language)
-  const keywords = KEYWORDS[lang] || KEYWORDS.javascript
+  const keywords = KEYWORDS[lang] || (lang ? new Set() : KEYWORDS.javascript)
   const tokens = []
   let index = 0
 
@@ -371,6 +371,74 @@ function createCodeBlock(lines, language = "") {
   }
 }
 
+function scoreCodeLanguage(lines, language) {
+  const text = lines.join("\n")
+  const nonEmptyLines = lines.filter(line => line.trim())
+  const indentedLines = nonEmptyLines.filter(line => /^\s{2,}\S/.test(line)).length
+  let score = 0
+
+  if (language === "python") {
+    score += (text.match(/^\s*(def|class|import|from|for|if|elif|else|while|try|except|with|return|print|break|continue)\b/gm) || []).length * 2
+    score += (text.match(/:\s*$/gm) || []).length
+    score += indentedLines
+  } else if (language === "javascript") {
+    score += (text.match(/^\s*(const|let|var|function|class|import|export|return|if|for|while|switch|try|catch)\b/gm) || []).length * 2
+    score += (text.match(/=>|console\.|;\s*$|{\s*$|}\s*$/gm) || []).length
+  } else if (language === "json") {
+    score += /^\s*[{[]/.test(text) ? 3 : 0
+    score += (text.match(/^\s*"[^"]+"\s*:/gm) || []).length * 2
+  } else if (language === "yaml") {
+    score += (text.match(/^\s*[\w.-]+\s*:\s*.+$/gm) || []).length
+    score += (text.match(/^\s*-\s+[\w"']/gm) || []).length
+  } else if (language === "bash") {
+    score += (text.match(/^\s*(#!|cd|echo|export|grep|curl|wget|npm|pnpm|yarn|git|sudo|if|for|while)\b/gm) || []).length * 2
+    score += (text.match(/\$\w+|\|\s*\w+|&&|\bfi\b|\bdone\b/g) || []).length
+  }
+
+  return score
+}
+
+function inferCodeLanguage(lines) {
+  const candidates = ["python", "javascript", "json", "yaml", "bash"]
+  return candidates
+    .map(language => ({ language, score: scoreCodeLanguage(lines, language) }))
+    .sort((a, b) => b.score - a.score)[0]
+}
+
+function getPlainCodeBlock(text) {
+  if (String(text).includes("```")) return null
+
+  const rawLines = String(text || "").split(/\r?\n/)
+  const lines = rawLines.filter(line => line.trim())
+  if (lines.length < 3) return null
+
+  let language = ""
+  let codeLines = rawLines
+  const firstTextLineIndex = rawLines.findIndex(line => line.trim())
+  const firstTextLine = rawLines[firstTextLineIndex]?.trim().toLowerCase()
+
+  if (firstTextLine && ["python", "py", "javascript", "js", "typescript", "ts", "json", "yaml", "yml", "bash", "sh"].includes(firstTextLine)) {
+    language = normalizeLanguage(firstTextLine)
+    codeLines = rawLines.slice(firstTextLineIndex + 1)
+  }
+
+  const inferred = inferCodeLanguage(codeLines)
+  language ||= inferred.language
+
+  const joinedCode = codeLines.join("\n")
+  const hasKeywordLine = /^\s*(def|class|for|if|elif|else|while|return|import|from|print|break|continue|const|let|var|function|class|export|if|switch|try|catch)\b/m.test(joinedCode)
+  const hasMultipleIndentedLines = codeLines.filter(line => /^\s{2,}\S/.test(line)).length >= 2
+  const hasCodeOperator = /[A-Za-z_$][\w$.\[\]]*\s*(?:=|==|===|>|<|\+|-|\*|\/)/.test(joinedCode)
+  const hasCodeBrackets = /[{}();]/.test(joinedCode)
+  const hasCodeShape =
+    inferred.score >= 5 ||
+    (hasKeywordLine && (hasMultipleIndentedLines || hasCodeOperator || hasCodeBrackets)) ||
+    (inferred.score >= 3 && hasCodeOperator && hasCodeBrackets)
+  if (!hasCodeShape) return null
+
+  return createCodeBlock(codeLines, language)
+}
+
 function flushMarkdownLines(blocks, lines) {
   for (const rawLine of lines) {
     const line = rawLine.trimEnd()
@@ -419,6 +487,9 @@ function flushMarkdownLines(blocks, lines) {
 }
 
 function parseMarkdown(text) {
+  const plainCodeBlock = getPlainCodeBlock(text)
+  if (plainCodeBlock) return [plainCodeBlock]
+
   const blocks = []
   const normalLines = []
   let inCode = false
@@ -509,13 +580,13 @@ export class TextImageTool extends AbstractTool {
     super()
     this.name = "textImageTool"
     this.description =
-      "将文字、Markdown 或代码内容渲染成一张类似 QQ 聊天气泡样式的图片并发送。适用于用户要求把文字转图片、发送 Markdown/代码截图，或准备发送的文字可能被 QQ 群管家、其他 QQ 机器人、风控、敏感词检测撤回的场景。调用后不要再重复发送原始文字。"
+      "把文字、Markdown 或代码内容渲染成一张类似 QQ 聊天气泡样式的图片并发送。适用于用户要求文字转图片、发送长文本图片、发送 Markdown/代码截图，或文字可能被 QQ 群管家、其他 QQ 机器人、风控、敏感词检测撤回的场景。代码内容即使没有使用 ``` 包裹，也可以交给本工具自动识别并按代码块高亮渲染。调用后不要再重复发送原始文字。"
     this.parameters = {
       type: "object",
       properties: {
         text: {
           type: "string",
-          description: "需要转成图片发送的完整文本，支持基础 Markdown 和 ``` 代码块"
+          description: "需要转成图片发送的完整文本。可以是普通文字、Markdown、``` 代码块，或未包裹三反引号的完整代码"
         },
         nickname: {
           type: "string",
