@@ -14,10 +14,10 @@ import tools from "./tools.js"
 
 export const schemas = [
   basic,
-  aiModels,
   aiCore,
   permission,
   tracking,
+  aiModels,
   emotion,
   memory,
   expression,

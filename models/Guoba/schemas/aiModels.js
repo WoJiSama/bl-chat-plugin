@@ -2,23 +2,23 @@ function makeAiBlock(displayName, prefix, urlField, modelField, keyField, urlPla
   return [
     {
       field: `${prefix}.${urlField}`,
-      label: `${displayName} · API URL`,
+      label: `${displayName} · URL`,
       component: "Input",
-      bottomHelpMessage: `${usageHint}。完整 endpoint URL`,
+      bottomHelpMessage: `${usageHint}。完整 endpoint URL（含 /v1/chat/completions）`,
       componentProps: { placeholder: urlPlaceholder }
     },
     {
       field: `${prefix}.${modelField}`,
-      label: `${displayName} · 模型名`,
+      label: "┗ 模型名",
       component: "Input",
-      bottomHelpMessage: `${usageHint}。模型名称（OneAPI/中转站按自身路由表填写）`,
+      bottomHelpMessage: "模型名称（OneAPI/中转站按自身路由表填写）",
       componentProps: { placeholder: modelPlaceholder }
     },
     {
       field: `${prefix}.${keyField}`,
-      label: `${displayName} · API Key`,
+      label: "┗ API Key",
       component: "InputPassword",
-      bottomHelpMessage: `${usageHint}。OpenAI 兼容的 Bearer Token`,
+      bottomHelpMessage: "OpenAI 兼容的 Bearer Token",
       componentProps: { placeholder: "sk-xxxxx" }
     }
   ]

@@ -1,7 +1,7 @@
 export default [
   {
     component: "SOFT_GROUP_BEGIN",
-    label: "基础设置"
+    label: "基础与运行"
   },
   {
     field: "enabled",
@@ -15,12 +15,6 @@ export default [
     component: "Input",
     bottomHelpMessage: "留空时自动取 Bot.nickname",
     componentProps: { placeholder: "哈基米" }
-  },
-  {
-    field: "forcedAvatarMode",
-    label: "强制获取头像",
-    component: "Switch",
-    bottomHelpMessage: "是否强制获取用户头像"
   },
   {
     field: "groupHistory",

@@ -1,9 +1,5 @@
 export default [
   {
-    component: "SOFT_GROUP_BEGIN",
-    label: "会话追踪"
-  },
-  {
     field: "conversationTrackingEnabled",
     label: "会话追踪开关",
     component: "Switch",
@@ -27,7 +23,7 @@ export default [
     field: "batchJudgmentDelay",
     label: "批量判断延迟（秒）",
     component: "InputNumber",
-    bottomHelpMessage: "收集多少秒内的消息后批量判断，减少 API 调用",
+    bottomHelpMessage: "收集多少秒内的消息后批量判断，减少 API 调用次数",
     componentProps: { min: 1, max: 60, placeholder: "10" }
   }
 ]
