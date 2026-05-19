@@ -83,6 +83,18 @@ pnpm install
 #禁用我的记忆
 #启用我的记忆
 
+### 表情包管理（仅主人）
+#表情包导入             # 引用一条带图消息或自带图，导入到本地表情包库
+#表情包列表 [页码]      # 分页查看，每条带 8 位 hash、标签、使用次数；含 [封禁]/[缺文件] 标记
+#表情包预览 <hash前缀>  # 预览图片本体 + 元数据（hash/标签/描述/使用次数）
+#表情包删除 <hash前缀>  # 物理删除（hash 前缀至少 4 位）
+#表情包封禁 <hash前缀>  # 标记为不参与选图，文件保留
+#表情包解封 <hash前缀>  # 撤销封禁
+#表情包打标 <hash前缀>  # 重新调 VLM 打标 + 重生成 embedding
+#表情包统计             # 总览：启用状态/各开关/总数/已打标数/embedding 数/封禁数
+#表情包重载             # 强制重读 ndjson（绕过 mtime 缓存）
+#表情包巡检             # 手动触发一次文件一致性对账（缺文件标记 + 孤立文件补登）
+
 ### 启用工具列表 (`oneapi_tools`)
 ```yaml
 - likeTool          # 点赞工具
@@ -110,6 +122,14 @@ pnpm install
 - reminderTool      # 定时提醒工具
 - textImageTool     # 文字转图片发送工具(支持代码/MarkDown格式渲染)
 ```
+
+**可选工具**（默认不在 oneapi_tools 列表中，需要手动添加）：
+
+```yaml
+- sendLocalEmojiTool # 本地表情包发送（需先开启 emojiSystem.enabled 并导入表情包）
+```
+
+`sendLocalEmojiTool` 受 `emojiSystem.enabled` 控制：当系统未启用时，即使配置在 `oneapi_tools` 里也不会暴露给 LLM，避免无效调用。详见下方"表情包系统"章节。
 
 **工具防重复标记**：
 
@@ -266,7 +286,6 @@ MCP 管理命令：
 |--------|------|--------|------|
 | `enabled` | boolean | `true` | **主开关**：`false` 时完全关闭 AI 对话功能 |
 | `botName` | string | `"哈基米"` | 可不配置，为空时自动取Bot.nickname |
-| `emojiEnabled` | boolean | `true` | **表情包功能**：是否开启随机发送表情包（从机器人 QQ 收藏的表情包中选择） |
 | `forcedAvatarMode` | boolean | `true` | **头像获取**：是否强制获取用户头像 |
 
 ---
@@ -420,6 +439,112 @@ MCP 管理命令：
 4. 查看管理：`#知识库列表`、`#知识库统计`、`#知识库删除 关键词`、`#知识库清空`
 
 **效果**：用户在群里聊天时，AI 会自动根据消息内容检索知识库，将相关知识融入回复中。
+
+---
+
+### 表情包系统 (`emojiSystem`)
+
+本地表情包库 + LLM 主动发送，模拟人类"哈哈哈[图]"、"我服了[图]"等组合发送行为。具备反重复挑图、软限流防刷屏、节奏延迟模拟敲字等人性化机制。
+
+#### 主开关 / 路径
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| `enabled` | boolean | `false` | **系统主开关**。关闭时 `sendLocalEmojiTool` 不暴露给 LLM、autoCollect 不工作、维护循环不启动 |
+| `dbPath` | string | `plugins/bl-chat-plugin/database/emoji-packs.ndjson` | 元数据 ndjson 文件路径，相对路径相对 Yunzai 根目录 |
+| `storeDir` | string | `plugins/bl-chat-plugin/database/emoji_files` | 表情包图片本体存放目录 |
+
+#### 容量管理
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| `maxItems` | int | `200` | 最大存储数量。超过后新表情包不能入库（除非 `doReplace: true`） |
+
+#### 自动收集
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| `autoCollect` | boolean | `false` | **是否自动收集群里图片入库**。默认关，避免广告/截图/自拍混入。开启时建议同时开 `contentFiltration` 过滤 |
+
+> 自动收集的内置过滤：SHA-256 去重、1KB-5MB 大小限制、图片格式校验（jpg/png/gif/webp/bmp）
+
+#### VLM 打标 + 内容审查
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| `visionTagOnAdd` | boolean | `true` | 入库时是否调 VLM 打 3-5 个情绪标签 + 一句描述 |
+| `contentFiltration` | boolean | `false` | 入库前是否调 VLM 判断"是否适合作表情包"（挡风景照/截图/广告/二维码）。每张图多 1 次 VLM 调用 |
+
+> GIF 自动用 sharp 取首帧转 PNG 再喂 VLM，避免多帧问题
+
+#### Embedding 召回
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| `useEmbedding` | boolean | `true` | 是否给表情生成 embedding 向量（基于标签+描述）用于 L1 语义召回。关掉则降级到 Levenshtein 标签匹配 |
+| `selectionTopK` | int | `5` | embedding 召回取相似度 top-K，再从中随机一张 |
+| `embeddingThreshold` | float | `0.35` | cosine 相似度低于此值不进候选。0.3 太宽召回近似纯随机，0.5 太严小库易降级，0.35 是兼顾小库友好的折中 |
+
+#### 满额替换 + 周期维护
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| `doReplace` | boolean | `false` | 库满时是否让 LLM 决策删一张旧的腾位置（复用 `toolsAiConfig`） |
+| `enableMaintenance` | boolean | `false` | 是否启动后台周期巡检（文件↔记录双向对账） |
+| `checkIntervalMinutes` | int | `10` | 巡检间隔（分钟）。`enableMaintenance: true` 才生效 |
+
+#### 反重复挑图
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| `avoidRecentEnabled` | boolean | `true` | **反重复总开关**：避免短时间发同一张图或同一种情绪标签 |
+| `avoidRecentCount` | int | `5` | 每群记忆最近 N 次发过的表情用于过滤。值越大越不重复但选择面越窄 |
+| `avoidRecentTtlMinutes` | int | `5` | 超过 N 分钟的"最近发送"记录失效，可重新被选 |
+
+#### 文字+表情节奏
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| `followUpDelayMinMs` | int | `300` | LLM 传 `followUpText` 时，文字发出后等待的最小毫秒数 |
+| `followUpDelayMaxMs` | int | `1200` | 同上最大值。实际取 min-max 随机，模拟人类敲字间隔 |
+
+#### 软限流防刷屏
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| `rateLimitEnabled` | boolean | `true` | **软限流总开关**：超额时工具返回 error，LLM 自然改用文字 |
+| `rateLimitWindowMinutes` | int | `1` | 限流窗口（分钟） |
+| `rateLimitMaxPerWindow` | int | `3` | 窗口内最多发送次数。设 0 视为不限 |
+
+> **重要提示**：
+> - 开启表情包系统至少需要配置 `analysisAiConfig`（VLM 打标/审查）
+> - 启用 `useEmbedding` 还需配置 `embeddingAiConfig`
+> - 启用 `doReplace` 还需配置 `toolsAiConfig`
+> - 默认全套关闭，需手动 `enabled: true` 并在 `oneapi_tools` 加入 `sendLocalEmojiTool`
+
+**工作流程**：
+- **触发**：LLM 在情绪/玩笑/共鸣场景主动调用 `sendLocalEmojiTool`，可选传 `followUpText` 实现"文字 + 表情"组合发送
+- **三段降级选图**：embedding 相似度（L1）→ Levenshtein 标签匹配（L2）→ usedCount 反向加权随机（L3）
+- **反重复**：按群隔离记忆最近 N 次发过的 hash 和 tag，过滤候选；过滤后空则回退完整候选（绝不无图可发）
+- **软限流**：1 分钟超 3 次返回 `error: 近期发送过频，请改用文字`，LLM 自动改用文字
+- **终态机制**：成功发图后不触发 LLM 续话（除非 LLM 显式传 followUpText 已经带了伴随文字）；失败返回 error 时正常续话
+
+**LLM 工具参数说明**：
+- `query`（必填）：情绪或场景关键词，例如 "开心"、"无奈"、"吐槽"
+- `followUpText`（可选）：先发送的伴随文字，最多 80 字。例如 `query="笑死" + followUpText="哈哈哈太离谱了"`
+
+**效果示例**：
+- 用户："今天好累啊" → bot 调用 `sendLocalEmojiTool(query="共鸣", followUpText="懂你")` → 先发"懂你" → 等约 500ms → 发[图]
+- 短时间内 bot 想发 4 次表情 → 第 4 次被限流 → bot 改文字回复
+- 连续多次"开心"场景 → 反重复挡同标签 → 每次换不同表情或不同情绪
+- 严肃技术问答 → LLM 不调用此工具（工具描述里写明不适合场景）
+
+**首次启用步骤**：
+1. 配置好 `analysisAiConfig`（推荐 Gemini Pro Vision / GPT-4o / Claude Sonnet 等多模态模型）
+2. 改 `config/message.yaml`：`emojiSystem.enabled: true`
+3. `oneapi_tools` 列表追加 `sendLocalEmojiTool`
+4. bot 内引用一张表情包图发 `#表情包导入`，导入 5-10 张作为基础库
+5. 和 bot 正常对话，让它在合适场景自然调用
 
 ---
 

@@ -24,16 +24,6 @@ import schedule from 'node-schedule'
 
 const _path = process.cwd()
 
-// 表情包配置
-const EMOJI_CONFIG = {
-  enabled: true, // 是否启用表情包回复功能
-  baseProbability: 0.20, // 基础触发概率
-  maxProbability: 0.30, // 最大触发概率
-  cooldownTime: 30000, // 冷却时间（毫秒），30秒内再次触发概率会衰减
-  minDelay: 500, // 表情包发送的最小延迟（毫秒）
-  maxDelay: 500 // 表情包发送的最大延迟（毫秒）
-}
-
 // 自动抢红包配置
 const RED_BAG_CONFIG = {
   enabled: true, // 是否启用自动抢红包
@@ -44,7 +34,9 @@ const RED_BAG_CONFIG = {
 
 const redBagCooldowns = new Map() // 红包冷却记录: key: groupId, value: lastGrabTime
 
-const sessionStates = new Map()
+// 终态工具：本轮调用后不再请求 LLM 续话（对齐 MaiBot 的 planner 动作即终态设计）
+const TERMINAL_TOOL_NAMES = new Set(['sendLocalEmojiTool'])
+
 const activeDedupeToolRuns = new Map()
 const taskStatusCache = new Map()
 const activeConversations = new Map() // 会话追踪: key: `${groupId}_${userId}`, value: { lastActiveTime, chatHistory: [], timer: null }
@@ -446,7 +438,6 @@ export class ExamplePlugin extends plugin {
     })
 
     this.initConfig()
-    EMOJI_CONFIG.enabled = this.config?.emojiEnabled || false
     const state = initializeSharedState(this.config)
 
     this.messageManager = state.messageManager
@@ -796,6 +787,9 @@ export class ExamplePlugin extends plugin {
     return toolNames
       .map(item => {
         const { name } = parseToolConfigEntry(item)
+        if (name === 'sendLocalEmojiTool' && !this.config?.emojiSystem?.enabled) {
+          return null
+        }
         const func = this.functionMap.get(name)
         if (!func) {
           if (warnMissing) console.warn(`未找到工具 "${name}"`)
@@ -920,7 +914,6 @@ export class ExamplePlugin extends plugin {
             this.config = merged.pluginSettings
 
             // 刷新各模块配置
-            EMOJI_CONFIG.enabled = this.config?.emojiEnabled || false
             const state = initializeSharedState(this.config)
             this.knowledgeSearcher = state.knowledgeSearcher
             this.MAX_HISTORY = this.config.groupMaxMessages || 100
@@ -1807,14 +1800,12 @@ ${mcpPrompts}
         await this.handleTextResponse(message.content, e, session, session.groupUserMessages, limit)
       }
 
-      this.sendEmojiWithProbability(e)
       this.clearSession(sessionId)
       return true
 
     } catch (error) {
       console.error(`[工具插件] 会话 ${sessionId} 执行异常：`, error)
       this.clearSession(sessionId)
-      this.sendEmojiWithProbability(e)
       return true
     } finally {
       await this.finishConversationTask(taskContext, session)
@@ -2117,6 +2108,12 @@ ${mcpPrompts}
         name: toolName,
         content: result
       })))
+
+      if (validResults.every(r => TERMINAL_TOOL_NAMES.has(r.toolName) && typeof r.result === 'string' && !r.result.startsWith('error:'))) {
+        logger.info(`[工具调用] 本轮全部为终态工具(${validResults.map(r => r.toolName).join(',')})且执行成功，跳过最终文本回复`)
+        session.toolResults = allToolResults
+        return
+      }
 
       const nextRequest = this.buildRequestData(currentMessages, session.tools, "auto")
       const nextResponse = await this.retryRequest(limit, nextRequest, session.toolContent, 1, session.toolName)
@@ -2515,41 +2512,6 @@ ${mcpPrompts}
     // 清理多余空行
     output = output.replace(/\n{3,}/g, '\n').trim()
     return sanitizeFinalReplyText(output)
-  }
-
-  getSessionState(e) {
-    const id = e.group_id || e.user_id
-    if (!sessionStates.has(id)) {
-      sessionStates.set(id, { lastEmojiTime: 0, consecutiveCount: 0 })
-    }
-    return sessionStates.get(id)
-  }
-
-  async sendEmojiWithProbability(e) {
-    if (!EMOJI_CONFIG.enabled) return
-
-    const state = this.getSessionState(e)
-    const now = Date.now()
-    const timeFactor = Math.min(1, (now - state.lastEmojiTime) / EMOJI_CONFIG.cooldownTime)
-    const penaltyFactor = Math.pow(0.7, Math.min(3, state.consecutiveCount))
-    const probability = Math.min(EMOJI_CONFIG.baseProbability * timeFactor * penaltyFactor, EMOJI_CONFIG.maxProbability)
-
-    if (Math.random() < probability) {
-      try {
-        state.consecutiveCount = 0
-        state.lastEmojiTime = now
-
-        const { data: memeList = [] } = await Bot.sendApi('fetch_custom_face', { count: 500 })
-        if (memeList.length) {
-          const delay = Math.floor(Math.random() * (EMOJI_CONFIG.maxDelay - EMOJI_CONFIG.minDelay + 1)) + EMOJI_CONFIG.minDelay
-          setTimeout(() => e.reply(segment.image(memeList[Math.floor(Math.random() * memeList.length)])), delay)
-        }
-      } catch (error) {
-        console.error('表情包发送失败:', error)
-      }
-    } else {
-      state.consecutiveCount = Math.min(state.consecutiveCount + 1, 10)
-    }
   }
 
   /**

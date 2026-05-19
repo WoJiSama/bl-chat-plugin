@@ -2,7 +2,6 @@ pluginSettings:
   enabled: true
   botName: 哈基米
   groupHistory: true
-  emojiEnabled: true
   useTools: true
   concurrentLimit: 3
   triggerPrefixes:
@@ -96,6 +95,28 @@ pluginSettings:
     embeddingApiUrl: https://api.openai.com/v1/embeddings
     embeddingApiModel: text-embedding-3-small
     embeddingApiKey: sk-xxxxx
+  emojiSystem:
+    enabled: false
+    dbPath: plugins/bl-chat-plugin/database/emoji-packs.ndjson
+    storeDir: plugins/bl-chat-plugin/database/emoji_files
+    maxItems: 200
+    autoCollect: false
+    visionTagOnAdd: true
+    useEmbedding: true
+    selectionTopK: 5
+    embeddingThreshold: 0.35
+    contentFiltration: false
+    doReplace: false
+    enableMaintenance: false
+    checkIntervalMinutes: 10
+    avoidRecentEnabled: true
+    avoidRecentCount: 5
+    avoidRecentTtlMinutes: 5
+    followUpDelayMinMs: 300
+    followUpDelayMaxMs: 1200
+    rateLimitEnabled: true
+    rateLimitWindowMinutes: 1
+    rateLimitMaxPerWindow: 3
   openai_tool_choice: auto
   oneapi_tools:
     - likeTool
