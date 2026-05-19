@@ -754,9 +754,10 @@ ${list}
   }
 
   async runMaintenance() {
-    if (!this.config.enabled) return
+    if (!this.config.enabled) return { skipped: true }
     const items = await this.loadItems(true)
     let changed = false
+    const report = { markedMissing: 0, unmarkedRestored: 0, orphanRegistered: 0, cleanedUntagged: 0 }
 
     // 1. 记录指向的文件不存在 → 标记 noFileFlag
     for (const item of items) {
@@ -765,10 +766,12 @@ ${list}
       if (!exists && !item.noFileFlag) {
         item.noFileFlag = true
         changed = true
+        report.markedMissing++
         logWarn(`维护：${item.hash.slice(0, 8)} 文件缺失，已标记`)
       } else if (exists && item.noFileFlag) {
         item.noFileFlag = false
         changed = true
+        report.unmarkedRestored++
       }
     }
 
@@ -796,6 +799,7 @@ ${list}
           isBanned: false
         })
         changed = true
+        report.orphanRegistered++
         logInfo(`维护：补登孤立文件 ${hashFromName.slice(0, 8)}`)
       }
     } catch (err) {
@@ -805,7 +809,6 @@ ${list}
     // 3. 清理无标签无向量的「残废」记录（含磁盘文件）
     //    仅在启用 VLM 打标时执行，避免误删用户主动关闭打标时的合法无标签项
     if (this.config.visionTagOnAdd !== false) {
-      let cleanedCount = 0
       for (let i = items.length - 1; i >= 0; i--) {
         const item = items[i]
         const hasTag = Array.isArray(item.tags) && item.tags.length > 0
@@ -814,14 +817,16 @@ ${list}
           const abs = path.join(this.storeDir, path.basename(item.file))
           try { await fsp.unlink(abs) } catch {}
           items.splice(i, 1)
-          cleanedCount++
+          report.cleanedUntagged++
           changed = true
         }
       }
-      if (cleanedCount) logInfo(`维护：清理 ${cleanedCount} 个无标签无向量的残废记录（含磁盘文件）`)
+      if (report.cleanedUntagged) logInfo(`维护：清理 ${report.cleanedUntagged} 个无标签无向量的残废记录（含磁盘文件）`)
     }
 
     if (changed) await this.saveItems(items)
+    report.total = items.length
+    return report
   }
 
   async maybeAutoCollect(e) {

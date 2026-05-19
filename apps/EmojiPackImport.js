@@ -184,9 +184,18 @@ export class EmojiPackPlugin extends plugin {
     emojiPackManager.refreshConfig()
     e.reply("正在执行文件一致性巡检...")
     try {
-      await emojiPackManager.runMaintenance()
-      const stats = await emojiPackManager.stats()
-      e.reply(`巡检完成，当前 ${stats.total} 张表情包`)
+      const report = await emojiPackManager.runMaintenance()
+      if (report?.skipped) {
+        return e.reply("表情包系统未启用，巡检跳过")
+      }
+      const lines = [
+        `巡检完成（当前 ${report.total} 张表情包）`,
+        `· 清理无标签无向量残废: ${report.cleanedUntagged} 个`,
+        `· 补登孤立文件: ${report.orphanRegistered} 个`,
+        `· 新标记缺失文件: ${report.markedMissing} 个`,
+        `· 自愈已恢复文件: ${report.unmarkedRestored} 个`
+      ]
+      e.reply(lines.join("\n"))
     } catch (err) {
       e.reply(`巡检失败: ${err.message}`)
     }
