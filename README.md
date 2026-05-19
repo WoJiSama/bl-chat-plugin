@@ -3,6 +3,23 @@
 
 # 只兼容Trss yunzai + Napcat，其他框架请勿使用
 
+---
+
+> [!TIP]
+> ## ⚡ 本插件配置项较多，强烈推荐使用锅巴插件可视化管理
+>
+> 本插件配置项 **100+ 项**，已完整适配 **[锅巴插件 (Guoba-Plugin)](https://github.com/guoba-yunzai/guoba-plugin)**，支持 Web UI 可视化修改全部配置，无需手动编辑 yaml。
+>
+> **一键安装锅巴**（在 Yunzai 根目录执行）：
+> ```bash
+> git clone --depth=1 https://gitee.com/guoba-yunzai/guoba-plugin.git ./plugins/Guoba-Plugin/
+> pnpm install --filter=guoba-plugin
+> ```
+>
+> 重启 Yunzai 后，#锅巴登录打开锅巴面板即可看到本插件的全部配置项分组管理。
+
+---
+
 # 部分使用效果
 ![效果图1](./assets/images/1.jpeg)
 ![效果图2](./assets/images/2.png)
@@ -21,6 +38,16 @@ pnpm install
 ### 首次启动时会自动创建config文件夹，请不要修改或删除config_default文件夹和里面的文件
 
 ### message.yaml文件为ai相关配置，mcp-servers.yaml文件为MCP服务相关配置
+
+### 锅巴插件可视化管理（可选）
+
+本插件已适配 [Guoba-Plugin](https://github.com/guoba-yunzai/guoba-plugin) 锅巴面板，安装锅巴后可在 Web UI 中可视化管理全部 100+ 配置项，无需手动编辑 `message.yaml`。
+
+- 所有字段按模块分组：基础设置 / 权限 / 触发 / 会话追踪 / AI 核心 / 情感系统 / 长期记忆 / 表达学习 / 知识库 / **表情包系统** / 8 个 AI 模型配置块 / 工具与 Token
+- 保存时自动保留 yaml 注释（用 YAML Document API 写回）
+- 写回后自动触发 `chokidar` 热更新，多数配置无需重启即可生效
+
+未安装锅巴插件时，本插件功能完全不受影响，仍可直接编辑 yaml 文件管理配置。
 
 
 # 插件指令

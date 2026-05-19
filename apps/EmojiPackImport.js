@@ -92,12 +92,19 @@ export class EmojiPackPlugin extends plugin {
     const msgs = [`表情包列表 (第 ${page}/${totalPages} 页，共 ${items.length} 张)`]
     pageItems.forEach((item, i) => {
       const tags = (item.tags || []).join(",") || "无标签"
-      const desc = item.description || ""
+      const desc = item.description ? `\n${item.description}` : ""
       const flags = []
       if (item.isBanned) flags.push("封禁")
       if (item.noFileFlag) flags.push("缺文件")
       const flagStr = flags.length ? ` [${flags.join("|")}]` : ""
-      msgs.push(`${start + i + 1}. ${item.hash.slice(0, 8)}${flagStr} | 用 ${item.usedCount || 0} 次 | [${tags}] ${desc}`)
+      const textLine = `${start + i + 1}. ${item.hash.slice(0, 8)}${flagStr}\n用 ${item.usedCount || 0} 次 | [${tags}]${desc}`
+
+      const abs = emojiPackManager.getAbsoluteFilePath(item)
+      if (!item.noFileFlag && fs.existsSync(abs)) {
+        msgs.push([segment.image(`file://${abs}`), `\n${textLine}`])
+      } else {
+        msgs.push(`${textLine}\n⚠️ 文件丢失`)
+      }
     })
     if (totalPages > 1) msgs.push(`提示: 发送 #表情包列表 <页码> 查看其他页`)
     await sendForward(e, msgs, "表情包列表")

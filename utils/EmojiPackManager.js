@@ -181,6 +181,12 @@ export class EmojiPackManager {
     const ext = this.detectExtFromBuffer(buffer)
     if (ext === ".bin") return { added: false, reason: "unsupported_format" }
 
+    // 第一道闸：库满且未开 doReplace 时直接拒绝，节省所有后续 AI 调用（content_filtration / VLM 打标 / embedding）
+    const maxItems = this.config.maxItems || 200
+    if (items.length >= maxItems && !this.config.doReplace) {
+      return { added: false, reason: "full" }
+    }
+
     if (this.config.contentFiltration) {
       try {
         const verdict = await this.contentFilterWithVLM(buffer, ext)
@@ -193,27 +199,23 @@ export class EmojiPackManager {
       }
     }
 
-    const maxItems = this.config.maxItems || 200
+    // 第二道闸：库仍满（此时 doReplace 必为 true）→ LLM 决策替换
     if (items.length >= maxItems) {
-      if (this.config.doReplace) {
-        try {
-          const removedHash = await this.replaceOldestByLLM(items)
-          if (removedHash) {
-            const removeIdx = items.findIndex(i => i.hash === removedHash)
-            if (removeIdx >= 0) {
-              const removed = items.splice(removeIdx, 1)[0]
-              const removedAbs = path.join(this.storeDir, path.basename(removed.file))
-              try { await fsp.unlink(removedAbs) } catch {}
-              logInfo(`满额替换：删除 ${removed.hash.slice(0, 8)} 给 ${hash.slice(0, 8)} 让位`)
-            }
-          } else {
-            return { added: false, reason: "full" }
+      try {
+        const removedHash = await this.replaceOldestByLLM(items)
+        if (removedHash) {
+          const removeIdx = items.findIndex(i => i.hash === removedHash)
+          if (removeIdx >= 0) {
+            const removed = items.splice(removeIdx, 1)[0]
+            const removedAbs = path.join(this.storeDir, path.basename(removed.file))
+            try { await fsp.unlink(removedAbs) } catch {}
+            logInfo(`满额替换：删除 ${removed.hash.slice(0, 8)} 给 ${hash.slice(0, 8)} 让位`)
           }
-        } catch (err) {
-          logWarn(`满额替换决策失败: ${err.message}`)
+        } else {
           return { added: false, reason: "full" }
         }
-      } else {
+      } catch (err) {
+        logWarn(`满额替换决策失败: ${err.message}`)
         return { added: false, reason: "full" }
       }
     }

@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node --check guoba.support.js)",
+      "Bash(node --check utils/configWriter.js)",
+      "Bash(node --check models/Guoba/index.js)",
+      "Bash(node --check models/Guoba/pluginInfo.js)",
+      "Bash(node --check models/Guoba/configInfo.js)",
+      "Bash(node -e ' *)",
+      "Bash(node --check utils/EmojiPackManager.js)",
+      "Bash(node --check apps/EmojiPackImport.js)",
+      "Bash(node --check models/Guoba/schemas/emoji.js)",
+      "Bash(node --check models/Guoba/schemas/memory.js)",
+      "Bash(node --check models/Guoba/schemas/aiModels.js)"
+    ]
+  }
+}
