@@ -27,7 +27,7 @@ export class SendLocalEmojiTool extends AbstractTool {
         },
         followUpText: {
           type: "string",
-          description: "可选。先发送这段文字再发表情包，模拟人类'先说一句话再发图'的习惯。例如 query='笑死' + followUpText='哈哈哈太离谱了'；query='无奈' + followUpText='我真的服了'。如果只想发表情包不带文字（纯反应场景），可不传此参数。文字不超过 80 字。"
+          description: "可选。先发送这段文字再发表情包，模拟人类'先说一句话再发图'的习惯。如果只想发表情包不带文字（纯反应场景），可不传此参数。文字不超过 80 字。"
         }
       },
       required: ["query"],

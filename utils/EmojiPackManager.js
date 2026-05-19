@@ -264,7 +264,7 @@ export class EmojiPackManager {
   }
 
   async gifToStaticPng(buffer) {
-    return await sharp(buffer, { animated: false }).png().toBuffer()
+    return await sharp(buffer, { animated: false, failOn: "none" }).png().toBuffer()
   }
 
   async prepareVLMImage(buffer, ext) {
@@ -273,7 +273,7 @@ export class EmojiPackManager {
         const png = await this.gifToStaticPng(buffer)
         return { buffer: png, mime: "image/png" }
       } catch (err) {
-        logWarn(`GIF 转静态失败，回退原图: ${err.message}`)
+        logInfo(`GIF 首帧提取失败已回退原图（不影响功能，VLM 仍可识别）: ${err.message.split(":")[0]}`)
       }
     }
     return { buffer, mime: this.detectMimeFromExt(ext) }
