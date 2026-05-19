@@ -749,7 +749,7 @@ ${list}
   }
 
   async runMaintenance() {
-    if (!this.config.enabled || !this.config.enableMaintenance) return
+    if (!this.config.enabled) return
     const items = await this.loadItems(true)
     let changed = false
 
