@@ -243,8 +243,13 @@ export class EmojiPackManager {
         const tagResult = await this.tagWithVLM(buffer, ext)
         record.tags = tagResult.tags
         record.description = tagResult.description
+        if (!record.tags.length && !record.description) {
+          throw new Error("VLM 未返回有效标签或描述")
+        }
       } catch (err) {
-        logWarn(`VLM 打标失败 (${hash.slice(0, 8)}): ${err.message}`)
+        logWarn(`VLM 打标失败 (${hash.slice(0, 8)}): ${err.message}，跳过入库`)
+        try { await fsp.unlink(absFile) } catch {}
+        return { added: false, reason: "tag_failed", error: err.message }
       }
     }
 
@@ -795,6 +800,25 @@ ${list}
       }
     } catch (err) {
       logWarn(`维护扫描目录失败: ${err.message}`)
+    }
+
+    // 3. 清理无标签无向量的「残废」记录（含磁盘文件）
+    //    仅在启用 VLM 打标时执行，避免误删用户主动关闭打标时的合法无标签项
+    if (this.config.visionTagOnAdd !== false) {
+      let cleanedCount = 0
+      for (let i = items.length - 1; i >= 0; i--) {
+        const item = items[i]
+        const hasTag = Array.isArray(item.tags) && item.tags.length > 0
+        const hasEmbed = Array.isArray(item.embedding) && item.embedding.length > 0
+        if (!hasTag && !hasEmbed) {
+          const abs = path.join(this.storeDir, path.basename(item.file))
+          try { await fsp.unlink(abs) } catch {}
+          items.splice(i, 1)
+          cleanedCount++
+          changed = true
+        }
+      }
+      if (cleanedCount) logInfo(`维护：清理 ${cleanedCount} 个无标签无向量的残废记录（含磁盘文件）`)
     }
 
     if (changed) await this.saveItems(items)
