@@ -27,6 +27,7 @@ import { GrabRedBagTool } from "../functions/functions_tools/GrabRedBagTool.js"
 import { ReminderTool } from "../functions/functions_tools/ReminderTool.js"
 import { TextImageTool } from "../functions/functions_tools/TextImageTool.js"
 import { SendLocalEmojiTool } from "../functions/functions_tools/SendLocalEmojiTool.js"
+import { WaitTool } from "../functions/functions_tools/WaitTool.js"
 
 const PLUGIN_NAME = "bl-chat-plugin"
 const CUSTOM_TOOL_EXTENSIONS = new Set([".js", ".mjs", ".cjs"])
@@ -59,7 +60,8 @@ const BUILT_IN_TOOL_FACTORIES = [
   () => new GrabRedBagTool(),
   () => new ReminderTool(),
   () => new TextImageTool(),
-  () => new SendLocalEmojiTool()
+  () => new SendLocalEmojiTool(),
+  () => new WaitTool()
 ]
 
 function logInfo(message) {

@@ -13,6 +13,8 @@ import { TotalTokens } from "../functions/tools/CalculateToken.js"
 import { mcpManager } from "../utils/MCPClient.js"
 import { localToolRegistry } from "../utils/LocalToolRegistry.js"
 import { getRedBagType, isExclusiveForUser } from "../utils/redBagUtils.js"
+import { pluginBridge } from "../utils/pluginBridge.js"
+import { personProfileInjector } from "../utils/PersonProfileInjector.js"
 import fs from "fs"
 import YAML from "yaml"
 import path from "path"
@@ -34,8 +36,8 @@ const RED_BAG_CONFIG = {
 
 const redBagCooldowns = new Map() // 红包冷却记录: key: groupId, value: lastGrabTime
 
-// 终态工具：本轮调用后不再请求 LLM 续话（对齐 MaiBot 的 planner 动作即终态设计）
-const TERMINAL_TOOL_NAMES = new Set(['sendLocalEmojiTool'])
+// 终态工具：本轮调用后不再请求 LLM 续话（工具的执行结果本身即为最终输出）
+const TERMINAL_TOOL_NAMES = new Set(['sendLocalEmojiTool', 'waitTool'])
 
 const activeDedupeToolRuns = new Map()
 const taskStatusCache = new Map()
@@ -43,6 +45,16 @@ const activeConversations = new Map() // 会话追踪: key: `${groupId}_${userId
 const trackingThrottle = new Map() // 节流: key: `${groupId}_${userId}`, value: lastCallTime
 const pendingJudgments = [] // 批量判断队列
 let batchTimer = null // 批量处理定时器
+// smart 模式：每群独立的频率状态，进程内 Map，重启清零
+const trackingChatStates = new Map() // groupId -> { pendingCount, lastMsgAt, replyLatencies: [{at, ms}], forceNextGate, lastGateNoActionAt, lastBotReplyAt, inFlight, waitTimers: Map<userKey, timeoutId> }
+// 群最后一条新消息到达时间戳，用于"准备回复前 debounce 看有没有新消息"（仅 smart 模式 set/读）
+const lastIncomingMsgAt = new Map() // groupId -> ts
+// 群连续被新消息打断的累计计数（达到上限后下一轮强制走完不再让步）
+const consecutiveInterrupts = new Map() // groupId -> count
+// 禁言状态短期缓存：避免每条群消息都查一次 ws RPC pickMember.getInfo()
+const mutedStatusCache = new Map() // groupId -> { isMuted, at }
+const MUTED_CACHE_TTL_MS = 30000
+let activeChatLruTimer = null // 全局 24h LRU 扫描定时器，进程内单例
 const roleMap = { owner: "owner", admin: "admin", member: "member" }
 const PSEUDO_TOOL_MARKERS = [
   "tool", "tools", "tool_call", "toolcall", "function", "function_call", "functioncall", "func", "call", "voice", "audio", "tts", "image", "img",
@@ -324,6 +336,8 @@ function initializeSharedState(config) {
     logger.error('[LocalToolRegistry] 初始化自定义工具失败:', error)
   })
 
+  pluginBridge.sharedState = sharedState
+
   // 知识库自动导入：首次启动时如果 ndjson 不存在，从 database_default 导入
   if (config.knowledgeSystem?.enabled && sharedState.knowledgeSearcher) {
     const dbPath = path.join(_path, 'plugins/bl-chat-plugin/database/knowledge-db.ndjson')
@@ -468,7 +482,52 @@ export class ExamplePlugin extends plugin {
       pluginInitialized = true
       mcpInitPromise = this.initMCP()
       this.initScheduledTasks()
+      this.startActiveChatLruScanner()
     }
+
+    pluginBridge.instance = this
+  }
+
+  /**
+   * 启动 trackingChatStates 的 TTL 扫描器（进程内单例）：每 1 小时扫一次，
+   * 把 lastMsgAt 超过 activeChatTtlHours 的群从内存状态淘汰，连同 waitTimers 一并清掉。
+   */
+  startActiveChatLruScanner() {
+    if (activeChatLruTimer) return
+    const intervalMs = 60 * 60 * 1000
+    activeChatLruTimer = setInterval(() => {
+      try {
+        const ttlHours = Number(this.config?.smartTrigger?.activeChatTtlHours) || 24
+        const cutoff = Date.now() - ttlHours * 3600 * 1000
+        let removed = 0
+        for (const [gid, st] of trackingChatStates) {
+          if ((st.lastMsgAt || 0) < cutoff) {
+            if (st.waitTimers) for (const t of st.waitTimers.values()) clearTimeout(t)
+            trackingChatStates.delete(gid)
+            lastIncomingMsgAt.delete(gid)
+            consecutiveInterrupts.delete(gid)
+            mutedStatusCache.delete(gid)
+            removed += 1
+          }
+        }
+        // 兜底：清掉孤儿条目（不应该出现，但防御性编程）
+        for (const [gid, ts] of lastIncomingMsgAt) {
+          if (!trackingChatStates.has(gid) && ts < cutoff) {
+            lastIncomingMsgAt.delete(gid)
+            consecutiveInterrupts.delete(gid)
+          }
+        }
+        // 禁言缓存独立 TTL（30 秒就过期了，但万一某个群冷下来缓存条目永远留着也不好）
+        const mutedCutoff = Date.now() - MUTED_CACHE_TTL_MS * 10
+        for (const [gid, item] of mutedStatusCache) {
+          if (item.at < mutedCutoff) mutedStatusCache.delete(gid)
+        }
+        if (removed > 0) logger.info(`[ActiveChatLRU] 淘汰 ${removed} 个 ${ttlHours}h 未活跃群，当前活跃 ${trackingChatStates.size}`)
+      } catch (err) {
+        logger.error('[ActiveChatLRU] 扫描失败:', err)
+      }
+    }, intervalMs)
+    activeChatLruTimer.unref?.()
   }
 
   async refreshLocalToolRegistry(options = {}) {
@@ -593,6 +652,445 @@ export class ExamplePlugin extends plugin {
       ...newData,
       timer
     })
+  }
+
+  // ==================== smart 模式：Timing Gate 触发 ====================
+
+  /**
+   * 判断 bot 是否在该群被禁言（个人禁言或全员禁言）。
+   * 兼容两套协议端字段：
+   *  - ICQQ：member.shutup_time / group.mute_left / group.info.shutup_time_me / .shutup_time_whole
+   *    语义：值 = 剩余禁言秒数（unix 时间戳 - 现在），> 0 即被禁言
+   *  - OneBot v11 / Napcat：member.shut_up_timestamp / group.info.group_all_shut 等
+   *    语义：shut_up_timestamp 是禁言到期 unix 秒时间戳，需对比当前时间
+   * 短期 LRU 缓存（30s）避免每条群消息都发一次 ws RPC；
+   * 任何异常都视为"未禁言"，避免误阻塞。
+   */
+  async isMutedInGroup(e) {
+    if (!e?.group_id) return false
+    const cached = mutedStatusCache.get(e.group_id)
+    if (cached && Date.now() - cached.at < MUTED_CACHE_TTL_MS) return cached.isMuted
+
+    const nowSec = Math.floor(Date.now() / 1000)
+    let isMuted = false
+    try {
+      const grp = e.group
+      if (grp) {
+        // ICQQ 风格：剩余秒数 / GroupInfo 字段
+        if (Number(grp.mute_left) > 0) isMuted = true
+        else {
+          const gi = grp.info || grp
+          if (Number(gi?.shutup_time_whole) > 0) isMuted = true
+          else if (Number(gi?.shutup_time_me) > 0) isMuted = true
+          // OneBot v11 / Napcat 风格全员禁言字段（不同实现可能用不同名）
+          else if (Number(gi?.group_all_shut) > 0) isMuted = true
+          else if (Number(gi?.shut_up_timestamp_whole) > nowSec) isMuted = true
+        }
+      }
+      // 个人禁言：拉自己的 member 信息（昂贵的 RPC，仅在群信息没显示已禁言时调）
+      if (!isMuted) {
+        const selfId = e.self_id || e.bot?.uin || Bot.uin
+        const me = await e.group?.pickMember?.(selfId)?.getInfo?.()
+        if (me) {
+          if (Number(me.shutup_time) > 0) isMuted = true
+          else if (Number(me.shut_up_timestamp) > nowSec) isMuted = true
+        }
+      }
+    } catch {}
+
+    mutedStatusCache.set(e.group_id, { isMuted, at: Date.now() })
+    return isMuted
+  }
+
+  getSmartState(groupId) {
+    let state = trackingChatStates.get(groupId)
+    if (!state) {
+      // 上限保护：超过 100 个群时按 lastMsgAt 淘汰最旧的群（防长期累积内存膨胀）
+      if (trackingChatStates.size >= 100) {
+        let oldestId = null
+        let oldestAt = Infinity
+        for (const [gid, st] of trackingChatStates) {
+          if (st.lastMsgAt < oldestAt) { oldestAt = st.lastMsgAt; oldestId = gid }
+        }
+        if (oldestId != null) {
+          const old = trackingChatStates.get(oldestId)
+          if (old?.waitTimers) for (const t of old.waitTimers.values()) clearTimeout(t)
+          trackingChatStates.delete(oldestId)
+        }
+      }
+      state = {
+        pendingCount: 0,
+        lastMsgAt: Date.now(),
+        replyLatencies: [],
+        forceNextGate: false,
+        lastGateNoActionAt: 0,
+        lastBotReplyAt: 0,        // bot 最后一次成功回复的时间戳，用于"近期回复追踪窗口"
+        inFlight: false,
+        waitTimers: new Map()
+      }
+      trackingChatStates.set(groupId, state)
+    }
+    return state
+  }
+
+  /**
+   * smart 模式触发入口：每条群消息进入此函数，按 talkValue 阈值/空窗补偿/强制覆盖三种条件决定是否调 Timing Gate
+   */
+  async handleRandomReplySmart(e) {
+    const groupId = e.group_id
+    const state = this.getSmartState(groupId)
+    // 记录该群最新消息时间戳给 applyReplyDebounce 用（仅 smart 模式需要，避免 strict 模式持续累积内存）
+    lastIncomingMsgAt.set(groupId, Date.now())
+    // 入口锁：该群已经有一个 handleRandomReplySmart 正在跑（Gate / debounce / handleTool 任一阶段）→ 让步本条
+    // 必须在任何 await 之前同步检查并 set，防止 await checkTriggers 期间多个调用并发通过
+    if (state.inFlight) return false
+    state.inFlight = true
+    try {
+      // 先记录上一条消息时间用于空窗补偿（要在 lastMsgAt 被本次更新覆盖之前取出）
+      const prevLastMsgAt = state.lastMsgAt || Date.now()
+      state.pendingCount += 1
+      state.lastMsgAt = Date.now()
+
+      const smartCfg = this.config.smartTrigger || {}
+
+      // 强制覆盖：@/触发前缀
+      const hasTrigger = await this.checkTriggers(e)
+      if (hasTrigger && smartCfg.inevitableAtReply !== false) {
+        state.forceNextGate = true
+      }
+      // 名字提及（非 @）
+      if (!state.forceNextGate && smartCfg.mentionedNameReply && e.msg) {
+        const botName = this.config.botName
+        if (botName && String(e.msg).toLowerCase().includes(String(botName).toLowerCase())) {
+          state.forceNextGate = true
+        }
+      }
+
+      // 冷却检查：no_action 后短时间内不再请求 Gate（强制覆盖可绕过）
+      const cooldownMs = Math.max(0, Number(smartCfg.timingGateCooldownSeconds) || 8) * 1000
+      if (!state.forceNextGate && cooldownMs > 0 && Date.now() - state.lastGateNoActionAt < cooldownMs) {
+        return false
+      }
+
+      // 阈值判定
+      const talkValue = this.resolveTalkValue(groupId)
+      const threshold = Math.max(1, Math.ceil(1 / Math.max(0.01, talkValue)))
+      const reachThreshold = state.pendingCount >= threshold
+      const idleHit = this.idleCompensationMet(state, threshold, prevLastMsgAt)
+      // 近期回复追踪窗口：bot 刚发过言时跳过 talkValue 阈值，让 Gate 评估是否接续对话
+      // （仍走 Gate，不直接 force=continue；cooldown 不跳过，避免 Gate 被反复刷）
+      const recentReplyMs = Math.max(0, Number(smartCfg.recentReplyWindowSeconds) || 0) * 1000
+      const inRecentReplyWindow = recentReplyMs > 0 && state.lastBotReplyAt > 0 && Date.now() - state.lastBotReplyAt < recentReplyMs
+      if (!state.forceNextGate && !reachThreshold && !idleHit && !inRecentReplyWindow) {
+        return false
+      }
+
+      let gateResult
+      try {
+        // 强制覆盖路径直接放行，跳过 Gate
+        if (state.forceNextGate) {
+          gateResult = { decision: 'continue', reason: 'force' }
+        } else {
+          gateResult = await this.runTimingGate(e, state)
+        }
+      } catch (err) {
+        logger.error(`[TimingGate] 调用失败:`, err)
+        gateResult = { decision: 'no_action', reason: 'error' }
+      }
+
+      const decision = gateResult?.decision || 'no_action'
+      logger.info(`[TimingGate] group=${groupId} decision=${decision} pending=${state.pendingCount}/${threshold} force=${state.forceNextGate} reason=${gateResult?.reason || ''}`)
+
+      if (decision === 'continue') {
+        const wasForced = gateResult?.reason === 'force'
+        state.pendingCount = 0
+        state.forceNextGate = false
+        state.lastGateNoActionAt = 0
+        // force 路径（@/名字提及/proactive 等"必回"场景）跳过 debounce 立即回复；其余先 debounce 看有没有新消息
+        if (!wasForced && !(await this.applyReplyDebounce(e))) {
+          return false
+        }
+        return await this.handleTool(e)
+      }
+      if (decision === 'wait') {
+        const sec = Math.max(1, Math.min(60, Number(gateResult.wait_seconds) || 5))
+        state.pendingCount = 0
+        state.forceNextGate = false
+        this.scheduleWaitReply(e, sec, 'gate_wait')
+        return false
+      }
+      // no_action
+      state.lastGateNoActionAt = Date.now()
+      state.pendingCount = 0
+      state.forceNextGate = false
+      return false
+    } finally {
+      state.inFlight = false
+    }
+  }
+
+  /**
+   * 调用 Timing Gate 子代理，返回 { decision: 'continue'|'no_action'|'wait', wait_seconds?, reason? }
+   */
+  async runTimingGate(e, state) {
+    const smartCfg = this.config.smartTrigger || {}
+    const ctxSize = Math.max(5, Math.min(100, Number(smartCfg.gateContextSize) || 20))
+    const botName = this.config.botName || Bot.nickname || '机器人'
+
+    let history = ''
+    try {
+      history = await this.messageManager.formatMessageHistory('group', e.group_id, ctxSize)
+    } catch { history = '(无)' }
+
+    // Gate 子代理复用 trackAiConfig（同样是"轻量 LLM 决策回不回话"用途，不再单独配置一份模型）
+    const trackCfg = this.config.trackAiConfig
+    const useCfg = {
+      url: trackCfg?.trackAiUrl,
+      model: trackCfg?.trackAiModel || 'gpt-4o-mini',
+      apikey: trackCfg?.trackAiApikey
+    }
+    if (!useCfg.url || !useCfg.apikey || String(useCfg.apikey).startsWith('sk-xxxxx')) {
+      return { decision: 'no_action', reason: 'no_api_config' }
+    }
+
+    const systemPrompt = `你是 QQ 群聊节奏判断助手。机器人名字叫"${botName}"。
+当前北京时间：${new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}
+你需要判断 ${botName} 是否应该现在插话、保持沉默、或稍后再说。
+
+判断规则：
+1. 群里在讨论 ${botName} 能贡献价值的话题（情绪共鸣/玩梗/技术问题/疑问求助）→ continue
+2. 用户之间在互相对话、不需要 ${botName} 插嘴 → no_action
+3. ${botName} 刚发过言、用户暂未回复，可能还有后续 → wait
+4. 严肃问答场景、用户在咨询正式问题且明确寻求帮助 → continue
+5. 纯水群/复读/无意义消息 → no_action
+6. ${botName} 被 @ 或明确点名（虽然此路径通常已强制放行）→ continue
+7. 深夜时段（23:00-06:00）应更倾向 wait 或 no_action
+
+只返回严格的 JSON，格式：{"decision":"continue|no_action|wait","wait_seconds":3,"reason":"简短理由"}
+wait 时 wait_seconds 取 3-15 之间。不要任何其他文字、不要 markdown、不要代码块包装。`
+
+    const userPrompt = `【近期群聊记录】
+${history}
+
+【当前消息】
+${e.sender?.card || e.sender?.nickname || '用户'}: ${e.msg || ''}
+
+请输出 JSON 决策。`
+
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 15000)
+    try {
+      const response = await fetch(useCfg.url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${useCfg.apikey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: useCfg.model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt }
+          ],
+          temperature: 0.3
+        }),
+        signal: controller.signal
+      })
+      if (!response.ok) return { decision: 'no_action', reason: `http_${response.status}` }
+      const data = await response.json()
+      const raw = data?.choices?.[0]?.message?.content?.trim() || ''
+      const jsonMatch = raw.match(/\{[\s\S]*\}/)
+      if (!jsonMatch) return { decision: 'no_action', reason: 'no_json' }
+      const parsed = JSON.parse(jsonMatch[0])
+      const dec = String(parsed.decision || '').toLowerCase()
+      if (!['continue', 'no_action', 'wait'].includes(dec)) {
+        return { decision: 'no_action', reason: 'invalid_decision' }
+      }
+      return {
+        decision: dec,
+        wait_seconds: Number(parsed.wait_seconds) || 5,
+        reason: String(parsed.reason || '').slice(0, 80)
+      }
+    } catch (err) {
+      return { decision: 'no_action', reason: `exception:${err.message}` }
+    } finally {
+      clearTimeout(timeoutId)
+    }
+  }
+
+  /**
+   * 回复 debounce：等待 replyDebounceMs 看群里是否有新消息进来；
+   * 有新消息且未到 maxConsecutiveInterrupts 上限 → 让步本轮（return false）；
+   * 否则放行（return true）。force 路径应在调用方跳过本检查。
+   */
+  async applyReplyDebounce(e) {
+    const debounceMs = Math.max(0, Number(this.config.smartTrigger?.replyDebounceMs) || 0)
+    if (debounceMs <= 0 || !e?.group_id) return true
+    const debounceStartAt = Date.now()
+    await new Promise(r => setTimeout(r, debounceMs))
+    const newestAt = lastIncomingMsgAt.get(e.group_id) || 0
+    if (newestAt > debounceStartAt) {
+      const max = Math.max(0, Number(this.config.smartTrigger?.maxConsecutiveInterrupts) || 0)
+      const cur = (consecutiveInterrupts.get(e.group_id) || 0) + 1
+      if (max === 0 || cur <= max) {
+        consecutiveInterrupts.set(e.group_id, cur)
+        logger.info(`[Debounce] group=${e.group_id} 检测到新消息打断，让步本轮 (${cur}/${max || '∞'})`)
+        return false
+      }
+      logger.info(`[Debounce] group=${e.group_id} 连续打断达上限 ${max} 次，强制走完不让步`)
+      consecutiveInterrupts.set(e.group_id, 0)
+      return true
+    }
+    consecutiveInterrupts.set(e.group_id, 0)
+    return true
+  }
+
+  /**
+   * 解析 talkValue：优先用时段化规则，否则用全局 talkValue
+   */
+  resolveTalkValue(groupId) {
+    const s = this.config.smartTrigger || {}
+    const fallback = Number(s.talkValue) || 1.0
+    if (!s.enableTalkValueRules || !Array.isArray(s.talkValueRules) || s.talkValueRules.length === 0) {
+      return fallback
+    }
+    const now = new Date()
+    const hhmm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+    for (const rule of s.talkValueRules) {
+      const range = String(rule?.range || '').trim()
+      const [start, end] = range.split('-').map(x => x?.trim())
+      if (!start || !end) continue
+      const inRange = (start <= end && hhmm >= start && hhmm <= end) ||
+                      (start > end && (hhmm >= start || hhmm <= end))
+      if (inRange) {
+        const v = Number(rule.value)
+        if (Number.isFinite(v) && v > 0) return v
+      }
+    }
+    return fallback
+  }
+
+  /**
+   * 空窗补偿：冷群按 idle/avg_latency 折算"等效消息数"，凑够阈值就触发
+   * @param state - 该群的 SmartState
+   * @param threshold - 当前阈值（ceil(1/talkValue)）
+   * @param prevLastMsgAt - 上一条消息的时间戳（本次入口前的值，必须由调用方传入，否则 idle=0 永远不命中）
+   */
+  idleCompensationMet(state, threshold, prevLastMsgAt) {
+    const s = this.config.smartTrigger || {}
+    if (!s.idleCompensationEnabled) return false
+    const avgMs = this.computeAvgReplyLatency(state) || Number(s.avgLatencyDefaultMs) || 60000
+    if (avgMs <= 0) return false
+    const idleMs = Math.max(0, Date.now() - (prevLastMsgAt || Date.now()))
+    return state.pendingCount + idleMs / avgMs >= threshold
+  }
+
+  /**
+   * 计算最近 10 分钟平均回复延迟（毫秒）
+   */
+  computeAvgReplyLatency(state) {
+    if (!state?.replyLatencies?.length) return 0
+    const cutoff = Date.now() - 600000
+    state.replyLatencies = state.replyLatencies.filter(item => item.at >= cutoff)
+    if (!state.replyLatencies.length) return 0
+    const sum = state.replyLatencies.reduce((acc, item) => acc + item.ms, 0)
+    return sum / state.replyLatencies.length
+  }
+
+  /**
+   * 记录一次"用户消息→bot 回复"的延迟，给空窗补偿用。两种模式都调用。
+   * 同时更新 state.lastBotReplyAt 给"近期回复追踪窗口"用。
+   */
+  recordReplyLatency(groupId, latencyMs) {
+    if (!groupId || !Number.isFinite(latencyMs) || latencyMs <= 0) return
+    const state = this.getSmartState(groupId)
+    state.replyLatencies.push({ at: Date.now(), ms: latencyMs })
+    if (state.replyLatencies.length > 50) state.replyLatencies = state.replyLatencies.slice(-50)
+    state.lastBotReplyAt = Date.now()
+  }
+
+  /**
+   * 安排 N 秒后强制再触发一轮 Gate，让 LLM 决定要不要补一句（wait 工具/Gate wait 决策共用）
+   */
+  scheduleWaitReply(e, seconds, reason) {
+    const groupId = e.group_id
+    if (!groupId) {
+      logger.warn(`[WaitTool] 私聊场景暂不支持自动续话: user=${e.user_id}`)
+      return
+    }
+    const state = this.getSmartState(groupId)
+    const userKey = `${groupId}_${e.user_id}`
+    const old = state.waitTimers.get(userKey)
+    if (old) clearTimeout(old)
+
+    const timer = setTimeout(async () => {
+      state.waitTimers.delete(userKey)
+      // 触发时再次校验：模式可能已切回 strict、bot 可能已被禁言、群可能已退出白名单
+      const mode = String(this.config?.chatTriggerMode || 'strict').toLowerCase()
+      if (mode !== 'smart') {
+        logger.info(`[WaitTool] group=${groupId} 已切出 smart 模式，取消续话`)
+        return
+      }
+      if (!this.checkGroupPermission(e)) {
+        logger.info(`[WaitTool] group=${groupId} 不在白名单，取消续话`)
+        return
+      }
+      if (await this.isMutedInGroup(e)) {
+        logger.info(`[WaitTool] group=${groupId} 被禁言，取消续话`)
+        return
+      }
+      state.forceNextGate = true
+      logger.info(`[WaitTool] group=${groupId} user=${e.user_id} fired after ${seconds}s reason=${reason || ''}`)
+      try {
+        await this.handleRandomReplySmart(e)
+      } catch (err) {
+        logger.error(`[WaitTool] 续话失败:`, err)
+      }
+    }, seconds * 1000)
+    state.waitTimers.set(userKey, timer)
+  }
+
+  /**
+   * 外部插件主动触发：注入 intent 到群历史 + 强制下一轮 Gate continue
+   * @param {string|number} groupId
+   * @param {string} intent 主动想说的话题/意图
+   * @param {object} opts { source: '插件名', anchorE: 可选锚点 e }
+   */
+  async enqueueProactiveTask(groupId, intent, opts = {}) {
+    if (!groupId || !intent) return { ok: false, error: 'missing_params' }
+    const anchor = opts.anchorE
+    if (!anchor) {
+      logger.warn(`[Proactive] group=${groupId} 缺少锚点 e，无法触发；intent="${String(intent).slice(0, 40)}"`)
+      return { ok: false, error: 'missing_anchor' }
+    }
+    if (String(anchor.group_id) !== String(groupId)) {
+      logger.warn(`[Proactive] anchor.group_id(${anchor.group_id}) 与传入 groupId(${groupId}) 不匹配，拒绝触发`)
+      return { ok: false, error: 'anchor_group_mismatch' }
+    }
+    if (!this.checkGroupPermission(anchor)) {
+      return { ok: false, error: 'not_whitelisted' }
+    }
+    if (await this.isMutedInGroup(anchor)) {
+      return { ok: false, error: 'muted' }
+    }
+
+    logger.info(`[Proactive] group=${groupId} source=${opts.source || 'unknown'} intent="${String(intent).slice(0, 40)}"`)
+    try {
+      const wrapped = Object.create(anchor)
+      wrapped.msg = `[系统主动触发 来自 ${opts.source || '插件'}] ${intent}`
+      const mode = String(this.config?.chatTriggerMode || 'strict').toLowerCase()
+      if (mode === 'smart') {
+        const state = this.getSmartState(groupId)
+        state.forceNextGate = true
+        setImmediate(() => this.handleRandomReplySmart(wrapped).catch(err => logger.error('[Proactive] 处理失败:', err)))
+      } else {
+        // strict 模式没有 Gate，直接走 handleTool（绕过 @/前缀破冰）
+        setImmediate(() => this.handleTool(wrapped).catch(err => logger.error('[Proactive] 处理失败:', err)))
+      }
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
   }
 
   async scanRedisKeys(pattern) {
@@ -789,6 +1287,10 @@ export class ExamplePlugin extends plugin {
         const { name } = parseToolConfigEntry(item)
         if (name === 'sendLocalEmojiTool' && !this.config?.emojiSystem?.enabled) {
           return null
+        }
+        if (name === 'waitTool') {
+          const mode = String(this.config?.chatTriggerMode || 'strict').toLowerCase()
+          if (mode !== 'smart' || !this.config?.smartTrigger?.waitToolEnabled) return null
         }
         const func = this.functionMap.get(name)
         if (!func) {
@@ -1489,12 +1991,15 @@ ${recentHistory || '(无)'}
     const messageTypes = e.message?.map(m => m.type) || []
     if (this.config.excludeMessageTypes.some(t => messageTypes.includes(t))) return false
 
+    // 禁言检测：bot 在该群被禁言（个人/全员）时不触发任何回复，避免发送失败 + 表情/red 包等也无意义
+    if (await this.isMutedInGroup(e)) return false
+
     // 静默收集消息用于表达学习（不管是否触发AI对话）
     if (this.config.expressionLearning?.enabled && e.msg) {
       this.expressionLearner.updateGroupExpressions(e.group_id, e.msg).catch(() => {})
     }
 
-    // 检测红包消息并随机触发抢红包
+    // 检测红包消息并随机触发抢红包（两种模式都生效）
     const walletSeg = e.message?.find(m => m.type == 'wallet')
     if (walletSeg && RED_BAG_CONFIG.enabled && toolConfigHasName(this.config.oneapi_tools, 'grabRedBagTool')) {
       const wallet = walletSeg.data || walletSeg
@@ -1532,6 +2037,13 @@ ${recentHistory || '(无)'}
         }
       }
     }
+
+    // smart 模式分发
+    const triggerMode = String(this.config.chatTriggerMode || 'strict').toLowerCase()
+    if (triggerMode === 'smart') {
+      return await this.handleRandomReplySmart(e)
+    }
+
 
     const hasTrigger = await this.checkTriggers(e)
 
@@ -1594,6 +2106,7 @@ ${recentHistory || '(无)'}
     await this.waitForMCPReady()
 
     const taskContext = await this.beginConversationTask(e)
+    const handleToolStartAt = Date.now()
 
     const { group_id: groupId, user_id: userId, msg } = e
     const sessionId = randomUUID()
@@ -1666,8 +2179,18 @@ ${recentHistory || '(无)'}
         }
       }
 
+      // 对方画像注入（昵称 + 最近发言；长期记忆已由 memoryPrompt 覆盖，避免重复）
+      let personProfilePrompt = ''
+      if (this.config.personProfileInjection?.enabled && groupId && userId) {
+        try {
+          personProfilePrompt = await limit(() => personProfileInjector.build(groupId, userId, e))
+        } catch (err) {
+          logger.error(`[画像注入] 失败: ${err.message}`)
+        }
+      }
+
       // 构建增强系统提示
-      const enhancedPrompts = [emotionPrompt, memoryPrompt, groupMemoryPrompt, expressionPrompt, knowledgePrompt].filter(Boolean).join('\n')
+      const enhancedPrompts = [emotionPrompt, memoryPrompt, groupMemoryPrompt, expressionPrompt, knowledgePrompt, personProfilePrompt].filter(Boolean).join('\n')
 
       const systemContent = `
 【认知系统初始化】
@@ -1809,6 +2332,7 @@ ${mcpPrompts}
       return true
     } finally {
       await this.finishConversationTask(taskContext, session)
+      if (e.group_id) this.recordReplyLatency(e.group_id, Date.now() - handleToolStartAt)
     }
   }
 
@@ -2377,7 +2901,15 @@ ${mcpPrompts}
           lastMessageId = res?.message_id
 
           if (i < segments.length - 1) {
-            const delay = Math.min(1000 + segments[i].length * 5 + Math.random() * 500, 3000)
+            const typingSpeed = Number(this.config?.smartTrigger?.typingSpeed) || 0
+            let delay
+            if (typingSpeed > 0) {
+              // typingSpeed 模式：按"字符/秒"计算每段间隔，加 0-300ms 随机抖动
+              delay = Math.min(Math.max(segments[i].length * 1000 / typingSpeed + Math.random() * 300, 200), 5000)
+            } else {
+              // 默认公式：固定起步 1s + 字符延展 + 抖动，上限 3s
+              delay = Math.min(1000 + segments[i].length * 5 + Math.random() * 500, 3000)
+            }
             await new Promise(r => setTimeout(r, delay))
           }
         }
