@@ -23,10 +23,10 @@ pluginSettings:
   chatTriggerMode: strict
   # smart 模式专属配置
   smartTrigger:
-    talkValue: 0.3                       # 频率 0.01-1.0；1=每条消息都跑 Gate（token 消耗大），0.3=约 4 条触发一次（推荐折中），0.1=10 条触发一次
+    talkValue: 0.15                      # 频率 0.01-1.0；1=每条消息都跑 Gate（token 消耗大），0.15=约 7 条触发一次（推荐折中），0.1=10 条触发一次
     idleCompensationEnabled: true        # 冷群空窗补偿：按时间折算等效消息数凑触发条件
     avgLatencyDefaultMs: 60000           # 平均回复延迟初始值（冷启动 fallback）
-    timingGateCooldownSeconds: 8         # Gate 判 no_action 后的冷却秒数
+    timingGateCooldownSeconds: 15        # Gate 判 no_action 后的冷却秒数
     gateContextSize: 10                  # 喂给 Gate 的群历史条数（越大决策越准但 token 越贵）
     waitToolEnabled: true                # 是否暴露 wait 工具给 LLM
     inevitableAtReply: true              # 命中 @bot 或 triggerPrefixes 时强制回复（跳过 Gate/cooldown/threshold/debounce）；两种命中走同一路径
@@ -39,7 +39,7 @@ pluginSettings:
     replyDebounceMs: 800                 # 准备回复前先等待这么久看有没有新消息（防"对方没说完就抢答"）；0=关
     maxConsecutiveInterrupts: 3          # 同一群被新消息连续打断的最大次数；超过后强制走完不再让步；0=每次都让步
     activeChatTtlHours: 24               # 群超过这么多小时没有新消息后从内存状态淘汰
-    recentReplyWindowSeconds: 60         # bot 最近 N 秒内发过回复则下一条消息跳过 talkValue 阈值检查（仍走 Gate 判断），让 bot 主动接续对话；0=关
+    proactiveReplyNoQuote: true          # smart 模式 Gate 主动触发的回复不带"引用消息"格式（更像群友自然插话，而非"回复某人"）；@/前缀触发的回复仍按正常引用概率
     typingSpeed: 0                       # 拟人化打字速度：每秒发送 N 个字符（调节段间延迟，两种模式都生效）；0=默认公式(1s起步+字符延展)，建议 8-25
   # 对方画像注入：每次回复前自动注入对方昵称/长期记忆/最近发言到 system prompt（增强"熟人感"）
   personProfileInjection:

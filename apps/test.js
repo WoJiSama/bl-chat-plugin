@@ -46,7 +46,7 @@ const trackingThrottle = new Map() // 节流: key: `${groupId}_${userId}`, value
 const pendingJudgments = [] // 批量判断队列
 let batchTimer = null // 批量处理定时器
 // smart 模式：每群独立的频率状态，进程内 Map，重启清零
-const trackingChatStates = new Map() // groupId -> { pendingCount, lastMsgAt, replyLatencies: [{at, ms}], forceNextGate, lastGateNoActionAt, lastBotReplyAt, inFlight, waitTimers: Map<userKey, timeoutId> }
+const trackingChatStates = new Map() // groupId -> { pendingCount, lastMsgAt, replyLatencies: [{at, ms}], forceNextGate, lastGateNoActionAt, inFlight, waitTimers: Map<userKey, timeoutId> }
 // 群最后一条新消息到达时间戳，用于"准备回复前 debounce 看有没有新消息"（仅 smart 模式 set/读）
 const lastIncomingMsgAt = new Map() // groupId -> ts
 // 群连续被新消息打断的累计计数（达到上限后下一轮强制走完不再让步）
@@ -724,7 +724,6 @@ export class ExamplePlugin extends plugin {
         replyLatencies: [],
         forceNextGate: false,
         lastGateNoActionAt: 0,
-        lastBotReplyAt: 0,        // bot 最后一次成功回复的时间戳，用于"近期回复追踪窗口"
         inFlight: false,
         waitTimers: new Map()
       }
@@ -777,11 +776,7 @@ export class ExamplePlugin extends plugin {
       const threshold = Math.max(1, Math.ceil(1 / Math.max(0.01, talkValue)))
       const reachThreshold = state.pendingCount >= threshold
       const idleHit = this.idleCompensationMet(state, threshold, prevLastMsgAt)
-      // 近期回复追踪窗口：bot 刚发过言时跳过 talkValue 阈值，让 Gate 评估是否接续对话
-      // （仍走 Gate，不直接 force=continue；cooldown 不跳过，避免 Gate 被反复刷）
-      const recentReplyMs = Math.max(0, Number(smartCfg.recentReplyWindowSeconds) || 0) * 1000
-      const inRecentReplyWindow = recentReplyMs > 0 && state.lastBotReplyAt > 0 && Date.now() - state.lastBotReplyAt < recentReplyMs
-      if (!state.forceNextGate && !reachThreshold && !idleHit && !inRecentReplyWindow) {
+      if (!state.forceNextGate && !reachThreshold && !idleHit) {
         return false
       }
 
@@ -806,6 +801,8 @@ export class ExamplePlugin extends plugin {
         state.pendingCount = 0
         state.forceNextGate = false
         state.lastGateNoActionAt = 0
+        // 标记本条为"主动搭话"（非 @/前缀触发），让 sendSegmentedMessage 决定要不要去掉引用
+        if (!wasForced) e._proactiveReply = true
         // force 路径（@/名字提及/proactive 等"必回"场景）跳过 debounce 立即回复；其余先 debounce 看有没有新消息
         if (!wasForced && !(await this.applyReplyDebounce(e))) {
           return false
@@ -857,14 +854,19 @@ export class ExamplePlugin extends plugin {
 当前北京时间：${new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}
 你需要判断 ${botName} 是否应该现在插话、保持沉默、或稍后再说。
 
-判断规则：
-1. 群里在讨论 ${botName} 能贡献价值的话题（情绪共鸣/玩梗/技术问题/疑问求助）→ continue
-2. 用户之间在互相对话、不需要 ${botName} 插嘴 → no_action
-3. ${botName} 刚发过言、用户暂未回复，可能还有后续 → wait
-4. 严肃问答场景、用户在咨询正式问题且明确寻求帮助 → continue
-5. 纯水群/复读/无意义消息 → no_action
-6. ${botName} 被 @ 或明确点名（虽然此路径通常已强制放行）→ continue
-7. 深夜时段（23:00-06:00）应更倾向 wait 或 no_action
+**核心原则：宁可不插话，也不要打扰别人对话**。
+群里大多数对话不需要 bot 参与，默认倾向 no_action。只在 ${botName} 有明显贡献价值时才 continue。
+
+判断规则（按优先级）：
+1. ${botName} 被 @ 或明确点名 → continue（这条路径通常已强制放行，但万一漏掉也要回）
+2. 用户直接向 ${botName} 提问或追问 → continue
+3. ${botName} 刚发过言、用户在回应/追问刚才的话题 → continue（除非话题已飘走）
+4. 严肃问答场景、用户在咨询正式问题且明确求助 → continue
+5. 群里在讨论 ${botName} 能贡献价值的话题（情绪共鸣/玩梗/技术问题），且没人接话冷场 → 适度 continue
+6. 用户之间在互相对话、不需要 ${botName} 插嘴 → no_action（即使话题有趣也不要硬蹭）
+7. 纯水群/复读/无意义消息 → no_action
+8. ${botName} 刚发过言、用户暂未回复，可能还有后续 → wait
+9. 深夜时段（23:00-06:00）应更倾向 wait 或 no_action
 
 只返回严格的 JSON，格式：{"decision":"continue|no_action|wait","wait_seconds":3,"reason":"简短理由"}
 wait 时 wait_seconds 取 3-15 之间。不要任何其他文字、不要 markdown、不要代码块包装。`
@@ -999,14 +1001,12 @@ ${e.sender?.card || e.sender?.nickname || '用户'}: ${e.msg || ''}
 
   /**
    * 记录一次"用户消息→bot 回复"的延迟，给空窗补偿用。两种模式都调用。
-   * 同时更新 state.lastBotReplyAt 给"近期回复追踪窗口"用。
    */
   recordReplyLatency(groupId, latencyMs) {
     if (!groupId || !Number.isFinite(latencyMs) || latencyMs <= 0) return
     const state = this.getSmartState(groupId)
     state.replyLatencies.push({ at: Date.now(), ms: latencyMs })
     if (state.replyLatencies.length > 50) state.replyLatencies = state.replyLatencies.slice(-50)
-    state.lastBotReplyAt = Date.now()
   }
 
   /**
@@ -2875,6 +2875,10 @@ ${mcpPrompts}
     try {
       output = sanitizeFinalReplyText(output)
       if (!output) return null
+      // 主动搭话路径（smart 模式 Gate 非 force 触发）强制不引用：bot 像群友自然插话而非"回复某人"
+      if (e?._proactiveReply && this.config?.smartTrigger?.proactiveReplyNoQuote !== false) {
+        quoteChance = 0
+      }
       const shouldQuote = Math.random() < quoteChance
       const { hasAt, msgSegments } = await this.convertAtInString(output, e.group)
 

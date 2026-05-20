@@ -3,6 +3,7 @@
 
 # 只兼容Trss yunzai + Napcat，其他框架请勿使用
 
+### 本插件实际表现出来的能力取决于配置的模型。
 ---
 
 > [!TIP]
@@ -612,154 +613,91 @@ MCP 管理命令：
 
 ### `smart` 模式：Gate 子代理 + 频率阈值
 
-群里每发 `ceil(1/talkValue)` 条消息触发一次 Gate 子代理，让小模型在 `continue / no_action / wait` 三选一。冷群按空窗补偿公式凑触发条件。@/触发前缀/名字提及走强制覆盖直接放行。
+群里每发 `ceil(1/talkValue)` 条消息触发一次 Gate 子代理（小模型），让它在 `continue / no_action / wait` 三选一。@/触发前缀/名字提及走强制覆盖直接放行。
 
 > [!IMPORTANT]
-> **smart 模式依赖 `trackAiConfig`** —— Gate 子代理复用对话追踪模型做决策。切到 smart 模式前请确保在「AI 模型配置」页填好 `trackAiConfig.trackAiApikey`（推荐 gpt-4o-mini / gemini-2.0-flash 等小模型）。未配置时 Gate 永远返回 no_action，bot 不会主动接话。
+> **smart 模式依赖 `trackAiConfig`** —— Gate 子代理复用此模型做决策。切到 smart 前请确保「AI 模型配置」页填好 `trackAiConfig.trackAiApikey`（推荐 gpt-4o-mini / gemini-2.0-flash 等小模型）。未配置时 Gate 永远返回 no_action，bot 不会主动接话。
 
-#### 基础配置 (`smartTrigger`)
+#### `smartTrigger` 配置项一览
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `talkValue` | float | `0.3` | **频率**，0.01-1.0；1=每条消息都跑 Gate（token 消耗大），0.3=约 4 条触发一次（推荐折中），0.1=10 条触发一次 |
-| `idleCompensationEnabled` | boolean | `true` | **冷群空窗补偿**：群冷下来时按 `idle/avgLatency` 折算等效消息数凑触发条件 |
-| `avgLatencyDefaultMs` | int | `60000` | 平均回复延迟初始值（毫秒），用于空窗补偿冷启动 |
-| `timingGateCooldownSeconds` | int | `8` | Gate 判 `no_action` 后多久内不再请求 Gate（防 LLM 被刷爆） |
+| `talkValue` | float | `0.15` | **频率**，0.01-1.0；1=每条都跑 Gate（贵），0.15=约 7 条触发一次（推荐），0.1=10 条触发一次 |
+| `idleCompensationEnabled` | boolean | `true` | 冷群空窗补偿：按 idle/avgLatency 折算等效消息数凑触发条件，避免冷群永不响应 |
+| `avgLatencyDefaultMs` | int | `60000` | 平均回复延迟初始值（毫秒），用于冷启动 fallback |
+| `timingGateCooldownSeconds` | int | `15` | Gate 判 `no_action` 后多久内不再请求 Gate |
 | `gateContextSize` | int | `10` | 喂给 Gate 的群历史条数（越大决策越准但 token 越贵） |
-| `waitToolEnabled` | boolean | `true` | 是否暴露 `waitTool` 给 LLM（拟人化打字停顿） |
-| `inevitableAtReply` | boolean | `true` | 消息含 @bot 或 `triggerPrefixes` 任一关键词时强制回复（跳过 Gate/cooldown/threshold/debounce） |
+| `inevitableAtReply` | boolean | `true` | 消息含 @bot 或 `triggerPrefixes` 时强制回复（跳过 Gate/cooldown/debounce） |
 | `mentionedNameReply` | boolean | `false` | 非 @ 且不在 `triggerPrefixes` 里、但消息含 `botName` 时也强制触发 |
+| `replyDebounceMs` | int | `800` | 准备回复前等多少毫秒看新消息，有新消息让步本轮；0=关 |
+| `maxConsecutiveInterrupts` | int | `3` | 同群连续被打断的上限，超过强制走完；0=每次都让步 |
+| `activeChatTtlHours` | int | `24` | 群超过这么多小时无消息从内存淘汰（每 1 小时扫描） |
+| `proactiveReplyNoQuote` | boolean | `true` | Gate 主动触发的回复（非 @/前缀）不带"引用消息"格式，更像群友自然插话 |
+| `typingSpeed` | int | `0` | 拟人化打字速度（字符/秒，两种模式都生效）；0=默认公式（1s 起步+字符延展），>0=按 `len*1000/speed` ms，下限 200ms 上限 5s，建议 8-25 |
+| `waitToolEnabled` | boolean | `true` | 是否暴露 `waitTool` 给 LLM（让 bot 可主动安排 N 秒后续话） |
+| `enableTalkValueRules` | boolean | `false` | 启用时段化频率（夜间安静 / 白天活跃） |
+| `talkValueRules` | list | 见下 | 时段规则数组，每项 `{ range: "HH:MM-HH:MM", value: 0-1 }`，支持跨夜（如 `23:00-06:59`），命中第一条为准 |
 
-#### 时段化频率 (`talkValueRules`)
-
-按时段覆盖 `talkValue`，例如"夜间安静、白天活跃"。`enableTalkValueRules: true` 时生效。
-
-| 配置项 | 类型 | 默认值 | 说明 |
-|---|---|---|---|
-| `enableTalkValueRules` | boolean | `false` | 启用时段化频率 |
-| `talkValueRules` | list | 见下方 | 时段规则数组，每项 `{ range: "HH:MM-HH:MM", value: 0-1 }` |
-
-默认规则（仅 `enableTalkValueRules: true` 时生效）：
+`talkValueRules` 默认示例（仅 `enableTalkValueRules: true` 时生效）：
 ```yaml
 talkValueRules:
-  - { range: "00:00-08:59", value: 0.3 }    # 深夜降到 30%
-  - { range: "09:00-22:59", value: 1.0 }    # 白天满频率
-  - { range: "23:00-23:59", value: 0.5 }    # 入睡前减半
+  - { range: "00:00-08:59", value: 0.3 }
+  - { range: "09:00-22:59", value: 1.0 }
+  - { range: "23:00-23:59", value: 0.5 }
 ```
 
-支持跨夜区间，如 `range: "23:00-06:59"` 表示晚上 11 点到次日 7 点。命中第一条匹配的为准，都不命中用全局 `talkValue`。
+#### 对方画像注入 (`personProfileInjection`，两种模式都生效)
 
-#### 新消息打断保护
-
-| 配置项 | 类型 | 默认值 | 说明 |
-|---|---|---|---|
-| `replyDebounceMs` | int | `800` | 准备回复前先等待这么久看有没有新消息；有则让步本轮。0=关闭 |
-| `maxConsecutiveInterrupts` | int | `3` | 同一群被新消息连续打断的最大次数；超过后强制走完不再让步。0=每次都让步 |
-
-避免"对方还没说完 bot 就抢答"的尴尬。force 路径（@/名字提及/proactive）跳过此检查直接回复。
-
-#### 内存淘汰
-
-| 配置项 | 类型 | 默认值 | 说明 |
-|---|---|---|---|
-| `activeChatTtlHours` | int | `24` | 群超过这么多小时没新消息就从内存状态淘汰（每 1 小时扫描一次） |
-| `recentReplyWindowSeconds` | int | `60` | **近期回复追踪窗口**：bot 最近 N 秒内发过回复时，下一条新消息跳过 talkValue 阈值检查（仍走 Gate 判断），让 bot 能主动接续对话。0=关闭。类似 strict 模式的窗口期但用 Gate 决策 |
-
-#### 拟人化打字 (两种模式都生效)
-
-| 配置项 | 类型 | 默认值 | 说明 |
-|---|---|---|---|
-| `typingSpeed` | int | `0` | 按字符/秒计算段间延迟。`0` = 默认公式（1s 起步 + 字符延展 + 抖动）；`>0` = 按 `len*1000/typingSpeed` 计算，下限 200ms 上限 5s。建议 8-25 |
-
-### Timing Gate 模型
-
-smart 模式下 Gate 子代理**直接复用 `trackAiConfig`**（两者都是"轻量 LLM 决策回不回话"用途，不再单独配置）。Gate 只输出 1-2 个 token 的 JSON 决策，推荐 `trackAiConfig` 配最便宜的小模型（gpt-4o-mini / gemini-2.0-flash / claude haiku 等）。
-
-### 对方画像注入 (`personProfileInjection`)
-
-两种模式都生效。每次回复前自动把"对话者昵称 + 最近 N 条发言"拼成 markdown 块塞进 system prompt，增强"熟人感"。长期记忆部分已由 memorySystem 注入，画像不重复包含。
+每次回复前自动注入"对话者昵称 + 最近 N 条发言"到 system prompt，增强"熟人感"。长期记忆部分已由 `memorySystem` 注入，画像不重复。
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `enabled` | boolean | `true` | 总开关 |
 | `maxRecentMessages` | int | `3` | 注入近期发言条数上限 |
 
-### `waitTool`（smart 模式专属）
+#### `waitTool`（smart 模式专属）
 
-LLM 可主动调用此工具"稍后再说一句"，模拟人类敲字停顿。**仅群聊有效**。
+LLM 可调此工具"稍后再说一句"模拟敲字停顿，**仅群聊有效**。参数：`seconds`（1-60，必填）/ `reason`（可选）。N 秒后自动续一轮 Gate；触发回调会再次校验模式/白名单/禁言，任一失败自动取消。
 
-参数：
-- `seconds`（必填）：等待秒数 1-60，建议 3-15
-- `reason`（可选）：日志说明
+启用前提：`chatTriggerMode: smart` + `smartTrigger.waitToolEnabled: true`（默认开）。`waitTool` 已默认列入 `oneapi_tools`，strict 模式不会暴露给 LLM。
 
-调用后：
-1. 工具立即返回 `已安排 N 秒后续话`
-2. N 秒后强制再触发一轮 Gate（自动跳过 debounce）
-3. 触发回调内会再次校验白名单/禁言/模式，任一失败自动取消
+> 老用户升级时 `oneapi_tools` 不会自动追加 `waitTool`，详见"启用工具列表"章节的升级提示。
 
-启用前提：`chatTriggerMode: smart` + `smartTrigger.waitToolEnabled: true`（默认开）。`waitTool` 已默认列入 `oneapi_tools`，strict 模式下不会暴露给 LLM。
-
-> 老用户从旧版本升级时 `oneapi_tools` 不会自动追加 `waitTool`，请参考"启用工具列表"章节的升级提示手动添加。
-
-### 主动触发 API（其他插件可调用）
-
-smart 和 strict 模式都支持，但要求 bot 实例已就绪：
+#### 主动触发 API（其他插件可调用）
 
 ```js
-// 在你自己的插件中获取本插件实例（在 ExamplePlugin 构造完成后可用）
 import { pluginBridge } from "../bl-chat-plugin/utils/pluginBridge.js"
-
-// anchor: 一个有效的 e（含 group_id/group/sender），用作触发上下文
+// anchor: 一个有效的 e（含 group_id/group/sender）作为触发上下文
 const result = await pluginBridge.instance?.enqueueProactiveTask(
-  groupId,
-  "提醒群友差不多该睡觉了",
-  { source: "your-plugin-name", anchorE: someE }
+  groupId, "提醒群友差不多该睡觉了",
+  { source: "your-plugin", anchorE: someE }
 )
-// result: { ok: true } 或 { ok: false, error: "muted" | "not_whitelisted" | ... }
+// result: { ok: true } 或 { ok: false, error: "muted"|"not_whitelisted"|... }
 ```
 
-行为：
-- smart 模式 → 走 Gate，决策 `continue` 才发；`anchor.msg` 被替换为 `[系统主动触发 来自 xxx] intent`
-- strict 模式 → 直接走 `handleTool`，绕过 @/前缀破冰
-- 自动检查白名单、禁言状态、`anchor.group_id == groupId` 三项
+自动检查白名单、禁言、`anchor.group_id == groupId`。smart 模式走 Gate 决策；strict 模式直接 handleTool。
 
-### 禁言保护
+#### 禁言保护
 
-两种模式都生效：bot 在群里被全员禁言或单独禁言时，所有自动回复链路（红包/Gate/wait/proactive/strict 追踪）全部阻断，避免无效发送。同时兼容两套协议端的字段：
-- **ICQQ**：`member.shutup_time` / `group.mute_left` / `group.info.shutup_time_me / .shutup_time_whole`（值=剩余禁言秒数，>0 即禁言中）
-- **OneBot v11 / Napcat**：`member.shut_up_timestamp` / `group.info.group_all_shut` / `.shut_up_timestamp_whole`（值=禁言到期 unix 时间戳，对比当前时间）
+两种模式都生效：bot 被全员或单独禁言时所有自动回复链路全部阻断，避免无效发送。检测同时兼容 ICQQ 和 OneBot v11 / Napcat 协议端字段，自动判断，无需配置。
 
-### 触发流程（smart 模式）
+#### 触发流程图（smart 模式）
 
 ```
 群消息 → handleRandomReply
-  ├─ 主开关 / 白名单 / 命令过滤
-  ├─ excludeMessageTypes 过滤
+  ├─ 主开关 / 白名单 / 命令过滤 / excludeMessageTypes
   ├─ 禁言检测 → 被禁言 → return
-  ├─ 表达学习收集
-  ├─ 红包检测（高优先级，直接进 handleTool）
+  ├─ 表达学习收集 + 红包检测
   └─ handleRandomReplySmart
-        ├─ inFlight 锁（已有任务在跑则让步本条）
-        ├─ pendingCount++
-        ├─ @/触发前缀/名字提及 → forceNextGate=true
-        ├─ Gate 冷却检查（force 跳过）
-        ├─ 阈值判定: force 或 pendingCount ≥ ceil(1/talkValue) 或 空窗补偿命中 或
-        │           近期回复窗口命中（bot 最近 recentReplyWindowSeconds 内发过言）
+        ├─ inFlight 锁（已有任务在跑则让步）
+        ├─ pendingCount++ / 检查 @/前缀/名字提及 → force
+        ├─ Gate cooldown 检查（force 跳过）
+        ├─ 阈值: force 或 pendingCount ≥ ceil(1/talkValue) 或 空窗补偿命中
         ├─ runTimingGate（15s 超时）→ continue / no_action / wait
         └─ continue
-              ├─ force 路径 → 直接 handleTool
-              └─ 非 force → applyReplyDebounce（等 N 秒看有无新消息）
-                    ├─ 有新消息且未到打断上限 → 让步 return
-                    └─ 否则 → handleTool → finally 更新 lastBotReplyAt（开启近期回复窗口）
+              ├─ force 路径 → 直接 handleTool（按正常引用概率）
+              └─ 非 force → debounce 800ms 看新消息 → handleTool（不引用）
 ```
-
-**近期回复窗口效果示例**（默认 60 秒）：
-- 用户 @ bot："今天天气怎样" → bot 回 "晴天 25 度" → `lastBotReplyAt` = T0
-- T0+10s 用户："要带伞吗"（不 @） → pendingCount=1 < threshold 但**近期回复窗口命中** → 进 Gate
-- Gate 看到上下文（bot 刚回过，用户在追问） → continue → bot 回 "不用，今天没雨"
-- T0+30s 用户："那中午吃什么"（不 @） → 同样跳过阈值进 Gate
-- Gate 看到话题已经飘走（中午吃什么跟 bot 无关） → no_action → 静默
-- T0+90s 用户继续追问 → 窗口已过期，回到正常阈值流程
 
 ---
 

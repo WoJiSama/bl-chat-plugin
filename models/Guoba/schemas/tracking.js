@@ -1,9 +1,12 @@
 export default [
-  // ===== 严格模式追踪（strict）=====
+  // 整组配置都在"对话追踪"这一个 tab 内；内部用 Divider 做小节分隔
   {
     component: "SOFT_GROUP_BEGIN",
-    label: "严格模式追踪 (strict)"
+    label: "对话追踪"
   },
+
+  // ===== 严格模式追踪（strict）=====
+  { component: "Divider", label: "严格模式追踪 (strict)" },
   {
     field: "conversationTrackingEnabled",
     label: "会话追踪开关",
@@ -33,10 +36,7 @@ export default [
   },
 
   // ===== 触发模式切换 =====
-  {
-    component: "SOFT_GROUP_BEGIN",
-    label: "对话触发模式切换"
-  },
+  { component: "Divider", label: "对话触发模式切换" },
   {
     field: "chatTriggerMode",
     label: "对话触发模式",
@@ -51,16 +51,13 @@ export default [
   },
 
   // ===== 智能模式 - 频率与阈值 =====
-  {
-    component: "SOFT_GROUP_BEGIN",
-    label: "智能模式 - 频率与阈值 (smart) ⚠️ 依赖 trackAiConfig"
-  },
+  { component: "Divider", label: "智能模式 - 频率与阈值 (smart)  ⚠ 依赖 trackAiConfig" },
   {
     field: "smartTrigger.talkValue",
     label: "talkValue（频率）",
     component: "InputNumber",
-    bottomHelpMessage: "⚠️ smart 模式依赖 trackAiConfig 作为 Gate 子代理；未配置时 Gate 永远 no_action，bot 不会主动接话。仅 smart 模式生效。1=每条消息都跑 Gate（token 消耗大），0.3=约 4 条触发一次（推荐折中），0.1=10 条触发一次。取值 0.01-1.0",
-    componentProps: { min: 0.01, max: 1, step: 0.05, placeholder: "0.3" }
+    bottomHelpMessage: "⚠️ smart 模式依赖 trackAiConfig 作为 Gate 子代理；未配置时 Gate 永远 no_action，bot 不会主动接话。仅 smart 模式生效。1=每条消息都跑 Gate（token 消耗大），0.15=约 7 条触发一次（推荐折中），0.1=10 条触发一次。取值 0.01-1.0",
+    componentProps: { min: 0.01, max: 1, step: 0.05, placeholder: "0.15" }
   },
   {
     field: "smartTrigger.idleCompensationEnabled",
@@ -80,7 +77,7 @@ export default [
     label: "Gate 冷却（秒）",
     component: "InputNumber",
     bottomHelpMessage: "smart 模式: Gate 判 no_action 后多久内不再请求 Gate，防 LLM 被刷爆",
-    componentProps: { min: 1, max: 60, placeholder: "8" }
+    componentProps: { min: 1, max: 60, placeholder: "15" }
   },
   {
     field: "smartTrigger.gateContextSize",
@@ -91,10 +88,7 @@ export default [
   },
 
   // ===== 智能模式 - 强制触发 =====
-  {
-    component: "SOFT_GROUP_BEGIN",
-    label: "智能模式 - 强制触发"
-  },
+  { component: "Divider", label: "智能模式 - 强制触发" },
   {
     field: "smartTrigger.inevitableAtReply",
     label: "触发关键词必回",
@@ -109,10 +103,7 @@ export default [
   },
 
   // ===== 智能模式 - 时段化频率 =====
-  {
-    component: "SOFT_GROUP_BEGIN",
-    label: "智能模式 - 时段化频率"
-  },
+  { component: "Divider", label: "智能模式 - 时段化频率" },
   {
     field: "smartTrigger.enableTalkValueRules",
     label: "启用时段化频率",
@@ -133,10 +124,7 @@ export default [
   },
 
   // ===== 智能模式 - 打断保护与拟人化 =====
-  {
-    component: "SOFT_GROUP_BEGIN",
-    label: "智能模式 - 打断保护与拟人化"
-  },
+  { component: "Divider", label: "智能模式 - 打断保护与拟人化" },
   {
     field: "smartTrigger.replyDebounceMs",
     label: "新消息打断静默 (ms)",
@@ -159,11 +147,10 @@ export default [
     componentProps: { min: 1, max: 168, placeholder: "24" }
   },
   {
-    field: "smartTrigger.recentReplyWindowSeconds",
-    label: "近期回复追踪窗口 (秒)",
-    component: "InputNumber",
-    bottomHelpMessage: "smart 模式: bot 最近 N 秒内发过回复则下一条消息跳过 talkValue 阈值检查（仍走 Gate 判断），让 bot 主动接续对话。0=关闭。类似 strict 模式的窗口期但用 Gate 决策",
-    componentProps: { min: 0, max: 600, placeholder: "60" }
+    field: "smartTrigger.proactiveReplyNoQuote",
+    label: "主动搭话不引用",
+    component: "Switch",
+    bottomHelpMessage: "smart 模式: Gate 主动触发的回复（非 @/前缀）不带'引用消息'格式，bot 像群友自然插话而不是'回复某人'。@/前缀触发仍按正常引用概率"
   },
   {
     field: "smartTrigger.typingSpeed",
@@ -180,10 +167,7 @@ export default [
   },
 
   // ===== 对方画像注入 =====
-  {
-    component: "SOFT_GROUP_BEGIN",
-    label: "对方画像注入（两种模式都生效）"
-  },
+  { component: "Divider", label: "对方画像注入（两种模式都生效）" },
   {
     field: "personProfileInjection.enabled",
     label: "对方画像注入开关",
