@@ -614,6 +614,9 @@ MCP 管理命令：
 
 群里每发 `ceil(1/talkValue)` 条消息触发一次 Gate 子代理，让小模型在 `continue / no_action / wait` 三选一。冷群按空窗补偿公式凑触发条件。@/触发前缀/名字提及走强制覆盖直接放行。
 
+> [!IMPORTANT]
+> **smart 模式依赖 `trackAiConfig`** —— Gate 子代理复用对话追踪模型做决策。切到 smart 模式前请确保在「AI 模型配置」页填好 `trackAiConfig.trackAiApikey`（推荐 gpt-4o-mini / gemini-2.0-flash 等小模型）。未配置时 Gate 永远返回 no_action，bot 不会主动接话。
+
 #### 基础配置 (`smartTrigger`)
 
 | 配置项 | 类型 | 默认值 | 说明 |

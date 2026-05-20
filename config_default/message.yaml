@@ -12,7 +12,7 @@ pluginSettings:
     - "973682389"
   enableGroupWhitelist: true
   whitelistRejectMsg: 本群未开启此功能哦~
-  groupMaxMessages: 100
+  groupMaxMessages: 30
   groupChatMemoryDays: 1
   maxToolRounds: 5
   conversationTrackingEnabled: false
