@@ -97,9 +97,9 @@ export default [
   },
   {
     field: "smartTrigger.mentionedNameReply",
-    label: "botName 提及必回",
+    label: "机器人昵称提及必回",
     component: "Switch",
-    bottomHelpMessage: "smart 模式: 非 @ 且不在 triggerPrefixes 里、但消息含 botName 时也强制触发"
+    bottomHelpMessage: "smart 模式: 非 @ 且不在 triggerPrefixes 里、但消息含机器人昵称（取 Bot.nickname）时也强制触发"
   },
 
   // ===== 智能模式 - 时段化频率 =====

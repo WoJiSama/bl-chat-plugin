@@ -759,7 +759,7 @@ export class ExamplePlugin extends plugin {
       }
       // 名字提及（非 @）
       if (!state.forceNextGate && smartCfg.mentionedNameReply && e.msg) {
-        const botName = this.config.botName
+        const botName = Bot.nickname
         if (botName && String(e.msg).toLowerCase().includes(String(botName).toLowerCase())) {
           state.forceNextGate = true
         }
@@ -832,7 +832,7 @@ export class ExamplePlugin extends plugin {
   async runTimingGate(e, state) {
     const smartCfg = this.config.smartTrigger || {}
     const ctxSize = Math.max(5, Math.min(100, Number(smartCfg.gateContextSize) || 20))
-    const botName = this.config.botName || Bot.nickname || '机器人'
+    const botName = Bot.nickname || '机器人'
 
     let history = ''
     try {
@@ -854,19 +854,16 @@ export class ExamplePlugin extends plugin {
 当前北京时间：${new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}
 你需要判断 ${botName} 是否应该现在插话、保持沉默、或稍后再说。
 
-**核心原则：宁可不插话，也不要打扰别人对话**。
-群里大多数对话不需要 bot 参与，默认倾向 no_action。只在 ${botName} 有明显贡献价值时才 continue。
+**总原则：保持克制，但不是只在被点名时才回**。
+${botName} 是群里一员，可以像群友一样自然参与对话；但不要硬蹭、不要每条都接、不要打扰别人之间的私聊。
 
-判断规则（按优先级）：
-1. ${botName} 被 @ 或明确点名 → continue（这条路径通常已强制放行，但万一漏掉也要回）
-2. 用户直接向 ${botName} 提问或追问 → continue
-3. ${botName} 刚发过言、用户在回应/追问刚才的话题 → continue（除非话题已飘走）
-4. 严肃问答场景、用户在咨询正式问题且明确求助 → continue
-5. 群里在讨论 ${botName} 能贡献价值的话题（情绪共鸣/玩梗/技术问题），且没人接话冷场 → 适度 continue
-6. 用户之间在互相对话、不需要 ${botName} 插嘴 → no_action（即使话题有趣也不要硬蹭）
-7. 纯水群/复读/无意义消息 → no_action
-8. ${botName} 刚发过言、用户暂未回复，可能还有后续 → wait
-9. 深夜时段（23:00-06:00）应更倾向 wait 或 no_action
+判断指引（参考，不机械套用）：
+- continue：被 @/点名；用户向 ${botName} 提问或追问；${botName} 刚发言用户在回应/接续话题；群里有有趣话题且气氛适合插一句；冷场需要破冰；情绪共鸣/玩梗的好时机；有人求助且 ${botName} 能帮上
+- no_action：用户之间在明确互相对话（点名了别人或在私聊话题）；纯水群复读无意义消息；同一话题刚回过应该让别人说；群里气氛不适合插话
+- wait：${botName} 刚发完一句话用户还没反应；用户句子像是没说完；明显在等下文
+
+时段倾向：深夜（23:00-06:00）更克制，倾向 wait 或 no_action；白天可以更活跃。
+冲突时偏向"少说"，但不要僵化到"非被叫就不开口"。
 
 只返回严格的 JSON，格式：{"decision":"continue|no_action|wait","wait_seconds":3,"reason":"简短理由"}
 wait 时 wait_seconds 取 3-15 之间。不要任何其他文字、不要 markdown、不要代码块包装。`
@@ -1770,7 +1767,7 @@ ${e.sender?.card || e.sender?.nickname || '用户'}: ${e.msg || ''}
    */
   async isUserTalkingToBot(userMessage, chatHistory = []) {
     try {
-      const botName = this.config.botName || Bot.nickname || '机器人'
+      const botName = Bot.nickname || '机器人'
 
       // 构建对话历史文本
       const historyText = chatHistory.length > 0
@@ -1869,7 +1866,7 @@ ${e.sender?.card || e.sender?.nickname || '用户'}: ${e.msg || ''}
    */
   async batchIsUserTalkingToBot(batch) {
     try {
-      const botName = this.config.botName || Bot.nickname || '机器人'
+      const botName = Bot.nickname || '机器人'
 
       // 为每条消息生成唯一标识
       const batchWithIds = batch.map((item, i) => ({
@@ -2730,7 +2727,7 @@ ${mcpPrompts}
         chatHistory.push({ role: 'user', content: userMsg })
 
         // 添加机器人回复
-        const botMsg = `${this.formatTime()} ${this.config.botName || Bot.nickname}(QQ号:${Bot.uin})[群身份: member]: 在群里说: ${output.substring(0, 200)}`
+        const botMsg = `${this.formatTime()} ${Bot.nickname}(QQ号:${Bot.uin})[群身份: member]: 在群里说: ${output.substring(0, 200)}`
         chatHistory.push({ role: 'bot', content: botMsg })
 
         // 只保留最近10条

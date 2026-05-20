@@ -10,13 +10,6 @@ export default [
     bottomHelpMessage: "false 时完全关闭 AI 对话功能"
   },
   {
-    field: "botName",
-    label: "机器人名称",
-    component: "Input",
-    bottomHelpMessage: "留空时自动取 Bot.nickname",
-    componentProps: { placeholder: "哈基米" }
-  },
-  {
     field: "groupHistory",
     label: "群聊历史记录",
     component: "Switch",

@@ -1,6 +1,5 @@
 pluginSettings:
   enabled: true
-  botName: 哈基米
   groupHistory: true
   useTools: true
   concurrentLimit: 3
@@ -30,7 +29,7 @@ pluginSettings:
     gateContextSize: 10                  # 喂给 Gate 的群历史条数（越大决策越准但 token 越贵）
     waitToolEnabled: true                # 是否暴露 wait 工具给 LLM
     inevitableAtReply: true              # 命中 @bot 或 triggerPrefixes 时强制回复（跳过 Gate/cooldown/threshold/debounce）；两种命中走同一路径
-    mentionedNameReply: false            # 非 @ 且不在 triggerPrefixes 里，但消息含 botName 时也强制触发
+    mentionedNameReply: false            # 非 @ 且不在 triggerPrefixes 里，但消息含机器人昵称（Bot.nickname）时也强制触发
     enableTalkValueRules: false          # 启用时段化频率（夜间安静 / 白天活跃）
     talkValueRules:
       - { range: "00:00-08:59", value: 0.3 }
