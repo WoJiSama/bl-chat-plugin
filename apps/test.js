@@ -1624,6 +1624,26 @@ ${e.sender?.card || e.sender?.nickname || '用户'}: ${e.msg || ''}
           const quotedImages = reply.message?.filter(m => m.type === "image") || []
           const hasQuotedImage = quotedImages.length > 0
 
+          // 视频 / 语音 / 文件 segment（之前没处理，导致引用视频时 LLM 看到的描述只是"一条消息"，
+          // 看不到视频链接也就没法调 videoAnalysisTool 分析）
+          const quotedVideos = reply.message?.filter(m => m.type === "video") || []
+          const videoUrls = quotedVideos
+            .map(v => v?.url || v?.file_url || v?.data?.url || v?.data?.file_url || v?.file || v?.data?.file)
+            .filter(Boolean)
+          const hasQuotedVideo = quotedVideos.length > 0
+
+          const quotedRecords = reply.message?.filter(m => m.type === "record") || []
+          const recordUrls = quotedRecords
+            .map(r => r?.url || r?.file_url || r?.data?.url || r?.data?.file_url || r?.file || r?.data?.file)
+            .filter(Boolean)
+          const hasQuotedRecord = quotedRecords.length > 0
+
+          const quotedFiles = reply.message?.filter(m => m.type === "file") || []
+          const fileNames = quotedFiles
+            .map(f => f?.name || f?.data?.name || f?.file || f?.data?.file)
+            .filter(Boolean)
+          const hasQuotedFile = quotedFiles.length > 0
+
           if (quotedSender) {
             let quotedRole = "member"
             let quotedNickname = quotedSender.nickname || quotedSender.card || "未知用户"
@@ -1643,18 +1663,24 @@ ${e.sender?.card || e.sender?.nickname || '用户'}: ${e.msg || ''}
             const quotedSenderInfo = `${quotedNickname}(qq号: ${quotedSender.user_id})[群身份: ${quotedRole}]`
             const quotedMessageId = reply.message_id ? `[消息ID:${reply.message_id}]` : ''
 
-            let quotedDescription = ""
-            if (forwardContent) {
-              quotedDescription = quotedMsg ? `"${quotedMsg}" 以及${forwardContent}` : forwardContent
-            } else if (quotedMsg && hasQuotedImage) {
-              quotedDescription = `"${quotedMsg}" 以及${quotedImages.length}张图片`
-            } else if (quotedMsg) {
-              quotedDescription = `"${quotedMsg}"`
-            } else if (hasQuotedImage) {
-              quotedDescription = `${quotedImages.length}张图片`
-            } else {
-              quotedDescription = "一条消息"
+            // 按"存在哪些 segment"拼描述，避免遗漏视频/语音/文件
+            const parts = []
+            if (quotedMsg) parts.push(`"${quotedMsg}"`)
+            if (forwardContent) parts.push(forwardContent)
+            if (hasQuotedImage) parts.push(`${quotedImages.length}张图片`)
+            if (hasQuotedVideo) {
+              const urlText = videoUrls.length ? `(链接: ${videoUrls.join(", ")})` : ""
+              parts.push(`一段视频${urlText}`)
             }
+            if (hasQuotedRecord) {
+              const urlText = recordUrls.length ? `(链接: ${recordUrls.join(", ")})` : ""
+              parts.push(`一段语音${urlText}`)
+            }
+            if (hasQuotedFile) {
+              const fileText = fileNames.length ? `(文件名: ${fileNames.join(", ")})` : ""
+              parts.push(`一个文件${fileText}`)
+            }
+            const quotedDescription = parts.length > 0 ? parts.join("，以及") : "一条消息"
 
             quoteContent = `引用了 ${quotedSenderInfo}${quotedMessageId} 的消息: ${quotedDescription}，`
           }
@@ -2939,7 +2965,14 @@ ${mcpPrompts}
     let last = 0
 
     for (let i = 0; i < processed.length; i++) {
-      if (punctuations.includes(processed[i]) && i - last + 1 >= idealLen * 0.7) {
+      const ch = processed[i]
+      if (ch === '\n') {
+        // \n 是 LLM 显式的"换行/分段"意图，无视长度阈值无条件切（避免 16 字以下被 idealLen*0.7 卡住不分）
+        if (i + 1 > last) {
+          points.push(i + 1)
+          last = i + 1
+        }
+      } else if (punctuations.includes(ch) && i - last + 1 >= idealLen * 0.7) {
         points.push(i + 1)
         last = i + 1
       }
