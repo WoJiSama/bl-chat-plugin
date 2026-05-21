@@ -29,16 +29,47 @@ export class EmojiPackPlugin extends plugin {
       rule: [
         { reg: "^#表情包导入$", fnc: "importEmoji", permission: "master" },
         { reg: "^#表情包列表(\\s+\\d+)?$", fnc: "listEmoji", permission: "master" },
-        { reg: "^#表情包删除\\s+\\S+$", fnc: "deleteEmoji", permission: "master" },
-        { reg: "^#表情包打标\\s+\\S+$", fnc: "retagEmoji", permission: "master" },
+        // hash 前缀可选：传了走前缀匹配；不传则从当前/引用消息提取图片用全 hash 精确匹配
+        { reg: "^#表情包删除(\\s+\\S+)?$", fnc: "deleteEmoji", permission: "master" },
+        { reg: "^#表情包打标(\\s+\\S+)?$", fnc: "retagEmoji", permission: "master" },
+        { reg: "^#表情包预览(\\s+\\S+)?$", fnc: "previewEmoji", permission: "master" },
+        { reg: "^#表情包封禁(\\s+\\S+)?$", fnc: "banEmoji", permission: "master" },
+        { reg: "^#表情包解封(\\s+\\S+)?$", fnc: "unbanEmoji", permission: "master" },
         { reg: "^#表情包重载$", fnc: "reloadEmoji", permission: "master" },
         { reg: "^#表情包统计$", fnc: "emojiStats", permission: "master" },
-        { reg: "^#表情包预览\\s+\\S+$", fnc: "previewEmoji", permission: "master" },
-        { reg: "^#表情包封禁\\s+\\S+$", fnc: "banEmoji", permission: "master" },
-        { reg: "^#表情包解封\\s+\\S+$", fnc: "unbanEmoji", permission: "master" },
         { reg: "^#表情包巡检$", fnc: "runMaintenance", permission: "master" }
       ]
     })
+  }
+
+  /**
+   * 从消息文本提取 hash 前缀（去掉指令头部和首尾空白）。无参数返回空串。
+   */
+  extractHashPrefix(e, cmdRegex) {
+    return String(e.msg || "").replace(cmdRegex, "").trim()
+  }
+
+  /**
+   * 从当前消息或引用消息提取图片，下载后计算 SHA-256，返回 [{ hash, item }] 列表。
+   * item 来自 emojiPackManager.loadItems()，不在库中的图片 item=null。
+   */
+  async resolveQuotedHashes(e) {
+    const urls = await TakeImages(e)
+    if (!urls?.length) return { ok: false, error: "请引用一条含表情包图片的消息再发送该命令（也可以在当前消息附带图片）" }
+
+    const items = await emojiPackManager.loadItems(true)
+    const results = []
+    for (const url of urls) {
+      try {
+        const buffer = await fetchImageBuffer(url)
+        const hash = emojiPackManager.sha256OfBuffer(buffer)
+        const item = items.find(i => i.hash === hash) || null
+        results.push({ hash, item })
+      } catch (err) {
+        results.push({ hash: null, item: null, error: err.message })
+      }
+    }
+    return { ok: true, results }
   }
 
   async importEmoji(e) {
@@ -112,26 +143,155 @@ export class EmojiPackPlugin extends plugin {
   }
 
   async deleteEmoji(e) {
-    const prefix = e.msg.replace(/^#表情包删除\s+/, "").trim()
-    if (!prefix) return e.reply("请提供要删除的 hash 前缀（至少 4 位）")
-    if (prefix.length < 4) return e.reply("hash 前缀至少 4 位，避免误删")
+    const prefix = this.extractHashPrefix(e, /^#表情包删除\s*/)
 
-    const result = await emojiPackManager.removeByHashPrefix(prefix)
-    if (!result.removed) return e.reply(`未找到 hash 以 ${prefix} 开头的表情包`)
-    return e.reply(`已删除 ${result.removed} 张表情包`)
+    // 模式 A：传了 hash 前缀 → 走前缀匹配
+    if (prefix) {
+      if (prefix.length < 4) return e.reply("hash 前缀至少 4 位，避免误删")
+      const result = await emojiPackManager.removeByHashPrefix(prefix)
+      if (!result.removed) return e.reply(`未找到 hash 以 ${prefix} 开头的表情包`)
+      return e.reply(`已删除 ${result.removed} 张表情包`)
+    }
+
+    // 模式 B：没传 hash → 从引用图片或当前消息附带图片提取
+    const resolved = await this.resolveQuotedHashes(e)
+    if (!resolved.ok) return e.reply(resolved.error)
+
+    const lines = []
+    let removedTotal = 0
+    for (const { hash, item, error } of resolved.results) {
+      if (error) { lines.push(`❌ 下载失败: ${error}`); continue }
+      if (!item) { lines.push(`⚠️ ${hash.slice(0, 8)} 不在库中`); continue }
+      const result = await emojiPackManager.removeByHashPrefix(hash)
+      if (result.removed) {
+        removedTotal += result.removed
+        lines.push(`✅ 已删除 ${hash.slice(0, 8)}`)
+      } else {
+        lines.push(`❌ 删除失败 ${hash.slice(0, 8)}`)
+      }
+    }
+    return e.reply([`已删除 ${removedTotal} 张`, ...lines].join("\n"))
   }
 
   async retagEmoji(e) {
-    const prefix = e.msg.replace(/^#表情包打标\s+/, "").trim()
-    if (!prefix || prefix.length < 4) return e.reply("请提供至少 4 位的 hash 前缀")
+    const prefix = this.extractHashPrefix(e, /^#表情包打标\s*/)
 
-    e.reply("正在重新打标...")
-    const result = await emojiPackManager.retagByHashPrefix(prefix)
-    if (!result.updated) {
-      return e.reply(`打标失败: ${result.error || "未找到匹配的表情包"}`)
+    if (prefix) {
+      if (prefix.length < 4) return e.reply("请提供至少 4 位的 hash 前缀")
+      e.reply("正在重新打标...")
+      const result = await emojiPackManager.retagByHashPrefix(prefix)
+      if (!result.updated) return e.reply(`打标失败: ${result.error || "未找到匹配的表情包"}`)
+      const tags = (result.item.tags || []).join(",") || "无标签"
+      return e.reply(`已更新 ${result.item.hash.slice(0, 8)}\n标签: ${tags}\n描述: ${result.item.description || "(无)"}`)
     }
-    const tags = (result.item.tags || []).join(",") || "无标签"
-    return e.reply(`已更新 ${result.item.hash.slice(0, 8)}\n标签: ${tags}\n描述: ${result.item.description || "(无)"}`)
+
+    const resolved = await this.resolveQuotedHashes(e)
+    if (!resolved.ok) return e.reply(resolved.error)
+
+    e.reply(`正在为 ${resolved.results.length} 张图片重新打标...`)
+    const lines = []
+    for (const { hash, item, error } of resolved.results) {
+      if (error) { lines.push(`❌ 下载失败: ${error}`); continue }
+      if (!item) { lines.push(`⚠️ ${hash.slice(0, 8)} 不在库中`); continue }
+      const result = await emojiPackManager.retagByHashPrefix(hash)
+      if (result.updated) {
+        const tagInfo = (result.item?.tags || []).join(",") || "无标签"
+        lines.push(`✅ ${hash.slice(0, 8)}\n标签: ${tagInfo}\n描述: ${result.item?.description || "(无)"}`)
+      } else {
+        lines.push(`❌ 打标失败 ${hash.slice(0, 8)}: ${result.error || "未知"}`)
+      }
+    }
+    await sendForward(e, ["打标结果", ...lines], "表情包打标")
+    return true
+  }
+
+  async banEmoji(e) {
+    const prefix = this.extractHashPrefix(e, /^#表情包封禁\s*/)
+
+    if (prefix) {
+      if (prefix.length < 4) return e.reply("请提供至少 4 位的 hash 前缀")
+      const result = await emojiPackManager.setBannedByHashPrefix(prefix, true)
+      if (!result.updated) return e.reply(`未找到 hash 以 ${prefix} 开头的表情包`)
+      return e.reply(`已封禁 ${result.updated} 张表情包（不参与选图，不删除文件）`)
+    }
+
+    const resolved = await this.resolveQuotedHashes(e)
+    if (!resolved.ok) return e.reply(resolved.error)
+
+    const lines = []
+    let total = 0
+    for (const { hash, item, error } of resolved.results) {
+      if (error) { lines.push(`❌ 下载失败: ${error}`); continue }
+      if (!item) { lines.push(`⚠️ ${hash.slice(0, 8)} 不在库中`); continue }
+      const result = await emojiPackManager.setBannedByHashPrefix(hash, true)
+      if (result.updated) {
+        total += result.updated
+        lines.push(`✅ 已封禁 ${hash.slice(0, 8)}`)
+      } else {
+        lines.push(`❌ 封禁失败 ${hash.slice(0, 8)}`)
+      }
+    }
+    return e.reply([`已封禁 ${total} 张`, ...lines].join("\n"))
+  }
+
+  async unbanEmoji(e) {
+    const prefix = this.extractHashPrefix(e, /^#表情包解封\s*/)
+
+    if (prefix) {
+      if (prefix.length < 4) return e.reply("请提供至少 4 位的 hash 前缀")
+      const result = await emojiPackManager.setBannedByHashPrefix(prefix, false)
+      if (!result.updated) return e.reply(`未找到 hash 以 ${prefix} 开头的表情包`)
+      return e.reply(`已解封 ${result.updated} 张表情包`)
+    }
+
+    const resolved = await this.resolveQuotedHashes(e)
+    if (!resolved.ok) return e.reply(resolved.error)
+
+    const lines = []
+    let total = 0
+    for (const { hash, item, error } of resolved.results) {
+      if (error) { lines.push(`❌ 下载失败: ${error}`); continue }
+      if (!item) { lines.push(`⚠️ ${hash.slice(0, 8)} 不在库中`); continue }
+      const result = await emojiPackManager.setBannedByHashPrefix(hash, false)
+      if (result.updated) {
+        total += result.updated
+        lines.push(`✅ 已解封 ${hash.slice(0, 8)}`)
+      } else {
+        lines.push(`❌ 解封失败 ${hash.slice(0, 8)}`)
+      }
+    }
+    return e.reply([`已解封 ${total} 张`, ...lines].join("\n"))
+  }
+
+  async previewEmoji(e) {
+    const prefix = this.extractHashPrefix(e, /^#表情包预览\s*/)
+
+    if (prefix) {
+      if (prefix.length < 4) return e.reply("请提供至少 4 位的 hash 前缀")
+      const items = await emojiPackManager.loadItems()
+      const item = items.find(i => i.hash.startsWith(prefix.toLowerCase()))
+      if (!item) return e.reply(`未找到 hash 以 ${prefix} 开头的表情包`)
+      const abs = emojiPackManager.getAbsoluteFilePath(item)
+      if (!fs.existsSync(abs)) return e.reply(`文件丢失: ${abs}`)
+      const tags = (item.tags || []).join(",") || "无标签"
+      await e.reply([
+        segment.image(`file://${abs}`),
+        `\nhash: ${item.hash}\n标签: ${tags}\n描述: ${item.description || "(无)"}\n使用次数: ${item.usedCount || 0}`
+      ])
+      return true
+    }
+
+    const resolved = await this.resolveQuotedHashes(e)
+    if (!resolved.ok) return e.reply(resolved.error)
+
+    const lines = []
+    for (const { hash, item, error } of resolved.results) {
+      if (error) { lines.push(`❌ 下载失败: ${error}`); continue }
+      if (!item) { lines.push(`⚠️ ${hash.slice(0, 8)} 不在库中（可能已删除）`); continue }
+      const tags = (item.tags || []).join(",") || "无标签"
+      lines.push(`hash: ${item.hash}\n标签: ${tags}\n描述: ${item.description || "(无)"}\n使用次数: ${item.usedCount || 0}\n封禁: ${item.isBanned ? "是" : "否"}`)
+    }
+    return e.reply(lines.join("\n----\n"))
   }
 
   async reloadEmoji(e) {
@@ -164,22 +324,6 @@ export class EmojiPackPlugin extends plugin {
     return true
   }
 
-  async banEmoji(e) {
-    const prefix = e.msg.replace(/^#表情包封禁\s+/, "").trim()
-    if (!prefix || prefix.length < 4) return e.reply("请提供至少 4 位的 hash 前缀")
-    const result = await emojiPackManager.setBannedByHashPrefix(prefix, true)
-    if (!result.updated) return e.reply(`未找到 hash 以 ${prefix} 开头的表情包`)
-    return e.reply(`已封禁 ${result.updated} 张表情包（不参与选图，不删除文件）`)
-  }
-
-  async unbanEmoji(e) {
-    const prefix = e.msg.replace(/^#表情包解封\s+/, "").trim()
-    if (!prefix || prefix.length < 4) return e.reply("请提供至少 4 位的 hash 前缀")
-    const result = await emojiPackManager.setBannedByHashPrefix(prefix, false)
-    if (!result.updated) return e.reply(`未找到 hash 以 ${prefix} 开头的表情包`)
-    return e.reply(`已解封 ${result.updated} 张表情包`)
-  }
-
   async runMaintenance(e) {
     emojiPackManager.refreshConfig()
     e.reply("正在执行文件一致性巡检...")
@@ -199,25 +343,6 @@ export class EmojiPackPlugin extends plugin {
     } catch (err) {
       e.reply(`巡检失败: ${err.message}`)
     }
-    return true
-  }
-
-  async previewEmoji(e) {
-    const prefix = e.msg.replace(/^#表情包预览\s+/, "").trim()
-    if (!prefix || prefix.length < 4) return e.reply("请提供至少 4 位的 hash 前缀")
-
-    const items = await emojiPackManager.loadItems()
-    const item = items.find(i => i.hash.startsWith(prefix.toLowerCase()))
-    if (!item) return e.reply(`未找到 hash 以 ${prefix} 开头的表情包`)
-
-    const abs = emojiPackManager.getAbsoluteFilePath(item)
-    if (!fs.existsSync(abs)) return e.reply(`文件丢失: ${abs}`)
-
-    const tags = (item.tags || []).join(",") || "无标签"
-    await e.reply([
-      segment.image(`file://${abs}`),
-      `\nhash: ${item.hash}\n标签: ${tags}\n描述: ${item.description || "(无)"}\n使用次数: ${item.usedCount || 0}`
-    ])
     return true
   }
 }

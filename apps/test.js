@@ -46,7 +46,7 @@ const trackingThrottle = new Map() // 节流: key: `${groupId}_${userId}`, value
 const pendingJudgments = [] // 批量判断队列
 let batchTimer = null // 批量处理定时器
 // smart 模式：每群独立的频率状态，进程内 Map，重启清零
-const trackingChatStates = new Map() // groupId -> { pendingCount, lastMsgAt, replyLatencies: [{at, ms}], forceNextGate, lastGateNoActionAt, inFlight, waitTimers: Map<userKey, timeoutId> }
+const trackingChatStates = new Map() // groupId -> { pendingCount, lastMsgAt, replyLatencies: [{at, ms}], forceContinue, forceGateCheck, lastGateNoActionAt, inFlight, waitTimers: Map<userKey, timeoutId> }
 // 群最后一条新消息到达时间戳，用于"准备回复前 debounce 看有没有新消息"（仅 smart 模式 set/读）
 const lastIncomingMsgAt = new Map() // groupId -> ts
 // 群连续被新消息打断的累计计数（达到上限后下一轮强制走完不再让步）
@@ -722,9 +722,14 @@ export class ExamplePlugin extends plugin {
         pendingCount: 0,
         lastMsgAt: Date.now(),
         replyLatencies: [],
-        forceNextGate: false,
+        forceContinue: false,
+        forceGateCheck: false,
         lastGateNoActionAt: 0,
         inFlight: false,
+        needsRerun: false,
+        rerunEvent: null,
+        queuedWhileInFlight: 0,
+        queuedForceGateCheck: false,
         waitTimers: new Map()
       }
       trackingChatStates.set(groupId, state)
@@ -739,35 +744,73 @@ export class ExamplePlugin extends plugin {
     const groupId = e.group_id
     const state = this.getSmartState(groupId)
     // 记录该群最新消息时间戳给 applyReplyDebounce 用（仅 smart 模式需要，避免 strict 模式持续累积内存）
-    lastIncomingMsgAt.set(groupId, Date.now())
+    const isSyntheticSmartEvent = e?._smartWaitRerun || e?._smartQueuedRerun || e?._proactiveReply
+    if (!isSyntheticSmartEvent) lastIncomingMsgAt.set(groupId, Date.now())
     // 入口锁：该群已经有一个 handleRandomReplySmart 正在跑（Gate / debounce / handleTool 任一阶段）→ 让步本条
     // 必须在任何 await 之前同步检查并 set，防止 await checkTriggers 期间多个调用并发通过
-    if (state.inFlight) return false
+    if (state.inFlight) {
+      state.queuedWhileInFlight = (state.queuedWhileInFlight || 0) + 1
+      state.lastMsgAt = Date.now()
+      state.needsRerun = true
+      if (e?._smartWaitRerun) state.queuedForceGateCheck = true
+      const smartCfg = this.config.smartTrigger || {}
+      const allowDirectTrigger = !e?._smartWaitRerun
+      const hasQueuedTrigger = allowDirectTrigger && this.checkTriggers(e)
+      const botName = Bot.nickname
+      const hasQueuedNameMention = allowDirectTrigger && smartCfg.mentionedNameReply && e.msg &&
+        botName && String(e.msg).toLowerCase().includes(String(botName).toLowerCase())
+      if ((hasQueuedTrigger && smartCfg.inevitableAtReply !== false) || hasQueuedNameMention || e?._proactiveReply) {
+        state.forceContinue = true
+        state.rerunEvent = e
+      } else if (!state.forceContinue) {
+        state.rerunEvent = e
+      }
+      return false
+    }
     state.inFlight = true
     try {
       // 先记录上一条消息时间用于空窗补偿（要在 lastMsgAt 被本次更新覆盖之前取出）
       const prevLastMsgAt = state.lastMsgAt || Date.now()
-      state.pendingCount += 1
+      const queuedCount = Math.max(0, Number(state.queuedWhileInFlight) || 0)
+      state.queuedWhileInFlight = 0
+      state.pendingCount += e?._smartQueuedRerun ? Math.max(1, queuedCount) : 1 + queuedCount
       state.lastMsgAt = Date.now()
 
       const smartCfg = this.config.smartTrigger || {}
+      const allowDirectTrigger = !e?._smartWaitRerun
+
+      if (e?._smartWaitRerun) {
+        state.forceContinue = false
+        state.forceGateCheck = true
+      } else if (e?._smartQueuedGateCheck) {
+        state.forceGateCheck = true
+      }
+
+      if (allowDirectTrigger && e?._proactiveReply) {
+        state.forceContinue = true
+      }
 
       // 强制覆盖：@/触发前缀
       const hasTrigger = await this.checkTriggers(e)
-      if (hasTrigger && smartCfg.inevitableAtReply !== false) {
-        state.forceNextGate = true
+      if (allowDirectTrigger && hasTrigger && smartCfg.inevitableAtReply !== false) {
+        state.forceContinue = true
       }
       // 名字提及（非 @）
-      if (!state.forceNextGate && smartCfg.mentionedNameReply && e.msg) {
+      if (allowDirectTrigger && !state.forceContinue && smartCfg.mentionedNameReply && e.msg) {
         const botName = Bot.nickname
         if (botName && String(e.msg).toLowerCase().includes(String(botName).toLowerCase())) {
-          state.forceNextGate = true
+          state.forceContinue = true
         }
       }
 
       // 冷却检查：no_action 后短时间内不再请求 Gate（强制覆盖可绕过）
-      const cooldownMs = Math.max(0, Number(smartCfg.timingGateCooldownSeconds) || 8) * 1000
-      if (!state.forceNextGate && cooldownMs > 0 && Date.now() - state.lastGateNoActionAt < cooldownMs) {
+      const rawCooldownValue = smartCfg.timingGateCooldownSeconds
+      const rawCooldownSeconds = rawCooldownValue === undefined || rawCooldownValue === null || rawCooldownValue === ''
+        ? NaN
+        : Number(rawCooldownValue)
+      const cooldownSeconds = Number.isFinite(rawCooldownSeconds) ? rawCooldownSeconds : 8
+      const cooldownMs = Math.max(0, cooldownSeconds) * 1000
+      if (!state.forceContinue && !state.forceGateCheck && cooldownMs > 0 && Date.now() - state.lastGateNoActionAt < cooldownMs) {
         return false
       }
 
@@ -776,14 +819,14 @@ export class ExamplePlugin extends plugin {
       const threshold = Math.max(1, Math.ceil(1 / Math.max(0.01, talkValue)))
       const reachThreshold = state.pendingCount >= threshold
       const idleHit = this.idleCompensationMet(state, threshold, prevLastMsgAt)
-      if (!state.forceNextGate && !reachThreshold && !idleHit) {
+      if (!state.forceContinue && !state.forceGateCheck && !reachThreshold && !idleHit) {
         return false
       }
 
       let gateResult
       try {
-        // 强制覆盖路径直接放行，跳过 Gate
-        if (state.forceNextGate) {
+        // 强制继续路径直接放行，跳过 Gate；强制 Gate 路径仍交给 Gate 判断是否补一句
+        if (state.forceContinue) {
           gateResult = { decision: 'continue', reason: 'force' }
         } else {
           gateResult = await this.runTimingGate(e, state)
@@ -794,12 +837,13 @@ export class ExamplePlugin extends plugin {
       }
 
       const decision = gateResult?.decision || 'no_action'
-      logger.info(`[TimingGate] group=${groupId} decision=${decision} pending=${state.pendingCount}/${threshold} force=${state.forceNextGate} reason=${gateResult?.reason || ''}`)
+      logger.info(`[TimingGate] group=${groupId} decision=${decision} pending=${state.pendingCount}/${threshold} forceContinue=${state.forceContinue} forceGate=${state.forceGateCheck} reason=${gateResult?.reason || ''}`)
 
       if (decision === 'continue') {
         const wasForced = gateResult?.reason === 'force'
         state.pendingCount = 0
-        state.forceNextGate = false
+        state.forceContinue = false
+        state.forceGateCheck = false
         state.lastGateNoActionAt = 0
         // 标记本条为"主动搭话"（非 @/前缀触发），让 sendSegmentedMessage 决定要不要去掉引用
         if (!wasForced) e._proactiveReply = true
@@ -812,17 +856,30 @@ export class ExamplePlugin extends plugin {
       if (decision === 'wait') {
         const sec = Math.max(1, Math.min(60, Number(gateResult.wait_seconds) || 5))
         state.pendingCount = 0
-        state.forceNextGate = false
+        state.forceContinue = false
+        state.forceGateCheck = false
         this.scheduleWaitReply(e, sec, 'gate_wait')
         return false
       }
       // no_action
       state.lastGateNoActionAt = Date.now()
       state.pendingCount = 0
-      state.forceNextGate = false
+      state.forceContinue = false
+      state.forceGateCheck = false
       return false
     } finally {
       state.inFlight = false
+      if (state.needsRerun) {
+        const rerunEvent = state.rerunEvent || e
+        const queuedForceGateCheck = !!state.queuedForceGateCheck
+        state.needsRerun = false
+        state.rerunEvent = null
+        state.queuedForceGateCheck = false
+        const wrappedRerun = Object.create(rerunEvent)
+        wrappedRerun._smartQueuedRerun = true
+        if (queuedForceGateCheck) wrappedRerun._smartQueuedGateCheck = true
+        this.handleRandomReplySmart(wrappedRerun).catch(err => logger.error('[TimingGate] 重跑失败:', err))
+      }
     }
   }
 
@@ -1036,10 +1093,13 @@ ${e.sender?.card || e.sender?.nickname || '用户'}: ${e.msg || ''}
         logger.info(`[WaitTool] group=${groupId} 被禁言，取消续话`)
         return
       }
-      state.forceNextGate = true
+      state.forceContinue = false
+      state.forceGateCheck = true
       logger.info(`[WaitTool] group=${groupId} user=${e.user_id} fired after ${seconds}s reason=${reason || ''}`)
       try {
-        await this.handleRandomReplySmart(e)
+        const wrapped = Object.create(e)
+        wrapped._smartWaitRerun = true
+        await this.handleRandomReplySmart(wrapped)
       } catch (err) {
         logger.error(`[WaitTool] 续话失败:`, err)
       }
@@ -1078,7 +1138,8 @@ ${e.sender?.card || e.sender?.nickname || '用户'}: ${e.msg || ''}
       const mode = String(this.config?.chatTriggerMode || 'strict').toLowerCase()
       if (mode === 'smart') {
         const state = this.getSmartState(groupId)
-        state.forceNextGate = true
+        state.forceContinue = true
+        wrapped._proactiveReply = true
         setImmediate(() => this.handleRandomReplySmart(wrapped).catch(err => logger.error('[Proactive] 处理失败:', err)))
       } else {
         // strict 模式没有 Gate，直接走 handleTool（绕过 @/前缀破冰）
@@ -1742,7 +1803,7 @@ ${e.sender?.card || e.sender?.nickname || '用户'}: ${e.msg || ''}
     return data
   }
 
-  async checkTriggers(e) {
+  checkTriggers(e) {
     try {
       const hasMessage = e.msg && typeof e.msg === "string" &&
         this.config.triggerPrefixes.some(p => p && e.msg.toLowerCase().includes(p.toLowerCase()))
