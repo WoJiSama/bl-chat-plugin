@@ -306,6 +306,7 @@ MCP 管理命令：
 - 远程 MCP 建议配置鉴权 header。
 - MCP 工具描述只能作为参考，不要把不可信 MCP 当成安全来源。
 - 插件不会主动把完整聊天记录发给 MCP，只有模型决定调用某个 MCP 工具时，才会把那次工具参数传给对应服务。
+- 命令式MCP例npx可能会启动慢导致超时，建议配置 `connectTimeoutMs` 增加超时时间，例如 `connectTimeoutMs: 120000` 表示增加到 120 秒，具体信息查看yunzai控制台。
 
 ## 高德地图MCP配置示例
 ![效果图3](./assets/images/3.png)
