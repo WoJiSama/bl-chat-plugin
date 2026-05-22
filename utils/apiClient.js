@@ -203,10 +203,10 @@ function convertToolMessagesForChat(messages = [], fallbackToolName = 'tool') {
                 role: 'system',
                 content: [
                     '[tool_execution]',
-                    'requests:',
-                    ...requests,
-                    results.length ? 'results:' : null,
-                    ...results
+                    // 'requests:',
+                    // ...requests,
+                    // results.length ? 'results:' : null,
+                    // ...results
                 ].filter(Boolean).join('\n')
             });
             continue;

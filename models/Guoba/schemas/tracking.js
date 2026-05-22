@@ -115,9 +115,11 @@ export default [
     label: "时段频率规则",
     component: "GSubForm",
     componentProps: {
+      multiple: true,
+      modalProps: { title: "时段频率规则" },
       schemas: [
-        { field: "range", label: "时段", component: "Input", componentProps: { placeholder: "00:00-08:59" } },
-        { field: "value", label: "talkValue", component: "InputNumber", componentProps: { min: 0.01, max: 1, step: 0.05 } }
+        { field: "range", label: "时段", component: "Input", componentProps: { placeholder: "00:00-08:59" }, required: true },
+        { field: "value", label: "talkValue", component: "InputNumber", componentProps: { min: 0.01, max: 1, step: 0.05 }, required: true }
       ]
     },
     bottomHelpMessage: "smart 模式: 每条规则一个时段，HH:MM-HH:MM 格式（支持跨夜如 23:00-06:59）；命中第一条匹配的为准；都不命中用全局 talkValue"
