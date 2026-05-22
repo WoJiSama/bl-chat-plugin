@@ -649,10 +649,11 @@ MCP 管理命令：
 `talkValueRules` 默认示例（仅 `enableTalkValueRules: true` 时生效）：
 ```yaml
 talkValueRules:
-  - { range: "00:00-08:59", value: 0.3 }
-  - { range: "09:00-22:59", value: 1.0 }
-  - { range: "23:00-23:59", value: 0.5 }
+  - { range: "08:00-22:59", value: 0.07 }   # 白天活跃 → 约 15 条触发一次 Gate
+  - { range: "23:00-23:59", value: 0.05 }   # 入睡前 → 约 20 条触发一次
+  - { range: "00:00-07:59", value: 0.034 }  # 深夜安静 → 约 30 条触发一次
 ```
+> 阈值公式：`ceil(1 / talkValue)`。例如 `value=0.07 → 15 条`，`value=0.05 → 20 条`，`value=0.034 → 30 条`。时段命中**按数组顺序首条匹配**为准，跨夜可写成 `23:00-06:59`。
 
 #### 对方画像注入 (`personProfileInjection`，两种模式都生效)
 
