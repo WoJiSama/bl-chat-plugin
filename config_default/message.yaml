@@ -66,6 +66,13 @@ pluginSettings:
     # ─── Gate prompt 信号阈值（保守倾向沉默）─────────────────
     promptHintBusyGroupRate: 10          # 群最近 5min 消息数 ≥ 此值时，Gate prompt 提示"群里热闹倾向沉默"
     promptHintRateLimitWarn: 3           # bot 最近 10min 已回复 ≥ 此值时，Gate prompt 强烈提示"避免刷屏"
+    # ─── 复读跟读（看到群里复读时按概率参与）─────────────────
+    repeatJoinEnabled: true              # 总开关
+    repeatDetectionWindow: 5             # 看最近 N 条群消息检测是否在复读
+    repeatMinCount: 3                    # 至少 N 个不同用户发了相同内容才算复读（含当前用户）；2 偏松易触发"两人偶发同词"
+    repeatJoinProbability: 0.6           # 命中复读后参与的概率（0-1）
+    repeatJoinCooldownMs: 180000         # bot 参与复读后多久不再跟读（防同一波内反复跟，3 分钟；rate limit 兜底总量）
+    repeatMaxTextLength: 30              # 复读文本最大字符数，超过则不参与（避免跟长发言）
   # 对方画像注入：每次回复前自动注入对方昵称/长期记忆/最近发言到 system prompt（增强"熟人感"）
   personProfileInjection:
     enabled: true

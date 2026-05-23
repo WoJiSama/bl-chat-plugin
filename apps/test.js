@@ -930,6 +930,87 @@ export class ExamplePlugin extends plugin {
     state.deferredTimer.unref?.()
   }
 
+  /**
+   * 执行参与复读：直接 e.reply(原文) 跳过 Gate / handleTool（规避 LLM 改写），
+   * 仍占用速率配额，但不升 FOCUS（复读不算正常对话参与）。
+   * rate limit 已满时返回 false 不复读。
+   */
+  async joinRepeat(e, state, text) {
+    const smartCfg = this.config.smartTrigger || {}
+    const groupId = e.group_id
+    // 复用速率检查（避免和正常回复一起把 bot 刷成复读机）
+    const cutoff = Date.now() - 600000
+    state.recentReplyTimestamps = (state.recentReplyTimestamps || []).filter(t => t > cutoff)
+    const maxPer10Min = Number(smartCfg.maxRepliesPer10Min) || 4
+    if (state.recentReplyTimestamps.length >= maxPer10Min) {
+      logger.info(`[Repeat] group=${groupId} rate limit 已满 (${state.recentReplyTimestamps.length}/${maxPer10Min}) 放弃复读`)
+      return false
+    }
+    logger.info(`[Repeat] group=${groupId} 参与复读 text="${text.slice(0, 30)}"`)
+    // 先发再写 state：避免 e.reply 抛错时 cooldown / rate limit / lastBotReplyAt 等被脏写
+    try {
+      await e.reply(text)
+    } catch (err) {
+      logger.error('[Repeat] 发送失败:', err)
+      return false
+    }
+    // 发送成功才提交状态变更
+    state.recentReplyTimestamps.push(Date.now())
+    state.lastRepeatJoinAt = Date.now()
+    state.lastBotReplyAt = Date.now()
+    state.lastBotReplyKeywords = extractChatKeywords(text, Number(smartCfg.continuationKeywordMaxCount) || 5)
+    state.pendingCount = 0
+    // 清瞬态标志：复读路径跳过了 continue/wait/no_action 分支，需要显式清掉以免污染下一条消息
+    state.forceContinue = false
+    state.forceGateCheck = false
+    state.lastGateNoActionAt = 0
+    return true
+  }
+
+  /**
+   * 复读检测：看最近 N 条群消息，若至少 minCount 个不同用户发了和当前 e.msg 完全相同的内容，
+   * 按 repeatJoinProbability 概率决定 bot 是否参与复读。返回要复读的文本，否则 null。
+   * 命中时不走 Gate / handleTool，直接 e.reply 原文，规避 LLM 改写。
+   */
+  detectGroupRepeat(e, state) {
+    const smartCfg = this.config.smartTrigger || {}
+    if (smartCfg.repeatJoinEnabled === false) return null
+    // 冷却：避免同一波内反复跟（即使 rate limit 还有配额）
+    const cooldownMs = Number(smartCfg.repeatJoinCooldownMs) || 180000
+    if (Date.now() - (state.lastRepeatJoinAt || 0) < cooldownMs) return null
+
+    const text = String(e?.msg || '').trim()
+    if (!text) return null
+    const maxLen = Number(smartCfg.repeatMaxTextLength) || 30
+    if (text.length > maxLen) return null
+
+    const botId = e?.bot?.uin || (typeof Bot !== 'undefined' && Bot.uin)
+    const currentUserId = String(e?.user_id || '')
+    const window = Math.max(2, Number(smartCfg.repeatDetectionWindow) || 5)
+    const recent = (state.recentMessages || []).slice(-window)
+    // 统计窗口内（不含当前消息）发过相同文本的不同用户数
+    const distinctUsers = new Set()
+    for (const m of recent) {
+      if (m.text === text && String(m.userId) !== currentUserId) {
+        distinctUsers.add(String(m.userId))
+      }
+    }
+    // 当前用户也算一个独立"复读源"
+    if (currentUserId) distinctUsers.add(currentUserId)
+    // 排除 bot 自己（理论上不该在 recentMessages 里）
+    if (botId) distinctUsers.delete(String(botId))
+
+    const minCount = Math.max(2, Number(smartCfg.repeatMinCount) || 3)
+    if (distinctUsers.size < minCount) return null
+
+    // 通过概率筛选
+    const prob = Number(smartCfg.repeatJoinProbability)
+    const finalProb = Number.isFinite(prob) ? Math.max(0, Math.min(1, prob)) : 0.6
+    if (Math.random() > finalProb) return null
+
+    return text
+  }
+
   // ==================== smart 模式：Timing Gate 触发 ====================
 
   /**
@@ -1017,6 +1098,8 @@ export class ExamplePlugin extends plugin {
         lastBotReplyKeywords: [],         // bot 上次发言提取的关键词（给 continuation R2 用）
         recentReplyTimestamps: [],        // bot 在该群的最近回复时间戳列表（速率限制用）
         recentIncomingTimestamps: [],     // 该群最近群消息时间戳（活跃度统计用）
+        recentMessages: [],               // 最近群消息 deque {userId, text, at}，复读检测用
+        lastRepeatJoinAt: 0,              // bot 最近一次参与复读的时间（防短期反复跟读）
         deferredTimer: null               // 冷群唤醒定时器
       }
       trackingChatStates.set(groupId, state)
@@ -1037,6 +1120,12 @@ export class ExamplePlugin extends plugin {
       // 活跃度采样移到入口锁外，避免抢锁失败时漏统计（影响 Gate 看到的 5min 消息数）
       state.recentIncomingTimestamps = (state.recentIncomingTimestamps || []).filter(t => t > Date.now() - 300000)
       state.recentIncomingTimestamps.push(Date.now())
+      // 复读检测用的最近消息 deque（保留最近 10 条文本）
+      const repeatText = (typeof e?.msg === 'string' ? e.msg : '').trim()
+      if (repeatText) {
+        state.recentMessages = (state.recentMessages || []).slice(-9)
+        state.recentMessages.push({ userId: e.user_id, text: repeatText, at: Date.now() })
+      }
     }
     // 入口锁：该群已经有一个 handleRandomReplySmart 正在跑（Gate / debounce / handleTool 任一阶段）→ 让步本条
     // 必须在任何 await 之前同步检查并 set，防止 await checkTriggers 期间多个调用并发通过
@@ -1098,6 +1187,19 @@ export class ExamplePlugin extends plugin {
         if (prefilter.kind === 'continuation_strong') {
           state.forceGateCheck = true
           logger.info(`[Prefilter] group=${groupId} continuation_strong reason=${prefilter.reason}`)
+        }
+        // 复读检测：命中且通过概率 → 跳过 Gate 直接复读原文。
+        // 但 force 路径（_proactiveReply / @bot / 触发前缀 / 名字提及）必须走正常 LLM 流程，
+        // 因为用户明确指名 bot 时只复读一个 "+1" 体验很差。
+        const hasForceSignal = state.forceContinue
+          || this.checkTriggers(e)
+          || (smartCfg.mentionedNameReply && e.msg && Bot.nickname &&
+              String(e.msg).toLowerCase().includes(String(Bot.nickname).toLowerCase()))
+        if (!hasForceSignal) {
+          const repeatText = this.detectGroupRepeat(e, state)
+          if (repeatText) {
+            return await this.joinRepeat(e, state, repeatText)
+          }
         }
       }
 
