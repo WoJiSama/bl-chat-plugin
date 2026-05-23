@@ -3550,7 +3550,9 @@ ${mcpPrompts}
       const { total_tokens } = await TotalTokens(output)
       let lastMessageId = null
 
-      if (total_tokens <= 10) {
+      // 含 \n 的消息一律走拆分（LLM 显式用换行表达"打两条"的意图），即使 token 数很小也要拆
+      const hasNewline = output.includes("\n")
+      if (total_tokens <= 10 && !hasNewline) {
         const res = await e.reply(output, shouldQuote)
         lastMessageId = res?.message_id
         return lastMessageId
