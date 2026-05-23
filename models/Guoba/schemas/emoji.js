@@ -64,8 +64,8 @@ export default [
     field: "emojiSystem.selectionTopK",
     label: "Top-K 召回数",
     component: "InputNumber",
-    bottomHelpMessage: "embedding 召回时取相似度最高的 K 张作为候选，再从候选中随机选一张。值越大随机性越强、准确性越低",
-    componentProps: { min: 1, max: 50, placeholder: "5" }
+    bottomHelpMessage: "embedding / 标签匹配时取相关度最高的 K 张作为候选，再按「相关分 × 1/(usedCount+1) × 冷启动 boost」加权抽样。值越大长尾覆盖越好，避免 200 张表情包只反复出现 Top 5",
+    componentProps: { min: 1, max: 50, placeholder: "20" }
   },
   {
     field: "emojiSystem.embeddingThreshold",
@@ -108,14 +108,14 @@ export default [
     label: "记忆最近 N 次发送",
     component: "InputNumber",
     bottomHelpMessage: "每群记忆最近 N 次发过的表情用于过滤。值越大越不重复但候选面越窄",
-    componentProps: { min: 1, max: 50, placeholder: "5" }
+    componentProps: { min: 1, max: 50, placeholder: "20" }
   },
   {
     field: "emojiSystem.avoidRecentTtlMinutes",
     label: "最近发送记忆 TTL（分钟）",
     component: "InputNumber",
     bottomHelpMessage: "超过 N 分钟的「最近发送」记录失效，相同表情可被重新选中",
-    componentProps: { min: 1, max: 120, placeholder: "5" }
+    componentProps: { min: 1, max: 120, placeholder: "30" }
   },
 
   // ===== 文字+表情节奏延迟 =====

@@ -17,15 +17,15 @@ const DEFAULT_EMOJI_CONFIG = {
   autoCollect: false,
   visionTagOnAdd: true,
   useEmbedding: true,
-  selectionTopK: 5,
+  selectionTopK: 20,
   embeddingThreshold: 0.5,
   contentFiltration: false,
   doReplace: false,
   enableMaintenance: false,
   checkIntervalMinutes: 10,
   avoidRecentEnabled: true,
-  avoidRecentCount: 5,
-  avoidRecentTtlMinutes: 5,
+  avoidRecentCount: 20,
+  avoidRecentTtlMinutes: 30,
   followUpDelayMinMs: 300,
   followUpDelayMaxMs: 1200,
   rateLimitEnabled: true,
@@ -489,7 +489,7 @@ ${list}
 
   getRecentExclusions(groupId) {
     if (!groupId) return { hashes: new Set(), tags: new Set() }
-    const ttlMs = (Number(this.config.avoidRecentTtlMinutes) || 5) * 60 * 1000
+    const ttlMs = (Number(this.config.avoidRecentTtlMinutes) || 30) * 60 * 1000
     const cutoff = Date.now() - ttlMs
     const picks = this.recentPicksByGroup.get(String(groupId)) || []
     const fresh = picks.filter(p => p.at >= cutoff)
@@ -508,11 +508,11 @@ ${list}
     const key = String(groupId)
     const list = this.recentPicksByGroup.get(key) || []
     list.push({ hash, tags: Array.isArray(tags) ? tags.slice() : [], at: Date.now() })
-    const max = Number(this.config.avoidRecentCount) || 5
+    const max = Number(this.config.avoidRecentCount) || 20
     while (list.length > max) list.shift()
     this.recentPicksByGroup.set(key, list)
     // 顺手清理过期群条目
-    const ttlMs = (Number(this.config.avoidRecentTtlMinutes) || 5) * 60 * 1000
+    const ttlMs = (Number(this.config.avoidRecentTtlMinutes) || 30) * 60 * 1000
     const cutoff = Date.now() - ttlMs
     for (const [gid, picks] of this.recentPicksByGroup) {
       const fresh = picks.filter(p => p.at >= cutoff)
@@ -557,6 +557,31 @@ ${list}
     }
   }
 
+  /**
+   * 从候选数组按"基础相关分 × usedCount 反向权重 × 冷启动 boost"加权抽样。
+   * candidates: [{ item, score }]，score 是 [0,1] 区间的"越大越相关"。
+   * 解决 200 张表情包只有 Top 5 反复出现的问题：让长尾和新图都有机会被选中。
+   */
+  weightedSampleByUsage(candidates) {
+    if (!candidates?.length) return null
+    const weights = candidates.map(({ item, score }) => {
+      const baseScore = Math.max(0.01, Number(score) || 0.01)
+      const usageWeight = 1 / ((item.usedCount || 0) + 1)
+      const coldBoost = (item.usedCount || 0) === 0 ? 2 : 1
+      return baseScore * usageWeight * coldBoost
+    })
+    const total = weights.reduce((a, b) => a + b, 0)
+    if (total <= 0) {
+      return candidates[Math.floor(Math.random() * candidates.length)]
+    }
+    let r = Math.random() * total
+    for (let i = 0; i < candidates.length; i++) {
+      r -= weights[i]
+      if (r <= 0) return candidates[i]
+    }
+    return candidates[candidates.length - 1]
+  }
+
   async selectEmoji(query, options = {}) {
     this.refreshConfig()
     const allItems = await this.loadItems()
@@ -591,14 +616,15 @@ ${list}
         const qEmbed = await this.getEmbedding(q)
         if (Array.isArray(qEmbed)) {
           const threshold = Number(this.config.embeddingThreshold) || 0.3
-          const topK = Number(this.config.selectionTopK) || 5
+          const topK = Number(this.config.selectionTopK) || 20
           const ranked = embeddedItems
             .map(item => ({ item, score: this.cosineSimilarity(qEmbed, item.embedding) }))
             .filter(r => r.score >= threshold)
             .sort((a, b) => b.score - a.score)
             .slice(0, topK)
           if (ranked.length) {
-            return { item: ranked[Math.floor(Math.random() * ranked.length)].item, strategy: "embedding" }
+            const picked = this.weightedSampleByUsage(ranked)
+            return { item: picked.item, strategy: "embedding" }
           }
         }
       } catch (err) {
@@ -609,6 +635,7 @@ ${list}
     // L2: tag Levenshtein
     const taggedItems = items.filter(i => Array.isArray(i.tags) && i.tags.length)
     if (q && taggedItems.length) {
+      const topK = Number(this.config.selectionTopK) || 20
       const ranked = taggedItems.map(item => {
         const dists = item.tags.map(tag => {
           const t = String(tag).toLowerCase()
@@ -616,10 +643,13 @@ ${list}
           if (t.includes(q) || q.includes(t)) return 1
           return this.levenshtein(t, q)
         })
-        return { item, score: Math.min(...dists) }
-      }).sort((a, b) => a.score - b.score).slice(0, 10)
+        const minDist = Math.min(...dists)
+        // 编辑距离越小越相关 → 转换为 score 越大越相关
+        return { item, score: 1 / (1 + minDist) }
+      }).sort((a, b) => b.score - a.score).slice(0, topK)
       if (ranked.length) {
-        return { item: ranked[Math.floor(Math.random() * ranked.length)].item, strategy: "levenshtein" }
+        const picked = this.weightedSampleByUsage(ranked)
+        return { item: picked.item, strategy: "levenshtein" }
       }
     }
 

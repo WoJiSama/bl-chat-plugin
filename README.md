@@ -518,7 +518,7 @@ MCP 管理命令：
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
 | `useEmbedding` | boolean | `true` | 是否给表情生成 embedding 向量（基于标签+描述）用于 L1 语义召回。关掉则降级到 Levenshtein 标签匹配 |
-| `selectionTopK` | int | `5` | embedding 召回取相似度 top-K，再从中随机一张 |
+| `selectionTopK` | int | `20` | embedding/levenshtein 召回取 top-K，再按"相关分 × 1/(usedCount+1) × 冷启动 boost"加权抽样。值越大长尾覆盖越好 |
 | `embeddingThreshold` | float | `0.5` | cosine 相似度低于此值不进候选。0.3 太宽召回近似随机，0.5 是中文 embedding 较稳的默认；小库（<50 张）匹配率低时可降到 0.35-0.4 |
 
 #### 满额替换 + 周期维护
@@ -534,8 +534,8 @@ MCP 管理命令：
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
 | `avoidRecentEnabled` | boolean | `true` | **反重复总开关**：避免短时间发同一张图或同一种情绪标签 |
-| `avoidRecentCount` | int | `5` | 每群记忆最近 N 次发过的表情用于过滤。值越大越不重复但选择面越窄 |
-| `avoidRecentTtlMinutes` | int | `5` | 超过 N 分钟的"最近发送"记录失效，可重新被选 |
+| `avoidRecentCount` | int | `20` | 每群记忆最近 N 次发过的表情用于过滤。值越大越不重复但选择面越窄 |
+| `avoidRecentTtlMinutes` | int | `30` | 超过 N 分钟的"最近发送"记录失效，可重新被选 |
 
 #### 文字+表情节奏
 

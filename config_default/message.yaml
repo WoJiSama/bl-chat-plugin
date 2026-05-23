@@ -269,15 +269,15 @@ pluginSettings:
     autoCollect: false
     visionTagOnAdd: true
     useEmbedding: true
-    selectionTopK: 5
+    selectionTopK: 20
     embeddingThreshold: 0.5
     contentFiltration: false
     doReplace: false
     enableMaintenance: false
     checkIntervalMinutes: 10
     avoidRecentEnabled: true
-    avoidRecentCount: 5
-    avoidRecentTtlMinutes: 5
+    avoidRecentCount: 20
+    avoidRecentTtlMinutes: 30
     followUpDelayMinMs: 300
     followUpDelayMaxMs: 1200
     rateLimitEnabled: true
