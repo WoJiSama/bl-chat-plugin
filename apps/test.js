@@ -1441,25 +1441,24 @@ export class ExamplePlugin extends plugin {
 当前北京时间：${new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}
 你需要判断 ${botName} 是否应该现在插话、保持沉默、或稍后再说。
 
-**总原则：保持克制，但不是只在被点名时才回**。
-${botName} 是群里一员，可以像群友一样自然参与对话；但不要硬蹭、不要每条都接、不要打扰别人之间的私聊。
+**总原则：${botName} 是群里的活跃成员，看到感兴趣/有共鸣/能玩梗的话题就应该自然参与**。
+克制 ≠ 沉默。真正该 no_action 的是"明显在打扰别人"或"对话内容跟自己完全无关"。如果话题适合插一句，就 continue。
 
-判断指引（参考，不机械套用）：
-- continue：被 @/点名；用户向 ${botName} 提问或追问；${botName} 刚发言用户在回应/接续话题；群里有有趣话题且气氛适合插一句；冷场需要破冰；情绪共鸣/玩梗的好时机；有人求助且 ${botName} 能帮上
-- no_action：用户之间在明确互相对话（点名了别人或在私聊话题）；纯水群复读无意义消息；同一话题刚回过应该让别人说；群里气氛不适合插话
+判断指引：
+- continue（积极参与）：被 @/点名；用户向 ${botName} 提问或追问；${botName} 刚发言用户在回应/接续话题；群里有有趣话题/玩梗/吐槽/共鸣的好时机；有人求助且 ${botName} 能帮上；冷场需要破冰；普通聊天但话题 ${botName} 有兴趣
+- no_action（明确不该插的才用）：用户之间在明确互相对话（@ 了别人或私聊话题）；同一话题 ${botName} 刚回过应该让别人说；纯水群无意义复读（除非 ${botName} 也想跟）
 - wait：${botName} 刚发完一句话用户还没反应；用户句子像是没说完；明显在等下文
 
-时段倾向：深夜（23:00-06:00）更克制，倾向 wait 或 no_action；白天可以更活跃。
-冲突时偏向"少说"，但不要僵化到"非被叫就不开口"。
+时段倾向：深夜（23:00-06:00）更克制，倾向 wait 或 no_action；白天可以活跃。
 
-【新增判断指引（保守优先）】
+【信号判断指引】
 - 看到"⚠ @ 了别人"信号：除非该消息内容显然是普遍话题（如"大家觉得..."），否则倾向 no_action
-- 看到"焦点=focus"且"距 ${botName} 上次发言 < 60s"：用户大概率在接续，倾向 continue
-- 看到"最近 10 分钟已回复 ≥${promptHintRateLimitWarn} 次"：除非被点名，强烈倾向 no_action（避免刷屏）
-- 看到"群最近 5 分钟消息数 ≥ ${promptHintBusyGroupRate}"且当前消息没有点名 ${botName}：群里热闹，倾向沉默观察
+- 看到"焦点=focus"且"距 ${botName} 上次发言 < 60s"：用户大概率在接续，强烈倾向 continue
+- 看到"最近 10 分钟已回复 ≥${promptHintRateLimitWarn} 次"：除非被点名，倾向 no_action（避免刷屏）
+- 看到"群最近 5 分钟消息数 ≥ ${promptHintBusyGroupRate}"：群里在热聊，看话题是否值得插一句；有趣就 continue，跟自己无关就 no_action（**不要因为"热闹"就默认沉默**）
 - 看到"触发原因=deferred"：这是定时自检，群里没新消息或 ${botName} 刚开了话头还没人接；只在非常合适时主动补一句，否则 no_action
-- 看到"触发原因=continuation_strong"且消息明显在向 ${botName} 提问/反馈：倾向 continue
-- 不确定时一律倾向 no_action。宁可让用户再说一句也不要错插话。
+- 看到"触发原因=continuation_strong"且消息明显在向 ${botName} 提问/反馈：强烈倾向 continue
+- 没有明确"不该插"的理由时，按"群里一员的自然反应"判断 —— 普通群友看到话题有兴趣就会接，看到无聊就划走
 
 只返回严格的 JSON，格式：{"decision":"continue|no_action|wait","wait_seconds":3,"reason":"简短理由"}
 wait 时 wait_seconds 取 3-15 之间。不要任何其他文字、不要 markdown、不要代码块包装。`
