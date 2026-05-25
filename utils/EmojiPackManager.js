@@ -17,15 +17,15 @@ const DEFAULT_EMOJI_CONFIG = {
   autoCollect: false,
   visionTagOnAdd: true,
   useEmbedding: true,
-  selectionTopK: 5,
+  selectionTopK: 20,
   embeddingThreshold: 0.5,
   contentFiltration: false,
   doReplace: false,
   enableMaintenance: false,
   checkIntervalMinutes: 10,
   avoidRecentEnabled: true,
-  avoidRecentCount: 5,
-  avoidRecentTtlMinutes: 5,
+  avoidRecentCount: 20,
+  avoidRecentTtlMinutes: 30,
   followUpDelayMinMs: 300,
   followUpDelayMaxMs: 1200,
   rateLimitEnabled: true,
@@ -348,10 +348,27 @@ export class EmojiPackManager {
     const prepared = await this.prepareVLMImage(buffer, ext)
     const dataUrl = `data:${prepared.mime};base64,${prepared.buffer.toString("base64")}`
 
-    const prompt = `请判断这张图片是否适合作为聊天表情包使用。
-适合：表达情绪、有趣的、用作社交反应的图片（如表情包、梗图、动图、卡通形象）
-不适合：风景照、产品图、个人/真人照片、广告海报、二维码、文档/表格截图、用户头像、聊天截图、文字截图、其他非表情包用途的图
-仅输出严格的 JSON 格式（不要 markdown 代码块）：{"is_emoji": true 或 false, "reason": "简短理由"}`
+    const prompt = `严格判断这张图是否是真正适合 QQ/微信聊天的**表情包**。
+判定标准必须从严，宁可漏判不要错收。
+
+【判定为 true 的必要条件】（至少明显具备一项）：
+1. 典型表情包/梗图：网络流行梗图、二次元角色表情、ACG 同人表情、emoji 贴纸、QQ/微信官方表情样式
+2. 强烈情绪/反应表达：图中主体（人/动物/物体）正在做夸张的表情、动作、姿势（生气、哭泣、惊讶、无语、嘲讽、得意、崩溃、卖萌、震惊等可一眼识别的情绪）
+3. 自带梗字/吐槽文字：图片上写有"我也想""绷不住了""我就笑笑""你说啥"等中文梗字 / 二次创作配文
+4. 拟人化反应：动物或无生命物体做出明显人类化的搞笑表情/动作
+
+【判定为 false（必拒）】：
+- 普通宠物日常照（猫狗坐着、躺着、走路、吃东西等没有夸张表情/动作的）
+- 插画、美术作品、艺术绘画、写实画风的角色立绘、CG 截图
+- 风景照、建筑、产品图、广告海报、横幅、二维码
+- 真人照片、自拍、合照、明星生图
+- 文档截图、聊天截图、文字截图、网页截图、代码截图
+- 仅"画风不错"或"角色好看"但没有明显情绪/动作/梗的图
+- 不确定的图
+
+**关键测试**：把这张图发到群里，群友能立刻明白"这是在表达 XX 情绪/梗"吗？不能就是 false。
+
+仅输出严格 JSON（不要 markdown 代码块）：{"is_emoji": true 或 false, "reason": "简短理由"}`
 
     const json = await this.callOpenAIChat(
       cfg, "analysisApiUrl", "analysisApiKey",
@@ -489,7 +506,7 @@ ${list}
 
   getRecentExclusions(groupId) {
     if (!groupId) return { hashes: new Set(), tags: new Set() }
-    const ttlMs = (Number(this.config.avoidRecentTtlMinutes) || 5) * 60 * 1000
+    const ttlMs = (Number(this.config.avoidRecentTtlMinutes) || 30) * 60 * 1000
     const cutoff = Date.now() - ttlMs
     const picks = this.recentPicksByGroup.get(String(groupId)) || []
     const fresh = picks.filter(p => p.at >= cutoff)
@@ -508,11 +525,11 @@ ${list}
     const key = String(groupId)
     const list = this.recentPicksByGroup.get(key) || []
     list.push({ hash, tags: Array.isArray(tags) ? tags.slice() : [], at: Date.now() })
-    const max = Number(this.config.avoidRecentCount) || 5
+    const max = Number(this.config.avoidRecentCount) || 20
     while (list.length > max) list.shift()
     this.recentPicksByGroup.set(key, list)
     // 顺手清理过期群条目
-    const ttlMs = (Number(this.config.avoidRecentTtlMinutes) || 5) * 60 * 1000
+    const ttlMs = (Number(this.config.avoidRecentTtlMinutes) || 30) * 60 * 1000
     const cutoff = Date.now() - ttlMs
     for (const [gid, picks] of this.recentPicksByGroup) {
       const fresh = picks.filter(p => p.at >= cutoff)
@@ -557,6 +574,31 @@ ${list}
     }
   }
 
+  /**
+   * 从候选数组按"基础相关分 × usedCount 反向权重 × 冷启动 boost"加权抽样。
+   * candidates: [{ item, score }]，score 是 [0,1] 区间的"越大越相关"。
+   * 解决 200 张表情包只有 Top 5 反复出现的问题：让长尾和新图都有机会被选中。
+   */
+  weightedSampleByUsage(candidates) {
+    if (!candidates?.length) return null
+    const weights = candidates.map(({ item, score }) => {
+      const baseScore = Math.max(0.01, Number(score) || 0.01)
+      const usageWeight = 1 / ((item.usedCount || 0) + 1)
+      const coldBoost = (item.usedCount || 0) === 0 ? 2 : 1
+      return baseScore * usageWeight * coldBoost
+    })
+    const total = weights.reduce((a, b) => a + b, 0)
+    if (total <= 0) {
+      return candidates[Math.floor(Math.random() * candidates.length)]
+    }
+    let r = Math.random() * total
+    for (let i = 0; i < candidates.length; i++) {
+      r -= weights[i]
+      if (r <= 0) return candidates[i]
+    }
+    return candidates[candidates.length - 1]
+  }
+
   async selectEmoji(query, options = {}) {
     this.refreshConfig()
     const allItems = await this.loadItems()
@@ -591,14 +633,15 @@ ${list}
         const qEmbed = await this.getEmbedding(q)
         if (Array.isArray(qEmbed)) {
           const threshold = Number(this.config.embeddingThreshold) || 0.3
-          const topK = Number(this.config.selectionTopK) || 5
+          const topK = Number(this.config.selectionTopK) || 20
           const ranked = embeddedItems
             .map(item => ({ item, score: this.cosineSimilarity(qEmbed, item.embedding) }))
             .filter(r => r.score >= threshold)
             .sort((a, b) => b.score - a.score)
             .slice(0, topK)
           if (ranked.length) {
-            return { item: ranked[Math.floor(Math.random() * ranked.length)].item, strategy: "embedding" }
+            const picked = this.weightedSampleByUsage(ranked)
+            return { item: picked.item, strategy: "embedding" }
           }
         }
       } catch (err) {
@@ -609,6 +652,7 @@ ${list}
     // L2: tag Levenshtein
     const taggedItems = items.filter(i => Array.isArray(i.tags) && i.tags.length)
     if (q && taggedItems.length) {
+      const topK = Number(this.config.selectionTopK) || 20
       const ranked = taggedItems.map(item => {
         const dists = item.tags.map(tag => {
           const t = String(tag).toLowerCase()
@@ -616,10 +660,13 @@ ${list}
           if (t.includes(q) || q.includes(t)) return 1
           return this.levenshtein(t, q)
         })
-        return { item, score: Math.min(...dists) }
-      }).sort((a, b) => a.score - b.score).slice(0, 10)
+        const minDist = Math.min(...dists)
+        // 编辑距离越小越相关 → 转换为 score 越大越相关
+        return { item, score: 1 / (1 + minDist) }
+      }).sort((a, b) => b.score - a.score).slice(0, topK)
       if (ranked.length) {
-        return { item: ranked[Math.floor(Math.random() * ranked.length)].item, strategy: "levenshtein" }
+        const picked = this.weightedSampleByUsage(ranked)
+        return { item: picked.item, strategy: "levenshtein" }
       }
     }
 
