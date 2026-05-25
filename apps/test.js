@@ -1601,7 +1601,7 @@ ${e.sender?.card || e.sender?.nickname || '用户'}: ${e.msg || ''}
   formatTime() {
     const now = new Date()
     const pad = n => String(n).padStart(2, "0")
-    return `[${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}]`
+    return `[${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}]`
   }
 
   async buildMessageContent(sender, msg, images, atQq = [], group, e = null) {
