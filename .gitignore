@@ -2,6 +2,8 @@ node_modules/
 pnpm-lock.yaml
 config/
 CLAUDE.md
+AGENTS.md
+.claude/
 mcp/
 database/
 custom_tools/**/*.js
