@@ -107,6 +107,7 @@ pnpm install
 #表情包统计                           — 总览：启用状态/各开关/总数/已打标数/embedding 数/封禁数
 #表情包重载                           — 强制重读 ndjson（绕过 mtime 缓存）
 #表情包巡检                           — 手动触发一次文件一致性对账（缺文件标记 + 孤立文件补登）
+#表情包清空 [确认]                    — ⚠️ 清空整个表情包库（ndjson + 所有图片）。需要二次确认：先发 `#表情包清空`，再发 `#表情包清空 确认`
 ```
 
 > 5 条管理指令（预览/删除/封禁/解封/打标）支持两种用法二选一：(1) 带 hash 前缀走前缀匹配；(2) 不带参数 + 引用一张图，直接通过图片 SHA-256 精确定位库中条目。引用 bot 发过的表情包就能即时管理，无需翻列表。
@@ -508,18 +509,21 @@ MCP 管理命令：
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| `visionTagOnAdd` | boolean | `true` | 入库时是否调 VLM 打 3-5 个情绪标签 + 一句描述 |
-| `contentFiltration` | boolean | `false` | 入库前是否调 VLM 判断"是否适合作表情包"（挡风景照/截图/广告/二维码）。每张图多 1 次 VLM 调用 |
+| `visionTagOnAdd` | boolean | `true` | 入库时是否调 VLM 详细识别表情包（画面/情绪/使用场景 40-120 字描述 + 3-5 个情绪标签） |
+| `contentFiltration` | boolean | `true` | 入库前是否调 VLM 判断"是否适合作表情包"（挡风景照/截图/广告/二维码）。审查异常时 **fail-closed**（拒绝入库）。每张图多 1 次 VLM 调用 |
 
-> GIF 自动用 sharp 取首帧转 PNG 再喂 VLM，避免多帧问题
+> GIF 自动用 sharp 取首帧转 PNG 再喂 VLM，避免多帧问题。**4 层防御**：(L0) sharp 物理预检（尺寸/纵横比/文件大小）→ (L1) VLM 内容审查 → (L2) VLM 详细打标 → (L3) tag 黑名单复查（命中"截图/风景/广告/真人"等 17 个黑名单词直接 reject）。
 
 #### Embedding 召回
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| `useEmbedding` | boolean | `true` | 是否给表情生成 embedding 向量（基于标签+描述）用于 L1 语义召回。关掉则降级到 Levenshtein 标签匹配 |
-| `selectionTopK` | int | `20` | embedding/levenshtein 召回取 top-K，再按"相关分 × 1/(usedCount+1) × 冷启动 boost"加权抽样。值越大长尾覆盖越好 |
-| `embeddingThreshold` | float | `0.5` | cosine 相似度低于此值不进候选。0.3 太宽召回近似随机，0.5 是中文 embedding 较稳的默认；小库（<50 张）匹配率低时可降到 0.35-0.4 |
+| `useEmbedding` | boolean | `true` | 是否给表情生成 embedding 向量（基于 VLM **详细描述**，不混 tags）。关掉则降级为全库加权抽样 |
+| `selectionTopK` | int | `5` | embedding 召回取 top-K，再按"相关分³ × usage 限幅 × 冷却惩罚"加权抽样。值越小越精准；3-10 合理 |
+| `embeddingThreshold` | float | `0.55` | cosine 相似度低于此值不进候选。新算法已加硬相关性门，无需太低 |
+
+> **选图算法（v2）**：硬相关性门（只保留与 top score 差距 < 0.1 且 >= 0.6 的候选）+ score³ 加权（让强相关图主导）+ 三档长程冷却（30 分钟内 ×0.2、60 分钟内 ×0.5、3 小时内 ×0.8）。解决"反复用十几张"和"莫名其妙图"两个老问题。
+> **不再用 tag 匹配召回**（tag 太短/不准），tags 仅作 L3 黑名单复查和列表显示。
 
 #### 满额替换 + 周期维护
 
@@ -533,8 +537,8 @@ MCP 管理命令：
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| `avoidRecentEnabled` | boolean | `true` | **反重复总开关**：避免短时间发同一张图或同一种情绪标签 |
-| `avoidRecentCount` | int | `20` | 每群记忆最近 N 次发过的表情用于过滤。值越大越不重复但选择面越窄 |
+| `avoidRecentEnabled` | boolean | `true` | **反重复总开关**：避免短时间发同一张图（仅按 hash 排除） |
+| `avoidRecentCount` | int | `20` | 每群记忆最近 N 次发过的表情用于过滤 |
 | `avoidRecentTtlMinutes` | int | `30` | 超过 N 分钟的"最近发送"记录失效，可重新被选 |
 
 #### 文字+表情节奏
@@ -560,19 +564,20 @@ MCP 管理命令：
 
 **工作流程**：
 - **触发**：LLM 在情绪/玩笑/共鸣场景主动调用 `sendLocalEmojiTool`，可选传 `followUpText` 实现"文字 + 表情"组合发送
-- **三段降级选图**：embedding 相似度（L1）→ Levenshtein 标签匹配（L2）→ usedCount 反向加权随机（L3）
-- **反重复**：按群隔离记忆最近 N 次发过的 hash 和 tag，过滤候选；过滤后空则回退完整候选（绝不无图可发）
+- **入库 4 层防御**：L0 sharp 物理预检（尺寸 96-1500px、纵横比 ≤3、1KB-5MB）→ L1 VLM 内容审查（fail-closed）→ L2 VLM 详细打标（40-120 字 description + 3-5 个 ≤4 字情绪 tag）→ L3 tag 黑名单复查（"截图/风景/广告/真人"等 17 词直接 reject）
+- **选图算法（v2）**：L1 embedding 召回（基于 description）+ L2 全库加权兜底；统一公式 `score³ × usageFactor_capped × cooldownPenalty(lastUsedAt)` —— 硬相关性门只让 top-tier 入选，三档冷却（<30min ×0.2、<60min ×0.5、<3h ×0.8）保证长尾轮转
+- **反重复**：按群隔离记忆最近 N 次发过的 hash，仅按 hash 排除（tag 太粗易清空候选池）
 - **软限流**：1 分钟超 3 次返回 `error: 近期发送过频，请改用文字`，LLM 自动改用文字
 - **终态机制**：成功发图后不触发 LLM 续话（除非 LLM 显式传 followUpText 已经带了伴随文字）；失败返回 error 时正常续话
 
 **LLM 工具参数说明**：
-- `query`（必填）：情绪或场景关键词，例如 "开心"、"无奈"、"吐槽"
-- `followUpText`（可选）：先发送的伴随文字，最多 80 字。例如 `query="笑死" + followUpText="哈哈哈太离谱了"`
+- `query`（必填）：**用 10-30 字描述"内容+情绪+使用场景"**，例如 "看到群友翻车想嘲讽他一下的笑死表情"、"装无辜耍赖的卖萌猫咪表情"。不要只传 "开心" 这种短词
+- `followUpText`（可选）：先发送的伴随文字，最多 80 字。例如 `query="听到离谱发言绷不住的崩溃表情" + followUpText="哈哈哈太离谱了"`
 
 **效果示例**：
-- 用户："今天好累啊" → bot 调用 `sendLocalEmojiTool(query="共鸣", followUpText="懂你")` → 先发"懂你" → 等约 500ms → 发[图]
+- 用户："今天好累啊" → bot 调用 `sendLocalEmojiTool(query="表达共鸣安慰对方累的暖心表情", followUpText="懂你")` → 先发"懂你" → 等约 500ms → 发[图]
 - 短时间内 bot 想发 4 次表情 → 第 4 次被限流 → bot 改文字回复
-- 连续多次"开心"场景 → 反重复挡同标签 → 每次换不同表情或不同情绪
+- 连续多次"开心"场景 → 反重复挡同 hash + 冷却惩罚 → 每次换不同表情
 - 严肃技术问答 → LLM 不调用此工具（工具描述里写明不适合场景）
 
 **首次启用步骤**：

@@ -58,21 +58,21 @@ export default [
     field: "emojiSystem.useEmbedding",
     label: "Embedding 语义召回",
     component: "Switch",
-    bottomHelpMessage: "给每张表情生成向量，发表情时按语义相似度匹配（效果远好于关键词）。需要在「AI 模型配置」页填好 embeddingAiConfig。关闭时降级为标签字符串匹配"
+    bottomHelpMessage: "给每张表情生成向量（基于 VLM 详细描述），发表情时按语义相似度匹配。需要在「AI 模型配置」页填好 embeddingAiConfig。关闭时降级为全库加权抽样"
   },
   {
     field: "emojiSystem.selectionTopK",
     label: "Top-K 召回数",
     component: "InputNumber",
-    bottomHelpMessage: "embedding / 标签匹配时取相关度最高的 K 张作为候选，再按「相关分 × 1/(usedCount+1) × 冷启动 boost」加权抽样。值越大长尾覆盖越好，避免 200 张表情包只反复出现 Top 5",
-    componentProps: { min: 1, max: 50, placeholder: "20" }
+    bottomHelpMessage: "embedding 召回时取相关度最高的 K 张作为候选，再按「相关分³ × usage 限幅 × 冷却惩罚」加权抽样。建议 3-10，太大会引入弱相关图",
+    componentProps: { min: 1, max: 50, placeholder: "5" }
   },
   {
     field: "emojiSystem.embeddingThreshold",
     label: "相似度阈值",
     component: "InputNumber",
-    bottomHelpMessage: "cosine 相似度低于此值的不进入候选。0.3 太宽容易随机，0.5 是中文 embedding 较稳的默认；小库（<50 张）匹配率低时可降到 0.35-0.4",
-    componentProps: { min: 0, max: 1, step: 0.05, placeholder: "0.5" }
+    bottomHelpMessage: "cosine 相似度低于此值的不进入候选。0.55 是中文 embedding 较稳的默认；新算法已加硬相关性门，无需太低",
+    componentProps: { min: 0, max: 1, step: 0.05, placeholder: "0.55" }
   },
 
   // ===== 满额替换与文件维护 =====
@@ -101,7 +101,7 @@ export default [
     field: "emojiSystem.avoidRecentEnabled",
     label: "反重复挑图",
     component: "Switch",
-    bottomHelpMessage: "开启后避免短时间内重复发同一张图或同一种情绪标签。按群独立记忆，关闭时纯按召回算法选图（可能出现连发同款）"
+    bottomHelpMessage: "开启后避免短时间内重复发同一张图（按 hash 排除）。按群独立记忆，关闭时纯按召回算法选图（可能出现连发同款）"
   },
   {
     field: "emojiSystem.avoidRecentCount",
