@@ -37,7 +37,8 @@ export class EmojiPackPlugin extends plugin {
         { reg: "^#表情包解封(\\s+\\S+)?$", fnc: "unbanEmoji", permission: "master" },
         { reg: "^#表情包重载$", fnc: "reloadEmoji", permission: "master" },
         { reg: "^#表情包统计$", fnc: "emojiStats", permission: "master" },
-        { reg: "^#表情包巡检$", fnc: "runMaintenance", permission: "master" }
+        { reg: "^#表情包巡检$", fnc: "runMaintenance", permission: "master" },
+        { reg: "^#表情包清空(\\s+确认)?$", fnc: "clearAll", permission: "master" }
       ]
     })
   }
@@ -84,6 +85,21 @@ export class EmojiPackPlugin extends plugin {
     e.reply(`正在导入 ${urls.length} 张图片...`)
 
     const results = []
+    const hashShort = h => (h ? String(h).slice(0, 8) : "????????")
+    const rejectReasonText = (r) => ({
+      too_tiny: "文件过小 (<1KB)",
+      too_large: "文件过大 (>5MB)",
+      too_small: `图片尺寸过小 (${r.width}×${r.height}<96px)`,
+      too_large_dim: `图片尺寸过大 (${r.width}×${r.height}>1500px)`,
+      extreme_aspect: `极端纵横比 (${r.ratio})`,
+      metadata_failed: `图片解析失败: ${r.error || ""}`,
+      content_filtered: `内容审查拒绝: ${r.filterReason || ""}`,
+      content_filter_error: `内容审查异常: ${r.error || ""}`,
+      tag_failed: `VLM 打标失败: ${r.error || ""}`,
+      tag_blacklist: `tag 命中黑名单 [${(r.hitTags || []).join(",")}]`,
+      unsupported_format: "不支持的图片格式"
+    }[r.reason] || `未知原因: ${r.reason}`)
+
     for (const url of urls) {
       try {
         const buffer = await fetchImageBuffer(url)
@@ -92,12 +108,12 @@ export class EmojiPackPlugin extends plugin {
           const tagInfo = (result.item.tags || []).join(",") || "无标签"
           results.push(`✅ ${result.item.hash.slice(0, 8)} [${tagInfo}]`)
         } else if (result.reason === "duplicate") {
-          results.push(`⚠️ ${result.item.hash.slice(0, 8)} 已存在`)
+          results.push(`⚠️ ${hashShort(result.item?.hash)} 已存在`)
         } else if (result.reason === "full") {
           results.push(`❌ 库已满 (${emojiPackManager.config.maxItems} 张)`)
           break
-        } else if (result.reason === "unsupported_format") {
-          results.push(`❌ 不支持的图片格式`)
+        } else {
+          results.push(`❌ ${rejectReasonText(result)}`)
         }
       } catch (err) {
         results.push(`❌ 下载/处理失败: ${err.message}`)
@@ -344,5 +360,41 @@ export class EmojiPackPlugin extends plugin {
       e.reply(`巡检失败: ${err.message}`)
     }
     return true
+  }
+
+  async clearAll(e) {
+    const confirmed = /\s+确认$/.test(String(e.msg || ""))
+    if (!confirmed) {
+      return e.reply(
+        "⚠️ 此操作会删除所有表情包记录和图片文件，无法恢复！\n" +
+        "确认请发送：#表情包清空 确认"
+      )
+    }
+    let deletedFiles = 0
+    try {
+      // 1. 先取消 pendingWriteTimer，避免清空期间 markUsed 的 2s 节流写回脏数据
+      if (emojiPackManager.pendingWriteTimer) {
+        clearTimeout(emojiPackManager.pendingWriteTimer)
+        emojiPackManager.pendingWriteTimer = null
+        emojiPackManager.pendingItems = null
+      }
+      // 2. 删 ndjson
+      await fs.promises.unlink(emojiPackManager.dbPath).catch(() => {})
+      // 3. 删 storeDir 下所有图片文件
+      try {
+        const files = await fs.promises.readdir(emojiPackManager.storeDir)
+        const results = await Promise.allSettled(
+          files.map(f => fs.promises.unlink(path.join(emojiPackManager.storeDir, f)))
+        )
+        deletedFiles = results.filter(r => r.status === "fulfilled").length
+      } catch {}
+      // 4. 清内存缓存 + avoidRecent / rateLimit 状态
+      emojiPackManager.cache = { mtimeMs: 0, items: [], loaded: true }
+      emojiPackManager.recentPicksByGroup.clear()
+      emojiPackManager.recentSendsByGroup.clear()
+      return e.reply(`✅ 表情包库已清空（删除 ${deletedFiles} 张图片文件），下次收图按强化过滤入库`)
+    } catch (err) {
+      return e.reply(`清空失败: ${err.message}`)
+    }
   }
 }

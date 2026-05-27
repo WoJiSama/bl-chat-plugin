@@ -17,9 +17,9 @@ const DEFAULT_EMOJI_CONFIG = {
   autoCollect: false,
   visionTagOnAdd: true,
   useEmbedding: true,
-  selectionTopK: 20,
-  embeddingThreshold: 0.5,
-  contentFiltration: false,
+  selectionTopK: 5,
+  embeddingThreshold: 0.55,
+  contentFiltration: true,
   doReplace: false,
   enableMaintenance: false,
   checkIntervalMinutes: 10,
@@ -32,6 +32,14 @@ const DEFAULT_EMOJI_CONFIG = {
   rateLimitWindowMinutes: 1,
   rateLimitMaxPerWindow: 3
 }
+
+// 打标完成后命中此黑名单的图片直接 reject（非表情包语义的 tag）
+const TAG_BLACKLIST = new Set([
+  "截图", "聊天记录", "代码", "文档", "网页",
+  "风景", "建筑", "产品", "广告", "海报", "二维码", "logo",
+  "插画", "立绘", "美术", "壁纸",
+  "真人", "自拍", "明星"
+])
 
 let instance = null
 
@@ -181,6 +189,34 @@ export class EmojiPackManager {
     const ext = this.detectExtFromBuffer(buffer)
     if (ext === ".bin") return { added: false, reason: "unsupported_format" }
 
+    // L0 物理预检查：尺寸 / 纵横比 / 文件大小（零成本，必拦明显非表情包）
+    if (buffer.length > 5 * 1024 * 1024) {
+      return { added: false, reason: "too_large", size: buffer.length }
+    }
+    if (buffer.length < 1024) {
+      return { added: false, reason: "too_tiny", size: buffer.length }
+    }
+    try {
+      const meta = await sharp(buffer, { failOn: "none" }).metadata()
+      const w = meta.width || 0
+      const h = meta.height || 0
+      if (w && h) {
+        if (w < 96 || h < 96) {
+          return { added: false, reason: "too_small", width: w, height: h }
+        }
+        if (w > 1500 || h > 1500) {
+          return { added: false, reason: "too_large_dim", width: w, height: h }
+        }
+        const ratio = Math.max(w, h) / Math.min(w, h)
+        if (ratio > 3) {
+          return { added: false, reason: "extreme_aspect", ratio: ratio.toFixed(2) }
+        }
+      }
+    } catch (err) {
+      // 读 metadata 失败 → 直接拒绝（非标准图片）
+      return { added: false, reason: "metadata_failed", error: err.message }
+    }
+
     // 第一道闸：库满且未开 doReplace 时直接拒绝，节省所有后续 AI 调用（content_filtration / VLM 打标 / embedding）
     const maxItems = this.config.maxItems || 200
     if (items.length >= maxItems && !this.config.doReplace) {
@@ -195,7 +231,9 @@ export class EmojiPackManager {
           return { added: false, reason: "content_filtered", filterReason: verdict.reason }
         }
       } catch (err) {
-        logWarn(`内容审查异常 (${hash.slice(0, 8)})：${err.message}，跳过审查继续入库`)
+        // fail-closed：审查异常时拒绝入库（避免错收，宁可漏收）
+        logWarn(`内容审查异常 (${hash.slice(0, 8)}): ${err.message}，拒绝入库`)
+        return { added: false, reason: "content_filter_error", error: err.message }
       }
     }
 
@@ -251,12 +289,22 @@ export class EmojiPackManager {
         try { await fsp.unlink(absFile) } catch {}
         return { added: false, reason: "tag_failed", error: err.message }
       }
+
+      // L3 tag 黑名单复查：打标后命中"截图/风景/广告/真人"等明确非表情包 tag → 拒绝
+      const hitBlacklist = (record.tags || [])
+        .map(t => String(t).toLowerCase().trim())
+        .filter(t => TAG_BLACKLIST.has(t))
+      if (hitBlacklist.length) {
+        try { await fsp.unlink(absFile) } catch {}
+        logInfo(`L3 黑名单拦截 (${hash.slice(0, 8)}): 命中 [${hitBlacklist.join(",")}]`)
+        return { added: false, reason: "tag_blacklist", hitTags: hitBlacklist }
+      }
     }
 
-    if (autoEmbed && this.config.useEmbedding !== false && (record.tags.length || record.description)) {
+    if (autoEmbed && this.config.useEmbedding !== false && record.description) {
       try {
-        const text = [record.description, ...(record.tags || [])].filter(Boolean).join(" ")
-        record.embedding = await this.getEmbedding(text)
+        // embedding 只用 description（详细 LLM 识别内容），不混 tags 避免短词稀释语义
+        record.embedding = await this.getEmbedding(record.description)
       } catch (err) {
         logWarn(`embedding 生成失败 (${hash.slice(0, 8)}): ${err.message}`)
       }
@@ -312,8 +360,15 @@ export class EmojiPackManager {
     const dataUrl = `data:${prepared.mime};base64,${prepared.buffer.toString("base64")}`
 
     const prompt = `请观察这张表情包图片，输出严格的 JSON 格式（不要 markdown 代码块），只包含两个字段：
-- "tags": 字符串数组，提取该表情包传达的 3-5 个情绪/语气/场景标签，例如 ["开心","无奈","吐槽","惊讶"]
-- "description": 一句话描述图片内容（不超过 30 字）
+
+- "description": **详细描述这张表情包**（40-120 字），要覆盖三层信息：
+  1. **画面**：图里是什么角色（猫/狗/动漫角色/人物）、在做什么动作（捂脸/翻白眼/竖中指/比心）、有什么文字（如"我谢谢你""绷不住了"）
+  2. **情绪**：传达的情绪状态（无奈/吐槽/嘲讽/卖萌/震惊/敷衍/崩溃/得意/委屈/傲娇/社死/躺平/摆烂）
+  3. **使用场景**：群聊里什么场合下会发这张（被人说服时、看到离谱发言时、自嘲时、被夸时、装无辜时）
+  描述要具体，不要写"一张表情包图片"这种废话。
+
+- "tags": 3-5 个**情绪/反应**标签（每个不超过 4 个字）。例：开心、笑死、无奈、吐槽、惊讶、嘲讽、卖萌、震惊、敷衍、崩溃、得意、委屈、傲娇、社死、摆烂、绝望、心动。**禁止**用画风/物体词（卡通形象、二次元、插画、可爱、动物、猫咪）。
+
 只输出 JSON，不要任何其他文字。`
 
     const json = await this.callOpenAIChat(
@@ -335,8 +390,14 @@ export class EmojiPackManager {
     if (!match) throw new Error("VLM 未返回 JSON")
     const parsed = JSON.parse(match[0])
     return {
-      tags: Array.isArray(parsed.tags) ? parsed.tags.map(t => String(t).trim()).filter(Boolean).slice(0, 5) : [],
-      description: String(parsed.description || "").slice(0, 100)
+      tags: Array.isArray(parsed.tags)
+        ? parsed.tags
+            .map(t => String(t).trim())
+            .filter(Boolean)
+            .map(t => t.slice(0, 4))
+            .slice(0, 5)
+        : [],
+      description: String(parsed.description || "").slice(0, 300)
     }
   }
 
@@ -485,25 +546,6 @@ ${list}
     return na && nb ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0
   }
 
-  levenshtein(a, b) {
-    const m = a.length, n = b.length
-    if (!m) return n
-    if (!n) return m
-    let prev = new Array(n + 1)
-    let curr = new Array(n + 1)
-    for (let j = 0; j <= n; j++) prev[j] = j
-    for (let i = 1; i <= m; i++) {
-      curr[0] = i
-      for (let j = 1; j <= n; j++) {
-        curr[j] = a[i - 1] === b[j - 1]
-          ? prev[j - 1]
-          : 1 + Math.min(prev[j - 1], prev[j], curr[j - 1])
-      }
-      ;[prev, curr] = [curr, prev]
-    }
-    return prev[n]
-  }
-
   getRecentExclusions(groupId) {
     if (!groupId) return { hashes: new Set(), tags: new Set() }
     const ttlMs = (Number(this.config.avoidRecentTtlMinutes) || 30) * 60 * 1000
@@ -575,28 +617,47 @@ ${list}
   }
 
   /**
-   * 从候选数组按"基础相关分 × usedCount 反向权重 × 冷启动 boost"加权抽样。
-   * candidates: [{ item, score }]，score 是 [0,1] 区间的"越大越相关"。
-   * 解决 200 张表情包只有 Top 5 反复出现的问题：让长尾和新图都有机会被选中。
+   * 三层加权抽样：
+   * 1) 硬相关性门 —— 只保留与 top score 差距 < 0.1 且 >= 0.6 的候选；候选 <2 时放宽到 top3
+   * 2) 长程冷却 —— 按 lastUsedAt 分档（<30min 0.2 / <60min 0.5 / <180min 0.8 / 其他 1.0）打折权重
+   * 3) 加权 —— score³ × min(1.5, usageFactor)，让 score 主导，避免冷图碾压热图
+   * candidates: [{ item, score }]，score 在 [0,1]
    */
   weightedSampleByUsage(candidates) {
     if (!candidates?.length) return null
-    const weights = candidates.map(({ item, score }) => {
+
+    const sorted = [...candidates].sort((a, b) => (b.score || 0) - (a.score || 0))
+    const topScore = sorted[0].score || 0
+    const eligibleMin = Math.max(0.6, topScore - 0.1)
+    const eligible = sorted.filter(c => (c.score || 0) >= eligibleMin)
+    const pool = eligible.length >= 2 ? eligible : sorted.slice(0, Math.min(3, sorted.length))
+
+    const now = Date.now()
+    const cooldownPenalty = (lastUsedAt) => {
+      if (!lastUsedAt) return 1
+      const t = new Date(lastUsedAt).getTime()
+      if (!Number.isFinite(t)) return 1
+      const ageMin = (now - t) / 60000
+      if (ageMin < 30) return 0.2
+      if (ageMin < 60) return 0.5
+      if (ageMin < 180) return 0.8
+      return 1
+    }
+
+    const weights = pool.map(({ item, score }) => {
+      const usedCount = item.usedCount || 0
+      const usageFactor = Math.min(1.5, (1 / (usedCount + 1)) * (usedCount === 0 ? 2 : 1))
       const baseScore = Math.max(0.01, Number(score) || 0.01)
-      const usageWeight = 1 / ((item.usedCount || 0) + 1)
-      const coldBoost = (item.usedCount || 0) === 0 ? 2 : 1
-      return baseScore * usageWeight * coldBoost
+      return Math.pow(baseScore, 3) * usageFactor * cooldownPenalty(item.lastUsedAt)
     })
     const total = weights.reduce((a, b) => a + b, 0)
-    if (total <= 0) {
-      return candidates[Math.floor(Math.random() * candidates.length)]
-    }
+    if (total <= 0) return pool[0]
     let r = Math.random() * total
-    for (let i = 0; i < candidates.length; i++) {
+    for (let i = 0; i < pool.length; i++) {
       r -= weights[i]
-      if (r <= 0) return candidates[i]
+      if (r <= 0) return pool[i]
     }
-    return candidates[candidates.length - 1]
+    return pool[pool.length - 1]
   }
 
   async selectEmoji(query, options = {}) {
@@ -605,35 +666,31 @@ ${list}
     const usableAll = allItems.filter(i => !i.isBanned)
     if (!usableAll.length) return { item: null, strategy: "empty" }
 
+    // avoidRecent：只按 hash 排除（不再按 tag —— tag 不准且容易把池清空）
     let items = usableAll
     if (this.config.avoidRecentEnabled !== false && options.groupId) {
-      const { hashes: recentHashes, tags: recentTags } = this.getRecentExclusions(options.groupId)
-      if (recentHashes.size || recentTags.size) {
-        const filtered = usableAll.filter(item => {
-          if (recentHashes.has(item.hash)) return false
-          const itemTagsLc = (item.tags || []).map(t => String(t).toLowerCase())
-          if (itemTagsLc.some(t => recentTags.has(t))) return false
-          return true
-        })
+      const { hashes: recentHashes } = this.getRecentExclusions(options.groupId)
+      if (recentHashes.size) {
+        const filtered = usableAll.filter(item => !recentHashes.has(item.hash))
         if (filtered.length) items = filtered
-        // 若过滤后为空，items 保持 usableAll，避免无图可发
+        // 排除后为空（极少见）才退回 usableAll
       }
     }
 
-    const q = String(query || "").trim().toLowerCase()
+    const q = String(query || "").trim()
     const useEmbed = this.config.useEmbedding !== false
     const hasEmbedCfg = !!(this.embeddingAiConfig?.embeddingApiUrl
       && this.embeddingAiConfig?.embeddingApiKey
       && !String(this.embeddingAiConfig.embeddingApiKey).includes("sk-xxx"))
     const embeddedItems = items.filter(i => Array.isArray(i.embedding) && i.embedding.length)
 
-    // L1: embedding
+    // L1: embedding 召回（基于 LLM 识别的 description）
     if (q && useEmbed && hasEmbedCfg && embeddedItems.length) {
       try {
         const qEmbed = await this.getEmbedding(q)
         if (Array.isArray(qEmbed)) {
-          const threshold = Number(this.config.embeddingThreshold) || 0.3
-          const topK = Number(this.config.selectionTopK) || 20
+          const threshold = Number(this.config.embeddingThreshold) || 0.55
+          const topK = Number(this.config.selectionTopK) || 5
           const ranked = embeddedItems
             .map(item => ({ item, score: this.cosineSimilarity(qEmbed, item.embedding) }))
             .filter(r => r.score >= threshold)
@@ -645,40 +702,16 @@ ${list}
           }
         }
       } catch (err) {
-        logWarn(`embedding 选图失败，降级到标签匹配: ${err.message}`)
+        logWarn(`embedding 选图失败，降级到全库兜底: ${err.message}`)
       }
     }
 
-    // L2: tag Levenshtein
-    const taggedItems = items.filter(i => Array.isArray(i.tags) && i.tags.length)
-    if (q && taggedItems.length) {
-      const topK = Number(this.config.selectionTopK) || 20
-      const ranked = taggedItems.map(item => {
-        const dists = item.tags.map(tag => {
-          const t = String(tag).toLowerCase()
-          if (t === q) return 0
-          if (t.includes(q) || q.includes(t)) return 1
-          return this.levenshtein(t, q)
-        })
-        const minDist = Math.min(...dists)
-        // 编辑距离越小越相关 → 转换为 score 越大越相关
-        return { item, score: 1 / (1 + minDist) }
-      }).sort((a, b) => b.score - a.score).slice(0, topK)
-      if (ranked.length) {
-        const picked = this.weightedSampleByUsage(ranked)
-        return { item: picked.item, strategy: "levenshtein" }
-      }
-    }
-
-    // L3: usedCount-weighted random
-    const weights = items.map(i => 1 / ((i.usedCount || 0) + 1))
-    const total = weights.reduce((a, b) => a + b, 0)
-    let r = Math.random() * total
-    for (let i = 0; i < items.length; i++) {
-      r -= weights[i]
-      if (r <= 0) return { item: items[i], strategy: "weighted_random" }
-    }
-    return { item: items[items.length - 1], strategy: "weighted_random" }
+    // L2 兜底：embedding 没结果（或未配置）时，全库走加权抽样
+    // 给所有图相同的 0.7 分（高于 weightedSampleByUsage 的 0.6 硬门）
+    // 让所有候选通过相关性门，由 usageFactor + cooldownPenalty 主导多样性
+    const fallback = items.map(item => ({ item, score: 0.7 }))
+    const picked = this.weightedSampleByUsage(fallback)
+    return { item: picked.item, strategy: "fallback_random" }
   }
 
   scheduleSave(items) {
@@ -741,10 +774,9 @@ ${list}
       const tagResult = await this.tagWithVLM(buffer, ext)
       target.tags = tagResult.tags
       target.description = tagResult.description
-      if (this.config.useEmbedding !== false && (target.tags.length || target.description)) {
+      if (this.config.useEmbedding !== false && target.description) {
         try {
-          const text = [target.description, ...(target.tags || [])].filter(Boolean).join(" ")
-          target.embedding = await this.getEmbedding(text)
+          target.embedding = await this.getEmbedding(target.description)
         } catch (err) {
           logWarn(`重新打标 embedding 失败: ${err.message}`)
         }

@@ -271,9 +271,9 @@ pluginSettings:
     autoCollect: false
     visionTagOnAdd: true
     useEmbedding: true
-    selectionTopK: 20
-    embeddingThreshold: 0.5
-    contentFiltration: false
+    selectionTopK: 5
+    embeddingThreshold: 0.55
+    contentFiltration: true
     doReplace: false
     enableMaintenance: false
     checkIntervalMinutes: 10
