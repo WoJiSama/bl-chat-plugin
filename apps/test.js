@@ -265,7 +265,7 @@ function sanitizePseudoToolLine(line) {
 }
 
 function sanitizeFinalReplyText(content) {
-  let output = String(content || "").replace(/\r\n/g, "\n").trim()
+  let output = String(content || "").replace(/\r\n/g, "\n").replace(/(?<!\\)\\n/g, "\n").replace(/(?<!\w)\/n(?!\w)/g, "\n").trim()
   if (!output) return ""
 
   output = ThinkingProcessor.removeThinking(output).trim()
@@ -2254,10 +2254,10 @@ ${specialSignalsBlock}
       const memberMap = await group.getMemberMap()
       const atUsers = atQq.map(qq => {
         const info = memberMap.get(Number(qq))
-        if (!info) return `未知用户(qq号: ${qq})`
-        return `${info.card || info.nickname}(qq号: ${qq})[群身份: ${roleMap[info.role] || "member"}]`
+        if (!info) return `@未知用户(${qq})`
+        return `@${info.card || info.nickname}`
       })
-      atContent = `艾特了 ${atUsers.join("、")}，`
+      atContent = `${atUsers.join(" ")} `
     }
 
     let quoteContent = ""
@@ -2346,7 +2346,6 @@ ${specialSignalsBlock}
           const hasQuotedFile = quotedFiles.length > 0
 
           if (quotedSender) {
-            let quotedRole = "member"
             let quotedNickname = quotedSender.nickname || quotedSender.card || "未知用户"
 
             if (group) {
@@ -2354,17 +2353,14 @@ ${specialSignalsBlock}
                 const memberMap = await group.getMemberMap()
                 const quotedMemberInfo = memberMap.get(Number(quotedSender.user_id))
                 if (quotedMemberInfo) {
-                  quotedRole = roleMap[quotedMemberInfo.role] || "member"
                   quotedNickname = quotedMemberInfo.card || quotedMemberInfo.nickname || quotedNickname
                 }
               } catch (err) {
               }
             }
 
-            const quotedSenderInfo = `${quotedNickname}(qq号: ${quotedSender.user_id})[群身份: ${quotedRole}]`
-            const quotedMessageId = reply.message_id ? `[消息ID:${reply.message_id}]` : ''
+            const quotedMessageId = reply.message_id ? `(消息ID:${reply.message_id})` : ''
 
-            // 按"存在哪些 segment"拼描述，避免遗漏视频/语音/文件
             const parts = []
             if (quotedMsg) parts.push(`"${quotedMsg}"`)
             if (forwardContent) parts.push(forwardContent)
@@ -2383,7 +2379,7 @@ ${specialSignalsBlock}
             }
             const quotedDescription = parts.length > 0 ? parts.join("，以及") : "一条消息"
 
-            quoteContent = `引用了 ${quotedSenderInfo}${quotedMessageId} 的消息: ${quotedDescription}，`
+            quoteContent = `[回复 ${quotedNickname}${quotedMessageId}的消息: ${quotedDescription}] `
           }
         }
       } catch (error) {
@@ -2934,7 +2930,8 @@ ${JSON.stringify({
         environmental_factors: { local_time: "北京时间: " + new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" }) }
       }, null, 2)}
 2.【消息格式】
-[YYYY-MM-DD HH:MM:SS] 昵称(QQ号: xxx)[群身份: xxx]: 在群里说: {message}
+[YYYY-MM-DD HH:MM:SS] 昵称(qq号: xxx)[群身份: xxx]: 在群里说: {message}
+引用消息时格式为: [回复 昵称的消息: "原文内容"] @被艾特的人 在群里说: {message}
 3.【艾特、@格式】
 @+qq号,例如@32174，@xxxxx
 
@@ -2966,8 +2963,8 @@ ${mcpPrompts}
 
 【回复格式规则 - 极其重要】
 你的回复必须是纯文本内容，绝对禁止模仿消息记录的格式！
-❌ 错误: "[2025-12-24 12:42:25] 哈基米(QQ号: 3012184357)[群身份: admin]: 在群里说: 想听啥？"
-❌ 错误: "[时间] 昵称(QQ号: xxx)[群身份: xxx]: 内容"
+❌ 错误: "[2025-12-24 12:42:25] 哈基米(qq号: 3012184357)[群身份: admin]: 在群里说: 想听啥？"
+❌ 错误: "[时间] 昵称(qq号: xxx)[群身份: xxx]: 内容"
 ✅ 正确: "想听啥？"
 ✅ 正确: "中午好呀~"
 消息记录格式仅用于你理解上下文，回复时只输出纯内容！
@@ -3468,7 +3465,7 @@ ${mcpPrompts}
         chatHistory.push({ role: 'user', content: userMsg })
 
         // 添加机器人回复
-        const botMsg = `${this.formatTime()} ${Bot.nickname}(QQ号:${Bot.uin})[群身份: member]: 在群里说: ${output.substring(0, 200)}`
+        const botMsg = `${this.formatTime()} ${Bot.nickname}(qq号:${Bot.uin})[群身份: member]: 在群里说: ${output.substring(0, 200)}`
         chatHistory.push({ role: 'bot', content: botMsg })
 
         // 只保留最近10条
@@ -3631,20 +3628,30 @@ ${mcpPrompts}
         quoteChance = 0
       }
       const shouldQuote = Math.random() < quoteChance
-      const { hasAt, msgSegments } = await this.convertAtInString(output, e.group)
 
-      // 有真艾特时直接发送消息段数组（@ 保持在原始位置）
-      if (hasAt && msgSegments) {
-        const res = await e.reply(msgSegments)
-        return res?.message_id
+      // @ 转换可能失败（group 对象过期等），失败时跳过不影响分段
+      try {
+        const { hasAt, msgSegments } = await this.convertAtInString(output, e.group)
+        if (hasAt && msgSegments) {
+          const res = await e.reply(msgSegments)
+          return res?.message_id
+        }
+      } catch (err) {
+        logger.warn(`[分段发送] convertAtInString 失败，跳过 @ 转换: ${err.message}`)
       }
 
-      const { total_tokens } = await TotalTokens(output)
-      let lastMessageId = null
+      // token 计算可能失败，失败时默认走分段逻辑
+      let totalTokens = 999
+      try {
+        const result = await TotalTokens(output)
+        totalTokens = result.total_tokens
+      } catch (err) {
+        logger.warn(`[分段发送] TotalTokens 计算失败，按需分段: ${err.message}`)
+      }
 
-      // 含 \n 的消息一律走拆分（LLM 显式用换行表达"打两条"的意图），即使 token 数很小也要拆
+      let lastMessageId = null
       const hasNewline = output.includes("\n")
-      if (total_tokens <= 10 && !hasNewline) {
+      if (totalTokens <= 10 && !hasNewline) {
         const res = await e.reply(output, shouldQuote)
         lastMessageId = res?.message_id
         return lastMessageId
@@ -3661,10 +3668,8 @@ ${mcpPrompts}
             const typingSpeed = Number(this.config?.smartTrigger?.typingSpeed) || 0
             let delay
             if (typingSpeed > 0) {
-              // typingSpeed 模式：按"字符/秒"计算每段间隔，加 0-300ms 随机抖动
               delay = Math.min(Math.max(segments[i].length * 1000 / typingSpeed + Math.random() * 300, 200), 5000)
             } else {
-              // 默认公式：固定起步 1s + 字符延展 + 抖动，上限 3s
               delay = Math.min(1000 + segments[i].length * 5 + Math.random() * 500, 3000)
             }
             await new Promise(r => setTimeout(r, delay))
