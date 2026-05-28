@@ -3708,9 +3708,6 @@ ${mcpPrompts}
       }
 
       const segments = this.splitMessage(output)
-      if (segments.length <= 1 && output.includes("\n")) {
-        logger.warn(`[分段发送] 含换行但未分段! output=${JSON.stringify(output).slice(0, 200)} segments=${segments.length}`)
-      }
       for (let i = 0; i < segments.length; i++) {
         if (segments[i]?.trim()) {
           const quote = shouldQuote && i === 0
@@ -3731,7 +3728,18 @@ ${mcpPrompts}
       }
       return lastMessageId
     } catch (error) {
-      console.error("分段发送错误:", error)
+      logger.error(`[分段发送-异常] 走了catch兜底! error=${error?.message || error}, stack=${error?.stack?.slice(0, 300)}`)
+      try {
+        const fallbackSegments = output.split("\n").filter(s => s.trim())
+        if (fallbackSegments.length > 1) {
+          let lastId = null
+          for (const seg of fallbackSegments) {
+            const res = await e.reply(seg.trim())
+            lastId = res?.message_id
+          }
+          return lastId
+        }
+      } catch {}
       const res = await e.reply(output)
       return res?.message_id
     }
