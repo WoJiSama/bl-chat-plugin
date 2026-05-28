@@ -265,7 +265,7 @@ function sanitizePseudoToolLine(line) {
 }
 
 function sanitizeFinalReplyText(content) {
-  let output = String(content || "").replace(/\r\n/g, "\n").trim()
+  let output = String(content || "").replace(/\r\n/g, "\n").replace(/(?<!\\)\\n/g, "\n").replace(/(?<!\w)\/n(?!\w)/g, "\n").trim()
   if (!output) return ""
 
   output = ThinkingProcessor.removeThinking(output).trim()
