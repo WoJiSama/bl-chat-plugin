@@ -265,7 +265,9 @@ function sanitizePseudoToolLine(line) {
 }
 
 function sanitizeFinalReplyText(content) {
-  let output = String(content || "").replace(/\r\n/g, "\n").replace(/(?<!\\)\\n/g, "\n").replace(/(?<!\w)\/n(?!\w)/g, "\n").trim()
+  let output = String(content || "").replace(/\r\n/g, "\n")
+  if (output.includes("\\n")) output = output.split("\\n").join("\n")
+  output = output.replace(/(?<!\w)\/n(?!\w)/g, "\n").trim()
   if (!output) return ""
 
   output = ThinkingProcessor.removeThinking(output).trim()
@@ -3610,6 +3612,9 @@ ${mcpPrompts}
     try {
       output = sanitizeFinalReplyText(output)
       if (!output) return null
+      if (output.includes("\\n")) {
+        logger.warn(`[分段发送] sanitize后仍含字面\\n! raw=${JSON.stringify(output).slice(0, 200)}`)
+      }
       // smart 模式：发完话后记录 bot 上次发言时间和关键词，给 prefilter R1/R2 识别接续用
       const groupId = e?.group_id
       const triggerMode = String(this.config?.chatTriggerMode || 'strict').toLowerCase()
@@ -3630,14 +3635,60 @@ ${mcpPrompts}
       const shouldQuote = Math.random() < quoteChance
 
       // @ 转换可能失败（group 对象过期等），失败时跳过不影响分段
+      let groupForAt = null
       try {
-        const { hasAt, msgSegments } = await this.convertAtInString(output, e.group)
-        if (hasAt && msgSegments) {
-          const res = await e.reply(msgSegments)
-          return res?.message_id
+        groupForAt = e.group
+      } catch {}
+
+      // 含 @ 时也要分段：先拆分再对每段单独处理 @
+      const hasNewline = output.includes("\n")
+      if (groupForAt && hasNewline) {
+        try {
+          const { hasAt } = await this.convertAtInString(output, groupForAt)
+          if (hasAt) {
+            const segments = this.splitMessage(output)
+            let lastMessageId = null
+            for (let i = 0; i < segments.length; i++) {
+              const seg = segments[i]?.trim()
+              if (!seg) continue
+              const { hasAt: segHasAt, msgSegments } = await this.convertAtInString(seg, groupForAt)
+              const quote = shouldQuote && i === 0
+              if (segHasAt && msgSegments) {
+                const res = await e.reply(msgSegments, quote)
+                lastMessageId = res?.message_id
+              } else {
+                const res = await e.reply(seg, quote)
+                lastMessageId = res?.message_id
+              }
+              if (i < segments.length - 1) {
+                const typingSpeed = Number(this.config?.smartTrigger?.typingSpeed) || 0
+                let delay
+                if (typingSpeed > 0) {
+                  delay = Math.min(Math.max(seg.length * 1000 / typingSpeed + Math.random() * 300, 200), 5000)
+                } else {
+                  delay = Math.min(1000 + seg.length * 5 + Math.random() * 500, 3000)
+                }
+                await new Promise(r => setTimeout(r, delay))
+              }
+            }
+            return lastMessageId
+          }
+        } catch (err) {
+          logger.warn(`[分段发送] @ 分段处理失败，走普通分段: ${err.message}`)
         }
-      } catch (err) {
-        logger.warn(`[分段发送] convertAtInString 失败，跳过 @ 转换: ${err.message}`)
+      }
+
+      // 无换行时含 @ 直接发（不需要分段）
+      if (groupForAt && !hasNewline) {
+        try {
+          const { hasAt, msgSegments } = await this.convertAtInString(output, groupForAt)
+          if (hasAt && msgSegments) {
+            const res = await e.reply(msgSegments)
+            return res?.message_id
+          }
+        } catch (err) {
+          logger.warn(`[分段发送] convertAtInString 失败，跳过 @ 转换: ${err.message}`)
+        }
       }
 
       // token 计算可能失败，失败时默认走分段逻辑
@@ -3650,7 +3701,6 @@ ${mcpPrompts}
       }
 
       let lastMessageId = null
-      const hasNewline = output.includes("\n")
       if (totalTokens <= 10 && !hasNewline) {
         const res = await e.reply(output, shouldQuote)
         lastMessageId = res?.message_id
@@ -3658,6 +3708,9 @@ ${mcpPrompts}
       }
 
       const segments = this.splitMessage(output)
+      if (segments.length <= 1 && output.includes("\n")) {
+        logger.warn(`[分段发送] 含换行但未分段! output=${JSON.stringify(output).slice(0, 200)} segments=${segments.length}`)
+      }
       for (let i = 0; i < segments.length; i++) {
         if (segments[i]?.trim()) {
           const quote = shouldQuote && i === 0
