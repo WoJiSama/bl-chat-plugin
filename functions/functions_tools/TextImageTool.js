@@ -655,7 +655,7 @@ export class TextImageTool extends AbstractTool {
       })
 
       await e.reply(segment.image(imagePath))
-      return "已将文本转为图片发送成功，不需要再重复发送原始文字。"
+      return "已将文字、Markdown 或代码转为图片发送成功，不需要再重复发送原始内容，绝对不要以文本形式发送代码和markdown内容，会导致严重群内刷屏！！！。"
     } finally {
       if (imagePath) await deleteGeneratedFile(imagePath)
     }
