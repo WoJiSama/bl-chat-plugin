@@ -291,6 +291,16 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+function getOrCreateGroupLimiter(limitersMap, groupId, concurrency) {
+  const entry = limitersMap.get(groupId)
+  if (entry && entry.concurrency === concurrency) {
+    return entry.limiter
+  }
+  const limiter = pLimit(concurrency)
+  limitersMap.set(groupId, { limiter, concurrency })
+  return limiter
+}
+
 function parseToolConfigEntry(entry) {
   const raw = String(entry || "").trim()
   const match = raw.match(/^([A-Za-z_][A-Za-z0-9_-]*)(?:\(([^)]*)\))?$/)
@@ -562,6 +572,7 @@ export class ExamplePlugin extends plugin {
     this.REDIS_KEY_PREFIX = 'ytbot:messages:'
     this.TASK_STATUS_PREFIX = 'ytbot:tool_task_status:'
     this.dedupeToolNames = new Set()
+    this._groupLimiters = new Map()
 
     this.localToolsReady = false
     this.tools = []
@@ -786,10 +797,10 @@ export class ExamplePlugin extends plugin {
     return replyLooksLikeCodeOrMarkdown || (userAskedForCodeOrMarkdown && String(output || "").trim().length > 30)
   }
 
-  async sendFinalReplyAsTextImage(e, output, limit) {
+  async sendFinalReplyAsTextImage(e, output) {
     const tool = this.toolInstances?.textImageTool
     try {
-      const result = await limit(() => tool.execute({ text: output }, e))
+      const result = await tool.execute({ text: output }, e)
       if (typeof result === "string" && result.trim().startsWith("error:")) {
         throw new Error(result)
       }
@@ -797,7 +808,7 @@ export class ExamplePlugin extends plugin {
       return null
     } catch (error) {
       logger.warn(`[textImageTool] 最终回复转图失败，回退为普通文本: ${error.message}`)
-      return await limit(() => this.sendSegmentedMessage(e, output))
+      return await this.sendSegmentedMessage(e, output)
     }
   }
 
@@ -2835,14 +2846,15 @@ ${recentHistory || '(无)'}
     e.sessionId = sessionId
     const session = this.getOrCreateSession(sessionId, this.tools)
     session.taskContext = taskContext
-    const limit = pLimit(this.config.concurrentLimit || 5)
+    const groupLimiter = getOrCreateGroupLimiter(this._groupLimiters, groupId, this.config.concurrentLimit || 5)
 
     let groupUserMessages = session.groupUserMessages
 
-    try {
+    return await groupLimiter(async () => {
+      try {
       const args = msg?.replace(/^#tool\s*/, "").trim() || ""
       const atQq = e.message.filter(m => m.type === "at" && m.qq !== Bot.uin).map(m => m.qq)
-      const images = await limit(() => TakeImages(e))
+      const images = await TakeImages(e)
 
       let videos = []
       if (e.getReply) {
@@ -2850,14 +2862,14 @@ ${recentHistory || '(无)'}
         videos = rsp?.message?.filter(m => m.type === "video") || []
       }
 
-      const memberInfo = await limit(async () => {
+      const memberInfo = await (async () => {
         try {
           return await e.bot.pickGroup(groupId).pickMember(e.sender.user_id).info
         } catch { return {} }
-      })
+      })()
       const senderRole = roleMap[e.sender?.role] || roleMap[memberInfo?.role] || "member"
 
-      const userContent = await limit(() => this.buildMessageContent(e.sender, args, images, atQq, e.group, e))
+      const userContent = await this.buildMessageContent(e.sender, args, images, atQq, e.group, e)
 
       const getHighLevelMembers = async group => {
         if (!group) return ""
@@ -2876,23 +2888,23 @@ ${recentHistory || '(无)'}
 
       // 获取情感、记忆、表达学习的 prompt
       const emotionPrompt = this.config.emotionSystem?.enabled
-        ? await limit(() => this.emotionManager.getEmotionPromptForGroup(groupId))
+        ? await this.emotionManager.getEmotionPromptForGroup(groupId)
         : ''
       const memoryPrompt = this.config.memorySystem?.enabled
-        ? await limit(() => this.memoryManager.getMemoryPromptForUser(groupId, userId, e.msg || ""))
+        ? await this.memoryManager.getMemoryPromptForUser(groupId, userId, e.msg || "")
         : ''
       const groupMemoryPrompt = this.config.memorySystem?.enabled && groupId
-        ? await limit(() => this.memoryManager.getGroupMemoryPrompt(groupId, e.msg || ""))
+        ? await this.memoryManager.getGroupMemoryPrompt(groupId, e.msg || "")
         : ''
       const expressionPrompt = this.config.expressionLearning?.enabled
-        ? await limit(() => this.expressionLearner.getExpressionPromptForGroup(groupId))
+        ? await this.expressionLearner.getExpressionPromptForGroup(groupId)
         : ''
 
       // 知识库检索
       let knowledgePrompt = ''
       if (this.knowledgeSearcher && e.msg) {
         try {
-          const result = await limit(() => this.knowledgeSearcher.search(e.msg))
+          const result = await this.knowledgeSearcher.search(e.msg)
           if (result?.knowledgeContext) {
             knowledgePrompt = `【知识库参考】\n以下是与当前话题相关的参考知识，请在回复时自然融入（不要生硬引用）：\n${result.knowledgeContext}`
           }
@@ -2905,14 +2917,14 @@ ${recentHistory || '(无)'}
       let personProfilePrompt = ''
       if (this.config.personProfileInjection?.enabled && groupId && userId) {
         try {
-          personProfilePrompt = await limit(() => personProfileInjector.build(groupId, userId, e))
+          personProfilePrompt = await personProfileInjector.build(groupId, userId, e)
         } catch (err) {
           logger.error(`[画像注入] 失败: ${err.message}`)
         }
       }
 
       // 构建增强系统提示
-      const groupContext = await limit(() => this.getCurrentGroupContext(e))
+      const groupContext = await this.getCurrentGroupContext(e)
       const enhancedPrompts = [emotionPrompt, memoryPrompt, groupMemoryPrompt, expressionPrompt, knowledgePrompt, personProfilePrompt].filter(Boolean).join('\n')
 
       const systemContent = `
@@ -2927,7 +2939,7 @@ ${JSON.stringify({
           group_id: groupContext.groupId,
           group_name: groupContext.groupName,
           group_notice: groupContext.groupNotice,
-          administrators: await limit(() => getHighLevelMembers(e.group))
+          administrators: await getHighLevelMembers(e.group)
         },
         environmental_factors: { local_time: "北京时间: " + new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" }) }
       }, null, 2)}
@@ -2975,11 +2987,10 @@ ${mcpPrompts}
 `
       // 获取历史记录
       if (this.config.groupHistory) {
-        const chatHistory = await limit(() =>
-          this.messageManager.getMessages(e.message_type, e.message_type === "group" ? e.group_id : e.user_id))
+        const chatHistory = await this.messageManager.getMessages(e.message_type, e.message_type === "group" ? e.group_id : e.user_id)
 
         if (chatHistory?.length) {
-          const memberMap = await limit(() => e.bot.pickGroup(groupId).getMemberMap())
+          const memberMap = await e.bot.pickGroup(groupId).getMemberMap()
 
           // 使用 message_id 过滤当前消息
           const currentMessageId = e.message_id
@@ -3039,13 +3050,12 @@ ${mcpPrompts}
         if (session.tools?.length) toolChoice = { type: "function", function: { name: "grabRedBagTool" } }
       }
 
-      const botMemberMap = await limit(() => e.bot.pickGroup(groupId).getMemberMap())
+      const botMemberMap = await e.bot.pickGroup(groupId).getMemberMap()
       const botRole = roleMap[botMemberMap.get(Bot.uin)?.role] || "member"
-      session.toolContent = await limit(() =>
-        this.buildMessageContent({ nickname: Bot.nickname, user_id: Bot.uin, role: botRole }, "", [], [], e.group))
+      session.toolContent = await this.buildMessageContent({ nickname: Bot.nickname, user_id: Bot.uin, role: botRole }, "", [], [], e.group)
 
       const requestData = this.buildRequestData(session.groupUserMessages, session.tools, toolChoice)
-      let response = await this.retryRequest(limit, requestData, session.toolContent)
+      let response = await this.retryRequest(requestData, session.toolContent)
 
       if (!response?.choices?.[0]) {
         this.clearSession(sessionId)
@@ -3055,9 +3065,9 @@ ${mcpPrompts}
       const message = response.choices[0].message || {}
 
       if (message.tool_calls?.length) {
-        await this.processToolCalls(message, e, session, session.groupUserMessages, atQq, senderRole, limit)
+        await this.processToolCalls(message, e, session, session.groupUserMessages, atQq, senderRole)
       } else if (message.content) {
-        await this.handleTextResponse(message.content, e, session, session.groupUserMessages, limit)
+        await this.handleTextResponse(message.content, e, session, session.groupUserMessages)
       }
 
       this.clearSession(sessionId)
@@ -3071,6 +3081,7 @@ ${mcpPrompts}
       await this.finishConversationTask(taskContext, session)
       if (e.group_id) this.recordReplyLatency(e.group_id, Date.now() - handleToolStartAt)
     }
+    })
   }
 
   formatMessages(messages, e, currentUserContent = null) {
@@ -3164,10 +3175,10 @@ ${mcpPrompts}
     return result
   }
 
-  async retryRequest(limit, requestData, toolContent, retries = 1, toolName) {
+  async retryRequest(requestData, toolContent, retries = 1, toolName) {
     while (retries >= 0) {
       try {
-        const response = await limit(() => YTapi(requestData, this.config, toolContent, toolName))
+        const response = await YTapi(requestData, this.config, toolContent, toolName)
         if (response) return response
       } catch (error) {
         console.error(`API请求失败(${retries}):`, error)
@@ -3213,7 +3224,7 @@ ${mcpPrompts}
     return JSON.stringify(result ?? "")
   }
 
-  async runToolCall(toolCall, e, session, senderRole, limit) {
+  async runToolCall(toolCall, e, session, senderRole) {
     const { type, function: funcData } = toolCall
     if (type !== "function" || !funcData?.name) return null
 
@@ -3284,8 +3295,8 @@ ${mcpPrompts}
     try {
       logger.info(`[工具调用] ${isMCPTool ? "MCP" : "本地"} ${toolName}: ${JSON.stringify(params)}`)
       const rawResult = isMCPTool
-        ? await this.executeTool(toolName, params, e, limit)
-        : await this.executeTool(this.toolInstances[toolName], params, e, limit)
+        ? await this.executeTool(toolName, params, e)
+        : await this.executeTool(this.toolInstances[toolName], params, e)
       const result = this.serializeToolResult(rawResult)
       if (dedupeEnabled && toolRunValue.messageId) {
         const failed = this.isToolResultError(result)
@@ -3337,7 +3348,7 @@ ${mcpPrompts}
     })
   }
 
-  async processToolCalls(message, e, session, groupUserMessages, atQq, senderRole, limit) {
+  async processToolCalls(message, e, session, groupUserMessages, atQq, senderRole) {
     const MAX_TOOL_ROUNDS = this.config.maxToolRounds || 5
     let currentMessage = message
     let currentMessages = [...groupUserMessages]
@@ -3355,7 +3366,7 @@ ${mcpPrompts}
       }))
 
       const validResults = (await Promise.all(
-        toolCalls.map(toolCall => this.runToolCall(toolCall, e, session, senderRole, limit))
+        toolCalls.map(toolCall => this.runToolCall(toolCall, e, session, senderRole))
       )).filter(Boolean)
 
       if (validResults.length === 0) break
@@ -3377,7 +3388,7 @@ ${mcpPrompts}
       }
 
       const nextRequest = this.buildRequestData(currentMessages, session.tools, "auto")
-      const nextResponse = await this.retryRequest(limit, nextRequest, session.toolContent, 1, session.toolName)
+      const nextResponse = await this.retryRequest(nextRequest, session.toolContent, 1, session.toolName)
       const nextMessage = nextResponse?.choices?.[0]?.message
       if (!nextMessage) break
 
@@ -3389,7 +3400,6 @@ ${mcpPrompts}
           e,
           session,
           currentMessages,
-          limit,
           session.toolName
         )
         return
@@ -3402,7 +3412,7 @@ ${mcpPrompts}
 
     session.toolResults = allToolResults
     const finalRequest = this.buildRequestData(currentMessages, [], "none")
-    const finalResponse = await this.retryRequest(limit, finalRequest, session.toolContent, 1, session.toolName)
+    const finalResponse = await this.retryRequest(finalRequest, session.toolContent, 1, session.toolName)
 
     if (finalResponse?.choices?.[0]?.message?.content) {
       await this.handleTextResponse(
@@ -3410,32 +3420,31 @@ ${mcpPrompts}
         e,
         session,
         currentMessages,
-        limit,
         session.toolName
       )
     }
   }
 
-  async executeTool(tool, params, e, limit, isRetry = false) {
+  async executeTool(tool, params, e, isRetry = false) {
     try {
       if (typeof tool === "string" && mcpManager.isMCPTool(tool)) {
-        return await limit(() => mcpManager.executeToolByAlias(tool, params))
+        return await mcpManager.executeToolByAlias(tool, params)
       }
 
       if (tool && typeof tool.execute === "function") {
-        return await limit(() => tool.execute(params, e))
+        return await tool.execute(params, e)
       }
 
       return null
     } catch (error) {
       if (!isRetry) {
-        return this.executeTool(tool, params, e, limit, true)
+        return this.executeTool(tool, params, e, true)
       }
       throw error
     }
   }
 
-  async handleTextResponse(content, e, session, messages, limit, toolName) {
+  async handleTextResponse(content, e, session, messages, toolName) {
     const output = await this.processToolSpecificMessage(content, toolName)
     if (!output) {
       logger.warn("[最终回复清理] 模型回复只包含伪工具格式，已跳过发送")
@@ -3449,8 +3458,8 @@ ${mcpPrompts}
       e
     })
     const botMessageId = shouldUseTextImage
-      ? await this.sendFinalReplyAsTextImage(e, output, limit)
-      : await limit(() => this.sendSegmentedMessage(e, output))
+      ? await this.sendFinalReplyAsTextImage(e, output)
+      : await this.sendSegmentedMessage(e, output)
 
     // 更新会话追踪中的对话历史
     if (this.config.conversationTrackingEnabled && e.group_id && e.user_id) {
@@ -3503,7 +3512,7 @@ ${mcpPrompts}
 
           logger.info(`[工具记录] 准备记录: ${toolMessage.substring(0, 100)}...`)
 
-          await limit(() => this.messageManager.recordMessage({
+          await this.messageManager.recordMessage({
             message_type: e.message_type,
             group_id: e.group_id,
             time: now + i,
@@ -3511,12 +3520,12 @@ ${mcpPrompts}
             source: "tool",
             self_id: Bot.uin,
             sender: { user_id: Bot.uin, nickname: Bot.nickname, card: Bot.nickname, role: "member" }
-          }))
+          })
         }
       }
 
       // 2. 再记录 Bot 的回复
-      await limit(() => this.messageManager.recordMessage({
+      await this.messageManager.recordMessage({
         message_type: e.message_type,
         group_id: e.group_id,
         message_id: botMessageId,
@@ -3525,7 +3534,7 @@ ${mcpPrompts}
         source: "send",
         self_id: Bot.uin,
         sender: { user_id: Bot.uin, nickname: Bot.nickname, card: Bot.nickname, role: "member" }
-      }))
+      })
     } catch (error) {
       logger.error("[MessageRecord] 记录消息失败：", error)
     }
@@ -3554,7 +3563,7 @@ ${mcpPrompts}
 
     messages.push({ role: "assistant", content: output })
     session.groupUserMessages = this.trimMessageHistory(messages)
-    await limit(() => this.saveGroupUserMessages(e.group_id, e.user_id, messages))
+    await this.saveGroupUserMessages(e.group_id, e.user_id, messages)
 
     // 更新情感、记忆、表达学习（异步，不阻塞）
     // 使用 e.msg 纯消息内容，而不是格式化的 userContent
