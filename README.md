@@ -140,6 +140,7 @@ pnpm install
 - grabRedBagTool    # 抢红包工具（需魔改版NapCat）
 - reminderTool      # 定时提醒工具
 - textImageTool     # 文字转图片发送工具(支持代码/MarkDown格式渲染)
+- sendGiftTool      # 送礼物工具（支持香槟、风暴战锤等多种礼物类型）
 ```
 
 **可选工具**（默认不在 oneapi_tools 列表中，需要手动添加）：
@@ -923,6 +924,35 @@ embeddingApiKey: "sk-xxxxx"
 **使用方式**：
 1. 引用红包消息，艾特机器人说"帮我抢这个红包"
 2. 或直接艾特机器人说"帮我领一下上面的红包"
+
+### 送礼物工具 (sendGiftTool)
+
+**功能说明**：
+- 支持向指定用户发送 QQ 礼物（使用 Protobuf 协议发送）
+- 支持 8 种礼物类型，金币价值从 182 到 18880 不等
+- 可自定义发送者和接收者信息（默认机器人作为发送者）
+
+**支持的礼物类型**：
+- `champagne` - 香槟（182 金币）
+- `hammer` - 风暴战锤（1388 金币）
+- `space` - 遨游太空（1888 金币）
+- `party` - 蹦迪派对（2999 金币）
+- `camping` - 露营（388 金币）
+- `dragon` - 龙腾万里（11888 金币）
+- `supercar` - 超级跑车（1314 金币）
+- `helicopter` - 直升机（18880 金币）
+
+**使用方式**：
+- AI 会根据对话场景自动调用此工具
+- 例如："给 @某人 送个礼物"、"送个香槟给小明"
+- 机器人会通过 NapCat 的 `send_packet` API 发送礼物数据包
+
+**参数说明**：
+- `targetQQ`：接收礼物的 QQ 号（必填）
+- `targetNickname`：接收者昵称（必填）
+- `senderQQ`：发送者 QQ 号（可选，默认机器人 QQ）
+- `senderNickname`：发送者昵称（可选，默认机器人昵称）
+- `giftType`：礼物类型（可选，默认 champagne）
 
 ### 使用建议
 
