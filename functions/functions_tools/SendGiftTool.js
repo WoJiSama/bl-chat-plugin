@@ -1,4 +1,4 @@
-import { AbstractTool } from "../functions/functions_tools/AbstractTool.js"
+import { AbstractTool } from "./AbstractTool.js"
 
 export class SendGiftTool extends AbstractTool {
   constructor() {
