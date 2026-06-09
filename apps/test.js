@@ -2852,82 +2852,82 @@ ${recentHistory || '(无)'}
 
     return await groupLimiter(async () => {
       try {
-      const args = msg?.replace(/^#tool\s*/, "").trim() || ""
-      const atQq = e.message.filter(m => m.type === "at" && m.qq !== Bot.uin).map(m => m.qq)
-      const images = await TakeImages(e)
+        const args = msg?.replace(/^#tool\s*/, "").trim() || ""
+        const atQq = e.message.filter(m => m.type === "at" && m.qq !== Bot.uin).map(m => m.qq)
+        const images = await TakeImages(e)
 
-      let videos = []
-      if (e.getReply) {
-        const rsp = await e.getReply()
-        videos = rsp?.message?.filter(m => m.type === "video") || []
-      }
+        let videos = []
+        if (e.getReply) {
+          const rsp = await e.getReply()
+          videos = rsp?.message?.filter(m => m.type === "video") || []
+        }
 
-      const memberInfo = await (async () => {
-        try {
-          return await e.bot.pickGroup(groupId).pickMember(e.sender.user_id).info
-        } catch { return {} }
-      })()
-      const senderRole = roleMap[e.sender?.role] || roleMap[memberInfo?.role] || "member"
+        const memberInfo = await (async () => {
+          try {
+            return await e.bot.pickGroup(groupId).pickMember(e.sender.user_id).info
+          } catch { return {} }
+        })()
+        const senderRole = roleMap[e.sender?.role] || roleMap[memberInfo?.role] || "member"
 
-      const userContent = await this.buildMessageContent(e.sender, args, images, atQq, e.group, e)
+        const userContent = await this.buildMessageContent(e.sender, args, images, atQq, e.group, e)
 
-      const getHighLevelMembers = async group => {
-        if (!group) return ""
-        const members = await group.getMemberMap()
-        return Array.from(members.values())
-          .filter(m => ["admin", "owner"].includes(m.role))
-          .map(m => `${m.nickname}(QQ号: ${m.user_id})[群身份: ${roleMap[m.role]}]`)
-          .join("\n")
-      }
+        const getHighLevelMembers = async group => {
+          if (!group) return ""
+          const members = await group.getMemberMap()
+          return Array.from(members.values())
+            .filter(m => ["admin", "owner"].includes(m.role))
+            .map(m => `${m.nickname}(QQ号: ${m.user_id})[群身份: ${roleMap[m.role]}]`)
+            .join("\n")
+        }
 
-      const mcpPrompts = mcpManager.getMCPSystemPrompts({
-        messageType: e.message_type,
-        groupId: e.group_id,
-        message: e.msg
-      })
+        const mcpPrompts = mcpManager.getMCPSystemPrompts({
+          messageType: e.message_type,
+          groupId: e.group_id,
+          message: e.msg
+        })
 
-      // 获取情感、记忆、表达学习的 prompt
-      const emotionPrompt = this.config.emotionSystem?.enabled
-        ? await this.emotionManager.getEmotionPromptForGroup(groupId)
-        : ''
-      const memoryPrompt = this.config.memorySystem?.enabled
-        ? await this.memoryManager.getMemoryPromptForUser(groupId, userId, e.msg || "")
-        : ''
-      const groupMemoryPrompt = this.config.memorySystem?.enabled && groupId
-        ? await this.memoryManager.getGroupMemoryPrompt(groupId, e.msg || "")
-        : ''
-      const expressionPrompt = this.config.expressionLearning?.enabled
-        ? await this.expressionLearner.getExpressionPromptForGroup(groupId)
-        : ''
+        // 获取情感、记忆、表达学习的 prompt
+        const emotionPrompt = this.config.emotionSystem?.enabled
+          ? await this.emotionManager.getEmotionPromptForGroup(groupId)
+          : ''
+        const memoryPrompt = this.config.memorySystem?.enabled
+          ? await this.memoryManager.getMemoryPromptForUser(groupId, userId, e.msg || "")
+          : ''
+        const groupMemoryPrompt = this.config.memorySystem?.enabled && groupId
+          ? await this.memoryManager.getGroupMemoryPrompt(groupId, e.msg || "")
+          : ''
+        const expressionPrompt = this.config.expressionLearning?.enabled
+          ? await this.expressionLearner.getExpressionPromptForGroup(groupId)
+          : ''
 
-      // 知识库检索
-      let knowledgePrompt = ''
-      if (this.knowledgeSearcher && e.msg) {
-        try {
-          const result = await this.knowledgeSearcher.search(e.msg)
-          if (result?.knowledgeContext) {
-            knowledgePrompt = `【知识库参考】\n以下是与当前话题相关的参考知识，请在回复时自然融入（不要生硬引用）：\n${result.knowledgeContext}`
+        // 知识库检索
+        let knowledgePrompt = ''
+        if (this.knowledgeSearcher && e.msg) {
+          try {
+            const result = await this.knowledgeSearcher.search(e.msg)
+            if (result?.knowledgeContext) {
+              knowledgePrompt = `【知识库参考】\n以下是与当前话题相关的参考知识，请在回复时自然融入（不要生硬引用）：\n${result.knowledgeContext}`
+            }
+          } catch (err) {
+            logger.error(`[知识库] 检索失败: ${err.message}`)
           }
-        } catch (err) {
-          logger.error(`[知识库] 检索失败: ${err.message}`)
         }
-      }
 
-      // 对方画像注入（昵称 + 最近发言；长期记忆已由 memoryPrompt 覆盖，避免重复）
-      let personProfilePrompt = ''
-      if (this.config.personProfileInjection?.enabled && groupId && userId) {
-        try {
-          personProfilePrompt = await personProfileInjector.build(groupId, userId, e)
-        } catch (err) {
-          logger.error(`[画像注入] 失败: ${err.message}`)
+        // 对方画像注入（昵称 + 最近发言；长期记忆已由 memoryPrompt 覆盖，避免重复）
+        let personProfilePrompt = ''
+        if (this.config.personProfileInjection?.enabled && groupId && userId) {
+          try {
+            personProfilePrompt = await personProfileInjector.build(groupId, userId, e)
+          } catch (err) {
+            logger.error(`[画像注入] 失败: ${err.message}`)
+          }
         }
-      }
 
-      // 构建增强系统提示
-      const groupContext = await this.getCurrentGroupContext(e)
-      const enhancedPrompts = [emotionPrompt, memoryPrompt, groupMemoryPrompt, expressionPrompt, knowledgePrompt, personProfilePrompt].filter(Boolean).join('\n')
+        // 构建增强系统提示
+        const groupContext = await this.getCurrentGroupContext(e)
+        const enhancedPrompts = [emotionPrompt, memoryPrompt, groupMemoryPrompt, expressionPrompt, knowledgePrompt, personProfilePrompt].filter(Boolean).join('\n')
 
-      const systemContent = `
+        const systemContent = `
 【认知系统初始化】
 ${this.config.systemContent}
 
@@ -2935,14 +2935,14 @@ ${this.config.systemContent}
 
 实时数据
 ${JSON.stringify({
-        group_info: {
-          group_id: groupContext.groupId,
-          group_name: groupContext.groupName,
-          group_notice: groupContext.groupNotice,
-          administrators: await getHighLevelMembers(e.group)
-        },
-        environmental_factors: { local_time: "北京时间: " + new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" }) }
-      }, null, 2)}
+          group_info: {
+            group_id: groupContext.groupId,
+            group_name: groupContext.groupName,
+            group_notice: groupContext.groupNotice,
+            administrators: await getHighLevelMembers(e.group)
+          },
+          environmental_factors: { local_time: "北京时间: " + new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" }) }
+        }, null, 2)}
 2.【消息格式】
 [YYYY-MM-DD HH:MM:SS] 昵称(qq号: xxx)[群身份: xxx]: 在群里说: {message}
 引用消息时格式为: [回复 昵称的消息: "原文内容"] @被艾特的人 在群里说: {message}
@@ -2985,102 +2985,102 @@ ${mcpPrompts}
 
 【群聊消息记录】
 `
-      // 获取历史记录
-      if (this.config.groupHistory) {
-        const chatHistory = await this.messageManager.getMessages(e.message_type, e.message_type === "group" ? e.group_id : e.user_id)
+        // 获取历史记录
+        if (this.config.groupHistory) {
+          const chatHistory = await this.messageManager.getMessages(e.message_type, e.message_type === "group" ? e.group_id : e.user_id)
 
-        if (chatHistory?.length) {
-          const memberMap = await e.bot.pickGroup(groupId).getMemberMap()
+          if (chatHistory?.length) {
+            const memberMap = await e.bot.pickGroup(groupId).getMemberMap()
 
-          // 使用 message_id 过滤当前消息
-          const currentMessageId = e.message_id
+            // 使用 message_id 过滤当前消息
+            const currentMessageId = e.message_id
 
-          groupUserMessages = await Promise.all(chatHistory
-            .reverse()
-            .filter(msg => {
-              // 直接用 message_id 判断，过滤掉当前消息
-              if (msg.message_id === currentMessageId) {
-                logger.debug(`[历史去重] 过滤当前消息: message_id=${msg.message_id}`)
-                return false
-              }
-              return true
-            })
-            .map(msg => ({
-              role: msg.sender.user_id === Bot.uin ? "assistant" : "user",
-              messageId: msg.message_id,
-              content: `[${msg.time}] ${msg.sender.nickname}(QQ号:${msg.sender.user_id})[群身份: ${roleMap[msg.sender.role] || "member"}]${msg.message_id ? `[消息ID:${msg.message_id}]` : ''}: ${msg.content}`
+            groupUserMessages = await Promise.all(chatHistory
+              .reverse()
+              .filter(msg => {
+                // 直接用 message_id 判断，过滤掉当前消息
+                if (msg.message_id === currentMessageId) {
+                  logger.debug(`[历史去重] 过滤当前消息: message_id=${msg.message_id}`)
+                  return false
+                }
+                return true
+              })
+              .map(msg => ({
+                role: msg.sender.user_id === Bot.uin ? "assistant" : "user",
+                messageId: msg.message_id,
+                content: `[${msg.time}] ${msg.sender.nickname}(QQ号:${msg.sender.user_id})[群身份: ${roleMap[msg.sender.role] || "member"}]${msg.message_id ? `[消息ID:${msg.message_id}]` : ''}: ${msg.content}`
+              }))
+            )
+            groupUserMessages = await Promise.all(groupUserMessages.map(async msg => {
+              const taskStatus = msg.messageId ? await this.getTaskStatus(groupId, msg.messageId) : null
+              const statusText = this.formatTaskStatusForPrompt(taskStatus)
+              return statusText ? { ...msg, content: `${msg.content}\n${statusText}` } : msg
             }))
-          )
-          groupUserMessages = await Promise.all(groupUserMessages.map(async msg => {
-            const taskStatus = msg.messageId ? await this.getTaskStatus(groupId, msg.messageId) : null
-            const statusText = this.formatTaskStatusForPrompt(taskStatus)
-            return statusText ? { ...msg, content: `${msg.content}\n${statusText}` } : msg
-          }))
+          }
         }
-      }
 
-      groupUserMessages = groupUserMessages.filter(m => m.role !== "system")
-      groupUserMessages.unshift({ role: "system", content: systemContent })
-      groupUserMessages.push({ role: "user", content: userContent })
-      session.userContent = userContent
-      groupUserMessages = this.trimMessageHistory(groupUserMessages)
-      groupUserMessages = this.filterChatByQQ(groupUserMessages, e.user_id)
-      session.groupUserMessages = this.formatMessages(groupUserMessages, e, userContent)
+        groupUserMessages = groupUserMessages.filter(m => m.role !== "system")
+        groupUserMessages.unshift({ role: "system", content: systemContent })
+        groupUserMessages.push({ role: "user", content: userContent })
+        session.userContent = userContent
+        groupUserMessages = this.trimMessageHistory(groupUserMessages)
+        groupUserMessages = this.filterChatByQQ(groupUserMessages, e.user_id)
+        session.groupUserMessages = this.formatMessages(groupUserMessages, e, userContent)
 
-      let toolChoice = "auto"
-      if (videos?.length >= 1) {
-        session.tools = this.getToolsByName(["videoAnalysisTool"])
-        if (session.tools?.length) toolChoice = { type: "function", function: { name: "videoAnalysisTool" } }
-      }
+        let toolChoice = "auto"
+        if (videos?.length >= 1) {
+          session.tools = this.getToolsByName(["videoAnalysisTool"])
+          if (session.tools?.length) toolChoice = { type: "function", function: { name: "videoAnalysisTool" } }
+        }
 
-      if (this.config.forcedAvatarMode && msg?.includes("头像编辑")) {
-        session.tools = this.getToolsByName(["googleImageEditTool"])
-        if (session.tools?.length) toolChoice = { type: "function", function: { name: "googleImageEditTool" } }
-        session.groupUserMessages.at(-1).content += `[用户头像链接: (https://q1.qlogo.cn/g?b=qq&nk=${e.user_id}&s=640)]`
-      }
+        if (this.config.forcedAvatarMode && msg?.includes("头像编辑")) {
+          session.tools = this.getToolsByName(["googleImageEditTool"])
+          if (session.tools?.length) toolChoice = { type: "function", function: { name: "googleImageEditTool" } }
+          session.groupUserMessages.at(-1).content += `[用户头像链接: (https://q1.qlogo.cn/g?b=qq&nk=${e.user_id}&s=640)]`
+        }
 
-      if (msg?.includes("导图") || msg?.includes("思维导图")) {
-        session.tools = this.getToolsByName(["aiMindMapTool"])
-        if (session.tools?.length) toolChoice = { type: "function", function: { name: "aiMindMapTool" } }
-      }
+        if (msg?.includes("导图") || msg?.includes("思维导图")) {
+          session.tools = this.getToolsByName(["aiMindMapTool"])
+          if (session.tools?.length) toolChoice = { type: "function", function: { name: "aiMindMapTool" } }
+        }
 
-      // 强制抢红包模式
-      if (e.forceGrabRedBag) {
-        session.tools = this.getToolsByName(["grabRedBagTool"])
-        if (session.tools?.length) toolChoice = { type: "function", function: { name: "grabRedBagTool" } }
-      }
+        // 强制抢红包模式
+        if (e.forceGrabRedBag) {
+          session.tools = this.getToolsByName(["grabRedBagTool"])
+          if (session.tools?.length) toolChoice = { type: "function", function: { name: "grabRedBagTool" } }
+        }
 
-      const botMemberMap = await e.bot.pickGroup(groupId).getMemberMap()
-      const botRole = roleMap[botMemberMap.get(Bot.uin)?.role] || "member"
-      session.toolContent = await this.buildMessageContent({ nickname: Bot.nickname, user_id: Bot.uin, role: botRole }, "", [], [], e.group)
+        const botMemberMap = await e.bot.pickGroup(groupId).getMemberMap()
+        const botRole = roleMap[botMemberMap.get(Bot.uin)?.role] || "member"
+        session.toolContent = await this.buildMessageContent({ nickname: Bot.nickname, user_id: Bot.uin, role: botRole }, "", [], [], e.group)
 
-      const requestData = this.buildRequestData(session.groupUserMessages, session.tools, toolChoice)
-      let response = await this.retryRequest(requestData, session.toolContent)
+        const requestData = this.buildRequestData(session.groupUserMessages, session.tools, toolChoice)
+        let response = await this.retryRequest(requestData, session.toolContent)
 
-      if (!response?.choices?.[0]) {
+        if (!response?.choices?.[0]) {
+          this.clearSession(sessionId)
+          return true
+        }
+
+        const message = response.choices[0].message || {}
+
+        if (message.tool_calls?.length) {
+          await this.processToolCalls(message, e, session, session.groupUserMessages, atQq, senderRole)
+        } else if (message.content) {
+          await this.handleTextResponse(message.content, e, session, session.groupUserMessages)
+        }
+
         this.clearSession(sessionId)
         return true
+
+      } catch (error) {
+        console.error(`[工具插件] 会话 ${sessionId} 执行异常：`, error)
+        this.clearSession(sessionId)
+        return true
+      } finally {
+        await this.finishConversationTask(taskContext, session)
+        if (e.group_id) this.recordReplyLatency(e.group_id, Date.now() - handleToolStartAt)
       }
-
-      const message = response.choices[0].message || {}
-
-      if (message.tool_calls?.length) {
-        await this.processToolCalls(message, e, session, session.groupUserMessages, atQq, senderRole)
-      } else if (message.content) {
-        await this.handleTextResponse(message.content, e, session, session.groupUserMessages)
-      }
-
-      this.clearSession(sessionId)
-      return true
-
-    } catch (error) {
-      console.error(`[工具插件] 会话 ${sessionId} 执行异常：`, error)
-      this.clearSession(sessionId)
-      return true
-    } finally {
-      await this.finishConversationTask(taskContext, session)
-      if (e.group_id) this.recordReplyLatency(e.group_id, Date.now() - handleToolStartAt)
-    }
     })
   }
 
