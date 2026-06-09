@@ -43,12 +43,10 @@ export async function YTapi(requestData, config, toolContent, toolName) {
                 if (!openaiResponse.ok) {
                     const errorText = await openaiResponse.text().catch(() => '无法读取错误内容');
                     logger.error(`OpenAI API 请求失败：${openaiResponse.status} ${openaiResponse.statusText} - ${errorText}`);
-                    return
                     return { error: `OpenAI API 请求失败：${openaiResponse.status} ${openaiResponse.statusText} - ${errorText}` };
                 }
             } catch (openaiFetchError) {
                 logger.error("OpenAI API 请求失败:", openaiFetchError);
-                return
                 return { error: `OpenAI API 请求失败：${openaiFetchError.message}` };
             }
 
@@ -148,12 +146,10 @@ export async function YTapi(requestData, config, toolContent, toolName) {
             if (!response.ok) {
                 const errorText = await response.text().catch(() => '无法读取错误内容');
                 logger.error(`API 请求失败：${response.status} ${response.statusText} - ${errorText}`);
-                return
                 return { error: `API 请求失败：${response.status} ${response.statusText} - ${errorText}` };
             }
         } catch (fetchError) {
             console.error(`${provider || 'API'} 请求失败:`, fetchError);
-            return
             return { error: `${provider || 'API'} 请求失败：${fetchError.message}` };
         }
 

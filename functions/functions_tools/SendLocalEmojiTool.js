@@ -1,5 +1,6 @@
 import { AbstractTool } from "./AbstractTool.js"
 import { emojiPackManager } from "../../utils/EmojiPackManager.js"
+import { pluginBridge } from "../../utils/pluginBridge.js"
 import fs from "fs"
 
 function sleep(ms) {
@@ -78,7 +79,12 @@ export class SendLocalEmojiTool extends AbstractTool {
     let textSent = false
     try {
       if (followUpText) {
-        await e.reply(followUpText)
+        const instance = pluginBridge.instance
+        if (instance?.sendSegmentedMessage && followUpText.includes("\n")) {
+          await instance.sendSegmentedMessage(e, followUpText, 0)
+        } else {
+          await e.reply(followUpText)
+        }
         textSent = true
         const cfg = emojiPackManager.config
         const minMs = Number(cfg.followUpDelayMinMs) || 300
