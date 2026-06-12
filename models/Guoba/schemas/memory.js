@@ -87,6 +87,13 @@ export default [
     componentProps: { min: 100, max: 8000, placeholder: "1200" }
   },
   {
+    field: "memorySystem.recallMinRelevance",
+    label: "召回最低相关性",
+    component: "InputNumber",
+    bottomHelpMessage: "当前消息有明确内容时，低于该相关性的记忆不会注入，避免旧记忆乱入。0 更宽松，0.1~0.2 更稳",
+    componentProps: { min: 0, max: 1, step: 0.01, placeholder: "0.12" }
+  },
+  {
     field: "memorySystem.semanticRecallEnabled",
     label: "语义召回开关",
     component: "Switch",

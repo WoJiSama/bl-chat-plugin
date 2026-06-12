@@ -376,5 +376,12 @@ export default [
     label: "注入近期发言条数上限",
     component: "InputNumber",
     componentProps: { min: 0, max: 20, placeholder: "3" }
+  },
+  {
+    field: "personProfileInjection.maxChars",
+    label: "画像注入字符上限",
+    component: "InputNumber",
+    bottomHelpMessage: "固定人设、群画像、用户画像、近期发言合计上限，避免画像信息挤占主 prompt",
+    componentProps: { min: 200, max: 3000, placeholder: "900" }
   }
 ]

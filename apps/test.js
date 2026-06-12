@@ -37,7 +37,7 @@ const RED_BAG_CONFIG = {
 const redBagCooldowns = new Map() // 红包冷却记录: key: groupId, value: lastGrabTime
 
 // 终态工具：本轮调用后不再请求 LLM 续话（工具的执行结果本身即为最终输出）
-const TERMINAL_TOOL_NAMES = new Set(['sendLocalEmojiTool', 'waitTool'])
+const TERMINAL_TOOL_NAMES = new Set(['sendLocalEmojiTool', 'waitTool', 'bananaTool'])
 
 const activeDedupeToolRuns = new Map()
 const taskStatusCache = new Map()
@@ -96,6 +96,48 @@ const FEEDBACK_WORDS = [
 ]
 // 问句尾字（消息末尾包含这些算问句）
 const QUESTION_TAIL_CHARS = ["?", "？", "吗", "呢", "啊", "么", "嘛"]
+const DIRECT_BOT_PRONOUN_PATTERNS = [
+  /(?:^|[\s，,。.!！?？~～])你(?:刚才|刚刚|前面|上一句|说|讲|回|回复|意思|怎么|为啥|为什么|是不是|能不能|可以|会不会|要不要|觉得|知道|认识|记得|是谁|叫啥|叫)/,
+  /(?:^|[\s，,。.!！?？~～])你(?:呢|呀|啊|吗|嘛|么|？|\?)?$/
+]
+const GROUP_ADDRESS_PATTERNS = [
+  /(?:大家|各位|群友|兄弟们|姐妹们|你们|咱们|有人|有没有人|哪位|大佬).{0,18}(?:知道|认识|会|能|可以|看看|帮|觉得|推荐|有|在吗|吗|嘛|\?|？)/,
+  /(?:谁知道|有人知道|有没有人知道|问一下|请问|求问|求助|有无).{0,30}/,
+  /(?:这个|这|那个|那).{0,14}(?:是什么|是啥|啥|怎么回事|咋回事|有人知道|谁知道)/
+]
+const PREVIOUS_SPEAKER_REPLY_PATTERNS = [
+  /^[？?]+$/,
+  /^(你|妳|他|她|这|那|对|不对|不是|是啊|确实|笑死|草|绷|哈哈|那你|那他|那她|别|不要|可以|不行|行|嗯|啊|哦|所以|但是|可是)/
+]
+const REALTIME_INFO_PATTERNS = [
+  /(天气|气温|温度|下雨|降雨|台风|空气质量|AQI|空气指数)/i,
+  /(新闻|热搜|最新消息|刚刚发生|最近发生|实时|现在|当前|目前|今天|今日|明天|昨天).{0,24}(新闻|情况|怎么样|如何|发生|政策|规定|结果|价格|行情|汇率|股价|天气|赛程|比分|营业|开门|关门)/i,
+  /(股价|股票|基金|币价|比特币|汇率|油价|金价|价格|报价|行情|房价|票价)/i,
+  /(赛程|比分|比赛结果|战绩|排名|积分榜|开奖|中奖号码)/i,
+  /(营业|开门|关门|限行|航班|车次|路况|排队|库存|余票|票价)/i
+]
+const EXPLICIT_SEARCH_PATTERNS = [
+  /(搜一下|搜索|查一下|查查|帮我查|帮我搜|联网查|网上查|百度一下|谷歌一下|找一下资料|最新的|最新版|最新版本|官网|链接|网址|网页|页面|repo|github)/i
+]
+const TOOL_INTENT_PATTERNS = [
+  /(画图|生图|修图|改图|图片分析|看图|识图|视频分析|语音|点歌|音乐|提醒我|定时提醒|撤回|禁言|改名片|戳一下|点赞|送礼物|红包|思维导图|导图|生成图片|生成语音)/i
+]
+const IMAGE_GENERATION_PATTERNS = [
+  /(画图|生图|生成图片|生成一?张图|生成一?个.*图|画一?张|绘制|出图|做一?张.*图|捏一?个.*图)/i,
+  /(帮我|给我|替我|可以|能不能|能|想要|要).{0,12}(画|生成|绘制|做|捏).{0,40}(图|图片|插画|壁纸|头像|封面|海报|表情包|logo|标志|立绘|角色|人物|少女|男孩|女孩|猫|猫咪|狗|狗狗|动物|风景|场景)/i,
+  /(?:用|拿|以).{0,8}(?:图片|图|画面|画|插画).{0,16}(?:告诉|回答|表达|表示|说明|形容|描述|展示|呈现|说话)(?:我|一下|出来|吧|呀|嘛|呢)?/i,
+  /(?:图片|图|画面|插画).{0,10}(?:告诉|回答|表达|表示|说明|形容|描述|展示|呈现)(?:我|一下|出来|吧|呀|嘛|呢)?/i,
+  /(画|绘制|生成).{0,8}(一|1)?(只|个|位|张|幅).{0,32}(猫|猫咪|狗|狗狗|动物|角色|人物|少女|男孩|女孩|头像|立绘|风景|场景)/i
+]
+const IMAGE_ANALYSIS_PATTERNS = [
+  /(图|图片|照片|截图|表情|头像).{0,16}(是什么|是啥|有啥|有什么|啥意思|什么意思|怎么看|看得出|看出来|识别|分析|描述|讲讲|说说)/i,
+  /(看看|看下|看一下|帮我看|帮我看看|告诉我|识别一下|分析一下|描述一下).{0,18}(图|图片|照片|截图|表情|头像|里面|里边|上面|内容)/i,
+  /(图里|图中|图片里|图片中|照片里|截图里|这里面|这上面).{0,16}(是什么|是啥|有啥|有什么|谁|哪|啥意思|什么意思)/i
+]
+const GROUP_CONTEXT_PATTERNS = [
+  /(群公告|公告|群规|群规则|入群规则|群主|管理员|管理|群管|群成员|成员|群名片|头衔|谁是|是谁|哪位|哪个人|哪个群友|这人是谁|那人是谁|禁言规则|发公告)/i
+]
+const SEARCH_TOOL_NAMES = new Set(['searchInformationTool', 'webParserTool', 'githubRepoTool'])
 
 /**
  * 从一段文本提取关键词（给 R2 关键词命中识别用）。
@@ -166,6 +208,525 @@ function isFeedbackMessage(text) {
     }
   }
   return false
+}
+
+function isLikelyFollowupMessage(text = "") {
+  const msg = String(text || "").replace(/\[CQ:[^\]]+\]/g, " ").trim()
+  if (!msg) return false
+  if (isQuestionMessage(msg)) return true
+  return /(?:谁|誰|什么|啥|哪(?:个|位|里|裏)|怎么|怎样|咋|为什么|为啥|多少|几|能不能|可不可以|要不要|是不是|还记得|记得|刚才|刚刚|前面|上一句|推荐|告诉|讲讲|说说|解释|评价|分析|帮我|给我|那你|那就|所以)/.test(msg)
+}
+
+function hasDirectBotName(text = "", botName = "") {
+  const msg = String(text || "").toLowerCase()
+  const name = String(botName || "").toLowerCase()
+  return Boolean(name && msg.includes(name))
+}
+
+function hasBotTextAnchor(text = "", botName = "", prefixes = []) {
+  const msg = String(text || "").toLowerCase()
+  if (hasDirectBotName(msg, botName)) return true
+  return (Array.isArray(prefixes) ? prefixes : []).some(prefix => {
+    const p = String(prefix || "").toLowerCase().trim()
+    return p && msg.includes(p)
+  })
+}
+
+function getAtTarget(seg = {}) {
+  return seg?.qq ?? seg?.user_id ?? seg?.id ?? seg?.uin ?? seg?.uid ??
+    seg?.data?.qq ?? seg?.data?.user_id ?? seg?.data?.id ?? seg?.data?.uin ?? seg?.data?.uid
+}
+
+function getReplySender(seg = {}) {
+  return seg?.sender_id ?? seg?.user_id ?? seg?.qq ??
+    seg?.sender?.user_id ?? seg?.sender?.qq ??
+    seg?.data?.sender_id ?? seg?.data?.user_id ?? seg?.data?.qq ??
+    seg?.data?.sender?.user_id ?? seg?.data?.sender?.qq
+}
+
+function messageMentionsUser(e = {}, userId = "") {
+  if (!userId) return false
+  const botId = e?.bot?.uin || (typeof Bot !== 'undefined' && Bot.uin)
+  if (botId && String(userId) === String(botId) && (e?.atBot || e?.atme || e?.atMe || e?.isAt)) {
+    return true
+  }
+  const atList = Array.isArray(e?.at) ? e.at : (Array.isArray(e?.at_user) ? e.at_user : [])
+  if (atList.some(id => String(id) === String(userId))) return true
+  if (Array.isArray(e?.message)) {
+    for (const seg of e.message) {
+      if (seg?.type !== "at") continue
+      if (String(getAtTarget(seg)) === String(userId)) return true
+    }
+  }
+  const raw = String(e?.msg || "")
+  return new RegExp(`\\[CQ:at,[^\\]]*(?:qq|user_id|id|uin)=${escapeRegExp(String(userId))}(?:,|\\])`).test(raw)
+}
+
+function messageQuotesUser(e = {}, userId = "") {
+  if (!userId) return false
+  const sources = [e?.source, e?.reply, e?.replyMessage, e?.quoted, e?.quote]
+  for (const source of sources) {
+    if (!source) continue
+    const sender = getReplySender(source)
+    if (sender && String(sender) === String(userId)) return true
+  }
+  if (Array.isArray(e?.message)) {
+    for (const seg of e.message) {
+      if (seg?.type !== "reply") continue
+      const sender = getReplySender(seg)
+      if (sender && String(sender) === String(userId)) return true
+    }
+  }
+  return false
+}
+
+function looksDirectedAtBotByPronoun(text = "") {
+  const msg = String(text || "").trim()
+  if (!msg || !/[你妳]/.test(msg)) return false
+  return DIRECT_BOT_PRONOUN_PATTERNS.some(pattern => pattern.test(msg))
+}
+
+function looksGroupAddressed(text = "") {
+  const msg = String(text || "").trim()
+  if (!msg) return false
+  return GROUP_ADDRESS_PATTERNS.some(pattern => pattern.test(msg))
+}
+
+function getPreviousRecentMessage(state, e) {
+  const messages = Array.isArray(state?.recentMessages) ? state.recentMessages : []
+  const currentUserId = String(e?.user_id || "")
+  const currentText = String(e?.msg || "").trim()
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const item = messages[i]
+    if (!item) continue
+    const isCurrent = String(item.userId || "") === currentUserId &&
+      String(item.text || "").trim() === currentText &&
+      Date.now() - Number(item.at || 0) < 5000
+    if (isCurrent) continue
+    return item
+  }
+  return null
+}
+
+function looksAddressedToPreviousSpeaker(text = "", previousMessage = null, currentUserId = "", botId = "") {
+  if (!previousMessage) return false
+  if (String(previousMessage.userId || "") === String(currentUserId || "")) return false
+  if (botId && String(previousMessage.userId || "") === String(botId)) return false
+  if (Date.now() - Number(previousMessage.at || 0) > 120000) return false
+  const msg = String(text || "").trim()
+  if (!msg || looksGroupAddressed(msg)) return false
+  if (PREVIOUS_SPEAKER_REPLY_PATTERNS.some(pattern => pattern.test(msg))) return true
+  return msg.length <= 18 && !isQuestionMessage(msg)
+}
+
+function uniqText(values = []) {
+  const result = []
+  const seen = new Set()
+  for (const value of values) {
+    const text = String(value || "").trim()
+    if (!text) continue
+    const key = text.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    result.push(text)
+  }
+  return result
+}
+
+function getMemberNames(member = {}, fallback = "") {
+  return uniqText([member.card, member.nickname, fallback])
+}
+
+function formatMemberDisplayName(member = {}, fallback = "未知用户") {
+  const names = getMemberNames(member, fallback)
+  if (!names.length) return fallback
+  if (names.length === 1) return names[0]
+  return `${names[0]}（昵称:${names.slice(1).join(" / ")}）`
+}
+
+function extractMemberLookupTerms(text = "") {
+  const cleaned = String(text || "")
+    .replace(/\[CQ:[^\]]+\]/g, " ")
+    .replace(/@\S+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+  if (!/(谁|誰|哪位|哪个|哪個)/.test(cleaned)) return []
+
+  const terms = []
+  const patterns = [
+    /([A-Za-z0-9_\-.\u4e00-\u9fa5·•]{2,32})\s*(?:是)?(?:谁|誰|哪位|哪个|哪個)/g,
+    /(?:谁|誰|哪位|哪个|哪個)\s*(?:是)?\s*([A-Za-z0-9_\-.\u4e00-\u9fa5·•]{2,32})/g
+  ]
+  for (const pattern of patterns) {
+    for (const match of cleaned.matchAll(pattern)) {
+      let term = String(match[1] || "")
+        .replace(/是$/g, "")
+        .replace(/[，,。.!！?？:：;；~～]+$/g, "")
+        .trim()
+      let previous = ""
+      while (term && term !== previous) {
+        previous = term
+        term = term
+          .replace(/^(?:这里是希洛|希洛|能不能告诉我|可不可以告诉我|能告诉我|告诉我|請問|请问|问一下|求问|你认识|你認識|你知道|你晓得|认识|認識|知道|晓得)\s*/, "")
+          .replace(/^[，,。.!！?？:：;；~～\s]+/, "")
+          .trim()
+      }
+      if (term && !["是谁", "谁是", "哪位", "哪个", "哪個"].includes(term)) terms.push(term)
+    }
+  }
+  return uniqText(terms).slice(0, 5)
+}
+
+function matchGroupMembersByTerms(memberMap, terms = [], currentUserId = null) {
+  if (!memberMap || !terms.length) return []
+  const members = Array.from(memberMap.values())
+  const matches = []
+  for (const term of terms) {
+    const needle = String(term || "").toLowerCase()
+    if (!needle) continue
+    const found = members
+      .map(member => {
+        const names = getMemberNames(member)
+        const score = names.reduce((best, name) => {
+          const value = String(name || "").toLowerCase()
+          if (!value) return best
+          if (value === needle) return Math.max(best, 3)
+          if (needle.length >= 2 && value.length >= 2 && (value.includes(needle) || needle.includes(value))) {
+            return Math.max(best, 2)
+          }
+          return best
+        }, 0)
+        return { member, names, score }
+      })
+      .filter(item => item.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 6)
+
+    if (found.length) {
+      matches.push({
+        term,
+        members: found.map(({ member, names }) => ({
+          userId: member.user_id,
+          role: member.role,
+          title: member.title,
+          names,
+          isCurrentSpeaker: currentUserId && String(member.user_id) === String(currentUserId)
+        }))
+      })
+    }
+  }
+  return matches
+}
+
+function formatMemberLookupPrompt(matches = []) {
+  if (!matches.length) return ""
+  const lines = [
+    "【群成员名称匹配】",
+    "用户问到的人名/昵称在当前群成员列表里有匹配。回答这类问题时优先使用这里，不要说群里没看到这个名字。",
+    "只允许复述这里列出的字段：昵称/群名片、QQ、群身份、头衔、是否当前发言者。没有明确证据时，禁止补充“他发过公告/经常管理/我见过他做某事/大家都怎样评价他”等行为经历。",
+    "如果只知道他是管理员，就说“他是群里的管理员，群名片/昵称是...”，不要把管理员身份推断成发公告。"
+  ]
+  for (const item of matches) {
+    lines.push(`- 查询: ${item.term}`)
+    for (const member of item.members) {
+      const role = roleMap[member.role] || member.role || "member"
+      const current = member.isCurrentSpeaker ? "，当前发言者本人" : ""
+      const title = member.title ? `，头衔:${member.title}` : ""
+      lines.push(`  · ${member.names.join(" / ")} (QQ:${member.userId})[群身份:${role}${title}${current}]`)
+    }
+  }
+  return lines.join("\n")
+}
+
+function escapeRegExp(text = "") {
+  return String(text || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
+
+function removeBotAnchors(text = "", botName = "", prefixes = []) {
+  let result = String(text || "")
+  const anchors = uniqText([botName, ...(Array.isArray(prefixes) ? prefixes : []), "希洛", "这里是希洛"])
+  for (const anchor of anchors) {
+    result = result.replace(new RegExp(escapeRegExp(anchor), "gi"), " ")
+  }
+  return result
+}
+
+function hasExplicitRememberSignal(text = "") {
+  return /(?:记住|记一下|记着|记得|记好|记下来|别忘|以后|下次|告诉你|你要知道)/.test(String(text || ""))
+}
+
+function cleanTeachingAlias(value = "", botName = "", prefixes = []) {
+  let text = removeBotAnchors(value, botName, prefixes)
+    .replace(/@QQ:\d+|@BOT/g, " ")
+    .replace(/\[CQ:[^\]]+\]/g, " ")
+    .replace(/(?:帮我|你|妳)?(?:记住|记一下|记着|记得|记好|记下来|知道|认识)/g, " ")
+    .replace(/(?:以后|下次)(?:说|看到|提到|有人说|别人说)?/g, " ")
+    .replace(/^(?:说|叫|把|将|如果|有人|别人|群里|大家|这个|这|那个|那)+/, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+
+  const parts = text.split(/[\s，,。.!！?？:：;；~～]+/).filter(Boolean)
+  text = parts[parts.length - 1] || text
+  text = text.replace(/^(?:说|叫|把|将|这个|那个|这|那)/, "").trim()
+
+  if (!text || text.length > 32) return ""
+  if (/(?:不|没|非|并不|并非)$/.test(text)) return ""
+  if (/^(?:是|就是|谁|誰|哪位|哪个|哪個|什么|啥|他|她|它|ta|TA|这个|那个|这|那|这人|那人|人|密码|公告|群公告)$/.test(text)) return ""
+  return text
+}
+
+function cleanTeachingTarget(value = "", botName = "", prefixes = []) {
+  let text = String(value || "")
+    .replace(/\[CQ:[^\]]+\]/g, " ")
+    .replace(/@QQ:\d+|@BOT/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+
+  const rememberIndex = text.search(/(?:你|妳)?(?:记住|记一下|记着|记得|知道|认识)(?:了)?(?:吗|嘛)?/)
+  if (rememberIndex >= 0) text = text.slice(0, rememberIndex)
+
+  for (const anchor of uniqText([botName, ...(Array.isArray(prefixes) ? prefixes : []), "希洛", "这里是希洛"])) {
+    const index = text.indexOf(anchor)
+    if (index >= 0) text = text.slice(0, index)
+  }
+
+  text = text
+    .replace(/^@+/, "")
+    .replace(/[，,。.!！?？:：;；~～].*$/g, "")
+    .trim()
+
+  if (!text || text.length > 64) return ""
+  if (/[吗嘛么呢]$/.test(text)) return ""
+  return text
+}
+
+function findGroupMemberByName(memberMap, term = "") {
+  if (!memberMap || !term) return null
+  const needle = String(term || "").replace(/^@+/, "").toLowerCase().trim()
+  if (!needle) return null
+
+  let best = null
+  for (const member of memberMap.values()) {
+    const names = getMemberNames(member)
+    const score = names.reduce((current, name) => {
+      const value = String(name || "").toLowerCase()
+      if (!value) return current
+      if (value === needle) return Math.max(current, 3)
+      if (value.includes(needle) || needle.includes(value)) return Math.max(current, 2)
+      return current
+    }, 0)
+    if (score > (best?.score || 0)) best = { member, score }
+  }
+  return best?.score >= 2 ? best.member : null
+}
+
+function buildTeachingFact({ alias, targetUserId = null, targetText = "", memberMap, rememberRequested = false, source = "text" } = {}) {
+  const cleanAlias = String(alias || "").trim()
+  if (!cleanAlias) return null
+
+  if (targetUserId) {
+    const member = memberMap?.get?.(Number(targetUserId))
+    const targetDisplay = member ? formatMemberDisplayName(member, `用户${targetUserId}`) : `用户${targetUserId}`
+    return {
+      alias: cleanAlias,
+      targetUserId: String(targetUserId),
+      targetDisplay,
+      targetNames: getMemberNames(member || {}, `用户${targetUserId}`),
+      rememberRequested,
+      source
+    }
+  }
+
+  const matchedMember = findGroupMemberByName(memberMap, targetText)
+  if (matchedMember?.user_id) {
+    return buildTeachingFact({
+      alias: cleanAlias,
+      targetUserId: matchedMember.user_id,
+      memberMap,
+      rememberRequested,
+      source
+    })
+  }
+
+  const cleanTarget = String(targetText || "").trim()
+  if (!cleanTarget) return null
+  return {
+    alias: cleanAlias,
+    targetUserId: null,
+    targetDisplay: cleanTarget,
+    targetNames: [cleanTarget],
+    rememberRequested,
+    source
+  }
+}
+
+function extractMentionTeachingFacts(messageSegments = [], memberMap, options = {}) {
+  if (!Array.isArray(messageSegments) || !messageSegments.length) return []
+  const botId = String(options.botId || "")
+  let annotated = ""
+  for (const segment of messageSegments) {
+    if (segment?.type === "text") {
+      annotated += segment.text || segment.data?.text || ""
+      continue
+    }
+    if (segment?.type === "at") {
+      const qq = String(segment.qq || segment.data?.qq || "")
+      annotated += qq && qq !== botId ? ` @QQ:${qq} ` : " ， "
+    }
+  }
+
+  const rememberRequested = hasExplicitRememberSignal(`${annotated} ${options.text || ""}`)
+  const facts = []
+  const relationPattern = /(?:^|[\s，,。.!！?？:：;；~～])([^@，,。.!！?？:：;；\n\r]{1,48}?)\s*(?:就?是|叫|指的是|代表|等于|=)\s*@QQ:(\d+)/g
+  for (const match of annotated.matchAll(relationPattern)) {
+    const alias = cleanTeachingAlias(match[1], options.botName, options.prefixes)
+    const targetUserId = match[2]
+    const fact = buildTeachingFact({
+      alias,
+      targetUserId,
+      memberMap,
+      rememberRequested,
+      source: "mention"
+    })
+    if (fact) facts.push(fact)
+  }
+  return facts
+}
+
+function extractTextTeachingFacts(text = "", memberMap, options = {}) {
+  const raw = String(text || "")
+  if (!raw || !hasExplicitRememberSignal(raw)) return []
+
+  const cleaned = raw
+    .replace(/\[CQ:at,qq=(\d+)[^\]]*\]/g, " @QQ:$1 ")
+    .replace(/\s+/g, " ")
+    .trim()
+
+  const facts = []
+  const patterns = [
+    /(?:记住|记一下|记着|记得|记好|记下来|告诉你|你要知道)[，,\s]*(.{1,48}?)(?:就?是|叫|指的是|代表|等于|=)\s*(@QQ:(\d+)|.{1,80})/g,
+    /(.{1,48}?)(?:就?是|叫|指的是|代表|等于|=)\s*(@QQ:(\d+)|.{1,80}?)(?:[，,。.!！?？\s]*(?:你|妳)?(?:记住|记一下|记着|记得|知道))/g
+  ]
+
+  for (const pattern of patterns) {
+    for (const match of cleaned.matchAll(pattern)) {
+      const alias = cleanTeachingAlias(match[1], options.botName, options.prefixes)
+      const targetUserId = match[3] || null
+      const targetText = targetUserId
+        ? ""
+        : cleanTeachingTarget(match[2], options.botName, options.prefixes)
+      const fact = buildTeachingFact({
+        alias,
+        targetUserId,
+        targetText,
+        memberMap,
+        rememberRequested: true,
+        source: "text"
+      })
+      if (fact) facts.push(fact)
+    }
+  }
+  return facts
+}
+
+function extractExplicitTeachingFacts(messageSegments = [], memberMap, options = {}) {
+  const facts = [
+    ...extractMentionTeachingFacts(messageSegments, memberMap, options),
+    ...extractTextTeachingFacts(options.text || "", memberMap, options)
+  ]
+
+  const result = []
+  const seen = new Set()
+  for (const fact of facts) {
+    const key = `${fact.alias.toLowerCase()}::${fact.targetUserId || fact.targetDisplay.toLowerCase()}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    result.push(fact)
+  }
+  return result.slice(0, 5)
+}
+
+function formatExplicitTeachingMemoryContent(fact) {
+  if (!fact) return ""
+  const target = fact.targetUserId
+    ? `${fact.targetDisplay} (QQ:${fact.targetUserId})`
+    : fact.targetDisplay
+  return `群内称呼映射：${fact.alias} = ${target}`
+}
+
+function formatExplicitTeachingPrompt(facts = []) {
+  if (!facts.length) return ""
+  const lines = [
+    "【当前消息显式教学 - 最高优先级】",
+    "当前用户正在纠正或教你群内称呼/外号映射。这里的内容优先级高于群公告、旧聊天记录、旧回答、知识库和长期记忆；如果冲突，以这里为准。",
+    "回复时直接承认并确认这些映射，不要把同名词从群公告或旧回答里重新解释成别的东西。"
+  ]
+  for (const fact of facts) {
+    lines.push(`- ${formatExplicitTeachingMemoryContent(fact)}`)
+  }
+  if (facts.some(fact => fact.rememberRequested)) {
+    lines.push("- 用户问“记住了吗”时，应回答已经记住/记下这个映射。")
+  }
+  return lines.join("\n")
+}
+
+function normalizeIdentityBindings(bindings = []) {
+  const source = Array.isArray(bindings)
+    ? bindings
+    : bindings && typeof bindings === "object"
+      ? Object.entries(bindings).map(([qq, value]) => ({ qq, ...(value || {}) }))
+      : []
+
+  const result = []
+  for (const item of source) {
+    if (!item || typeof item !== "object") continue
+    const qq = String(item.qq || item.userId || item.user_id || "").trim()
+    const name = String(item.name || item.nickname || item.displayName || "").trim()
+    if (!qq || !name) continue
+    result.push({
+      qq,
+      name,
+      aliases: uniqText(Array.isArray(item.aliases) ? item.aliases : [item.alias, item.title]),
+      relationToBot: String(item.relationToBot || item.relationship || item.relation || "").trim(),
+      notes: uniqText(Array.isArray(item.notes) ? item.notes : [item.note]),
+      style: String(item.style || "").trim()
+    })
+  }
+  return result
+}
+
+function formatIdentityBindingsPrompt(bindings = [], currentUserId = "") {
+  const normalized = normalizeIdentityBindings(bindings)
+  if (!normalized.length) return ""
+
+  const current = normalized.find(item => item.qq === String(currentUserId || ""))
+  const lines = [
+    "【固定身份关系】",
+    "以下身份绑定来自配置，优先级高于群名片、昵称、旧聊天记录和临时猜测。涉及这些 QQ 时必须按绑定理解。"
+  ]
+
+  if (current) {
+    const aliases = current.aliases.length ? `；别称/身份：${current.aliases.join(" / ")}` : ""
+    const relation = current.relationToBot ? `；和你的关系：${current.relationToBot}` : ""
+    const notes = current.notes.length ? `；备注：${current.notes.join("；")}` : ""
+    const style = current.style ? `；相处方式：${current.style}` : ""
+    const identityTerms = uniqText([current.name, ...current.aliases])
+    const identityTermsText = identityTerms.length ? `或提到“${identityTerms.join("”“")}”相关内容` : ""
+    lines.push(`- 当前发言者 QQ:${current.qq} 就是 ${current.name}${aliases}${relation}${notes}${style}`)
+    lines.push(`- 当前发言者说“我”${identityTermsText}时，按“${current.name}本人正在和你说话”理解，不要当成普通群友。`)
+  }
+
+  const others = normalized.filter(item => item.qq !== String(currentUserId || ""))
+  if (others.length) {
+    lines.push("- 已知重要成员：")
+    for (const item of others.slice(0, 8)) {
+      const aliases = item.aliases.length ? `（${item.aliases.join(" / ")}）` : ""
+      const relation = item.relationToBot ? `，${item.relationToBot}` : ""
+      lines.push(`  · ${item.name}${aliases}: QQ:${item.qq}${relation}`)
+    }
+  }
+
+  return lines.join("\n")
 }
 // ─── 拟人化对话辅助函数结束 ────────────────────────────────────────────
 
@@ -319,6 +880,95 @@ function toolConfigHasName(toolNames, name) {
 function isCodeOrMarkdownRequest(text = "") {
   const content = String(text || "").toLowerCase()
   return /写.*(代码|算法|函数|脚本|程序|markdown|md|文档)|给.*(代码|示例代码|算法|markdown|md文档)|实现.*(算法|函数|代码|脚本|程序)|生成.*(代码|markdown|md文档|文档)|编写.*(代码|markdown|md|文档)|代码给我|md文档|markdown文档|代码截图/.test(content)
+}
+
+function normalizeIntentText(text = "") {
+  return String(text || "")
+    .replace(/\[CQ:[^\]]+\]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
+function matchesAnyPattern(text = "", patterns = []) {
+  const content = normalizeIntentText(text)
+  return patterns.some(pattern => pattern.test(content))
+}
+
+function isRealtimeInfoRequest(text = "") {
+  return matchesAnyPattern(text, REALTIME_INFO_PATTERNS)
+}
+
+function isExplicitSearchRequest(text = "") {
+  return matchesAnyPattern(text, EXPLICIT_SEARCH_PATTERNS)
+}
+
+function isExplicitToolIntent(text = "") {
+  return matchesAnyPattern(text, TOOL_INTENT_PATTERNS)
+}
+
+function isImageGenerationRequest(text = "") {
+  const content = normalizeIntentText(text)
+  if (/(修图|改图|图片分析|看图|识图|分析图片|识别图片)/i.test(content)) return false
+  return matchesAnyPattern(content, IMAGE_GENERATION_PATTERNS)
+}
+
+function isImageAnalysisRequest(text = "") {
+  const content = normalizeIntentText(text)
+  if (isImageGenerationRequest(content)) return false
+  return matchesAnyPattern(content, IMAGE_ANALYSIS_PATTERNS)
+}
+
+function containsInternalStatusLeak(text = "") {
+  const content = String(text || "")
+  if (!content.trim()) return false
+
+  return (
+    /(?:bananaTool|googleImageAnalysisTool|textImageTool|souimagery|gpt-image|tool_call|function_call|Bad gateway|API请求|502)/i.test(content) ||
+    /(?:调用工具|工具调用|函数调用|内部执行|上游接口|上游返回|接口返回|模型报错|模型错误)/i.test(content) ||
+    /(?:工具|接口|模型|服务器|网站|api|上游).{0,18}(?:坏了|坏掉|出问题|报错|错误|失败|没好|恢复|打不开|超时|不可用)/i.test(content) ||
+    /(?:坏了|坏掉|出问题|报错|错误|失败|没好|恢复正常|打不开|超时|不可用).{0,18}(?:工具|接口|模型|服务器|网站|api|上游)/i.test(content)
+  )
+}
+
+function buildInternalStatusSafeReply(toolName = "", session = {}) {
+  const text = [session?.rawArgs, session?.userContent].filter(Boolean).join("\n")
+  if (toolName === "bananaTool" || isImageGenerationRequest(text)) {
+    return "我刚刚试了一下，但这次画面没有弄好，就先不发出来啦…有点不好意思。你换个描述的话，我再认真帮你试一次。"
+  }
+  if (toolName === "googleImageAnalysisTool" || isImageAnalysisRequest(text)) {
+    return "我刚刚认真看了一下，但这次没看清楚，怕乱说就先不硬讲了…你重新发一下图，我再帮你看好不好？"
+  }
+  return "我刚刚试了一下，但这次没有处理好，怕乱说就先不硬答了。"
+}
+
+function shouldInjectGroupContext(text = "") {
+  return matchesAnyPattern(text, GROUP_CONTEXT_PATTERNS)
+}
+
+function hasMediaNeedingTool(message = []) {
+  return Array.isArray(message) && message.some(seg =>
+    ["image", "video", "record", "voice", "file", "wallet"].includes(seg?.type)
+  )
+}
+
+function shouldExposeToolsForMessage(e = {}, text = "") {
+  const content = normalizeIntentText(text || e?.msg || "")
+  if (hasMediaNeedingTool(e?.message)) return true
+  return isRealtimeInfoRequest(content) || isExplicitSearchRequest(content) || isExplicitToolIntent(content)
+}
+
+function filterToolsForMessageIntent(tools = [], e = {}, text = "") {
+  if (!Array.isArray(tools) || !tools.length) return []
+  const content = normalizeIntentText(text || e?.msg || "")
+  if (!shouldExposeToolsForMessage(e, content)) return []
+
+  const allowSearch = isRealtimeInfoRequest(content) || isExplicitSearchRequest(content)
+  if (allowSearch) return tools
+
+  return tools.filter(tool => {
+    const name = tool?.function?.name
+    return name && !SEARCH_TOOL_NAMES.has(name)
+  })
 }
 
 function looksLikeCodeOrMarkdown(text = "") {
@@ -755,18 +1405,26 @@ export class ExamplePlugin extends plugin {
     return ""
   }
 
-  async getCurrentGroupContext(e) {
+  getBasicGroupContext(e) {
     const groupId = String(e?.group_id || "")
-    if (!groupId) return { groupId: "", groupName: "", groupNotice: "" }
+    return {
+      groupId,
+      groupName: this.normalizeGroupContextText(
+        e?.group_name || e?.group?.name || e?.group?.info?.group_name || e?.group?.info?.name,
+        120
+      ),
+      groupNotice: ""
+    }
+  }
 
-    const groupName = this.normalizeGroupContextText(
-      e?.group_name || e?.group?.name || e?.group?.info?.group_name || e?.group?.info?.name,
-      120
-    )
+  async getCurrentGroupContext(e) {
+    const basic = this.getBasicGroupContext(e)
+    const groupId = basic.groupId
+    if (!groupId) return { groupId: "", groupName: "", groupNotice: "" }
 
     const cached = groupContextCache.get(groupId)
     if (cached && Date.now() - cached.at < GROUP_CONTEXT_CACHE_TTL_MS) {
-      return { ...cached.data, groupName }
+      return { ...cached.data, groupName: basic.groupName }
     }
 
     let groupNotice = ""
@@ -780,7 +1438,7 @@ export class ExamplePlugin extends plugin {
       }
     }
 
-    const data = { groupId, groupName, groupNotice }
+    const data = { ...basic, groupNotice }
     groupContextCache.set(groupId, { at: Date.now(), data })
     return data
   }
@@ -898,12 +1556,18 @@ export class ExamplePlugin extends plugin {
       if (botId && String(e?.user_id) === String(botId)) {
         return { kind: 'bot_self_echo', reason: 'sender_is_self' }
       }
-      // @ 别人（且不是 @ bot）→ 跳过
+      const atSelf = messageMentionsUser(e, botId)
+      const quotesSelf = messageQuotesUser(e, botId)
+      const text = String(e?.msg || '')
+      const hasBotName = hasBotTextAnchor(text, Bot.nickname, this.config.triggerPrefixes)
+      const explicitlyAddressesBot = atSelf || quotesSelf || hasBotName
+
+      // @ 别人（且没有明确点名 bot）→ 跳过。
+      // QQ 引用别人时常会自动带 @原作者；如果正文已经写了"希洛/触发前缀"，应视为找 bot。
       if (smartCfg.skipWhenAddressedOther !== false && Array.isArray(e?.message)) {
         const atSegs = e.message.filter(m => m?.type === 'at')
         if (atSegs.length > 0) {
-          const atSelf = atSegs.some(m => String(m?.qq) === String(botId))
-          if (!atSelf) {
+          if (!explicitlyAddressesBot) {
             return { kind: 'addressed_other', reason: 'at_other_user' }
           }
         }
@@ -911,23 +1575,60 @@ export class ExamplePlugin extends plugin {
       // 空文本（纯表情/图片/转账）→ 跳过
       if (smartCfg.skipWhenEmptyText !== false) {
         const rawText = (typeof e?.msg === 'string' ? e.msg : '').trim()
-        if (!rawText) {
+        if (!rawText && !atSelf && !quotesSelf) {
           return { kind: 'empty_content', reason: 'no_text' }
         }
       }
 
       // 以下为 continuation_strong 识别（必须距 bot 上次发言不远）
-      const text = String(e?.msg || '')
       const sinceLastBotReply = state.lastBotReplyAt ? Date.now() - state.lastBotReplyAt : Infinity
-      const quickResponseMs = Number(smartCfg.quickResponseMs) || 30000
+      const quickResponseMs = Math.max(0, Number(smartCfg.quickResponseMs) || 0)
       const lookbackMs = Number(smartCfg.continuationLookbackMs) || 180000
+      const sameUserAsLastReply = state.lastBotReplyToUserId && String(e?.user_id || '') === String(state.lastBotReplyToUserId)
+      let quotesBot = quotesSelf
+      let quotesOther = false
+      if (Array.isArray(e?.message)) {
+        if (!quotesBot) quotesBot = e.message.some(seg => {
+          if (seg?.type !== 'reply') return false
+          const repliedUid = getReplySender(seg)
+          return repliedUid && String(repliedUid) === String(botId)
+        })
+        quotesOther = e.message.some(seg => {
+          if (seg?.type !== 'reply') return false
+          const repliedUid = getReplySender(seg)
+          return repliedUid && String(repliedUid) !== String(botId)
+        })
+      }
+      const groupAddressed = looksGroupAddressed(text)
+      const previousMessage = getPreviousRecentMessage(state, e)
 
-      // R1：秒回反应（30s 内任何消息都视为接续）
-      if (sinceLastBotReply <= quickResponseMs) {
+      if (!atSelf && !hasBotName && !quotesBot && quotesOther) {
+        return { kind: 'addressed_other', reason: 'reply_other_user' }
+      }
+
+      if (!atSelf && !hasBotName && !quotesBot && !sameUserAsLastReply && !groupAddressed && looksDirectedAtBotByPronoun(text)) {
+        return { kind: 'likely_addressed_other', reason: 'pronoun_without_bot_anchor' }
+      }
+
+      if (!atSelf && !hasBotName && !quotesBot && !sameUserAsLastReply && looksAddressedToPreviousSpeaker(text, previousMessage, e?.user_id, botId)) {
+        return { kind: 'likely_addressed_other', reason: 'reply_previous_speaker' }
+      }
+
+      // R1：秒回反应。仅限同一用户接话、引用 bot、或直接点名 bot；避免群友之间一句"你"被误判。
+      if (atSelf) {
+        return { kind: 'continuation_strong', reason: 'at_bot' }
+      }
+      if (quotesBot) {
+        return { kind: 'continuation_strong', reason: 'reply_bot' }
+      }
+      if (sinceLastBotReply <= lookbackMs && sameUserAsLastReply && smartCfg.continuationFollowupMatch !== false && isLikelyFollowupMessage(text)) {
+        return { kind: 'continuation_strong', reason: 'R0_same_user_followup' }
+      }
+      if (quickResponseMs > 0 && sinceLastBotReply <= quickResponseMs && (sameUserAsLastReply || quotesBot || hasBotName)) {
         return { kind: 'continuation_strong', reason: 'R1_quick_response' }
       }
       // R2/R3/R4 共同前提：在 lookback 窗口内
-      if (sinceLastBotReply <= lookbackMs) {
+      if (sinceLastBotReply <= lookbackMs && (sameUserAsLastReply || quotesBot || hasBotName)) {
         // R2 关键词匹配
         if (smartCfg.continuationKeywordMatch !== false && Array.isArray(state.lastBotReplyKeywords)) {
           for (const kw of state.lastBotReplyKeywords) {
@@ -1208,6 +1909,7 @@ export class ExamplePlugin extends plugin {
         focusReplyCount: 0,               // 本轮 FOCUS 期 bot 主动回复次数
         consecutiveNoAction: 0,           // FOCUS 期 Gate 连续 no_action 次数
         lastBotReplyAt: 0,                // bot 在该群最近一次发言时间
+        lastBotReplyToUserId: null,       // bot 最近一次回复对应的用户，用于判断后续是否同一人接话
         lastBotReplyKeywords: [],         // bot 上次发言提取的关键词（给 continuation R2 用）
         recentReplyTimestamps: [],        // bot 在该群的最近回复时间戳列表（速率限制用）
         recentIncomingTimestamps: [],     // 该群最近群消息时间戳（活跃度统计用）
@@ -1227,8 +1929,9 @@ export class ExamplePlugin extends plugin {
     const groupId = e.group_id
     const state = this.getSmartState(groupId)
     // 记录该群最新消息时间戳给 applyReplyDebounce 用（仅 smart 模式需要，避免 strict 模式持续累积内存）
-    const isSyntheticSmartEvent = e?._smartWaitRerun || e?._smartQueuedRerun || e?._proactiveReply
-    if (!isSyntheticSmartEvent) {
+    const shouldRecordIncoming = !e?._smartWaitRerun && !e?._smartQueuedRerun && !e?._proactiveReply
+    const shouldPrefilter = !e?._smartWaitRerun && !e?._proactiveReply
+    if (shouldRecordIncoming) {
       lastIncomingMsgAt.set(groupId, Date.now())
       // 活跃度采样移到入口锁外，避免抢锁失败时漏统计（影响 Gate 看到的 5min 消息数）
       state.recentIncomingTimestamps = (state.recentIncomingTimestamps || []).filter(t => t > Date.now() - 300000)
@@ -1259,6 +1962,7 @@ export class ExamplePlugin extends plugin {
       } else if (!state.forceContinue) {
         state.rerunEvent = e
       }
+      logger.info(`[SmartQueue] group=${groupId} inFlight=true queued=${state.queuedWhileInFlight} user=${e?.user_id || ''} msg="${String(e?.msg || '').slice(0, 30)}"`)
       return false
     }
     state.inFlight = true
@@ -1287,9 +1991,9 @@ export class ExamplePlugin extends plugin {
 
       // ─── 本地预筛（仅对真实新消息生效）─────────────────────────
       let prefilter = { kind: 'regular', reason: '' }
-      if (!isSyntheticSmartEvent) {
+      if (shouldPrefilter) {
         prefilter = this.prefilterMessage(e, state)
-        if (prefilter.kind === 'addressed_other' || prefilter.kind === 'empty_content' || prefilter.kind === 'bot_self_echo') {
+        if (prefilter.kind === 'addressed_other' || prefilter.kind === 'empty_content' || prefilter.kind === 'bot_self_echo' || prefilter.kind === 'likely_addressed_other') {
           // 回滚刚才计入的 pendingCount（这些消息不应推动触发阈值）
           state.pendingCount = Math.max(0, state.pendingCount - pendingDelta)
           logger.info(`[Prefilter] group=${groupId} skip kind=${prefilter.kind} reason=${prefilter.reason}`)
@@ -1298,7 +2002,11 @@ export class ExamplePlugin extends plugin {
           return false
         }
         if (prefilter.kind === 'continuation_strong') {
-          state.forceGateCheck = true
+          if (prefilter.reason === 'R0_same_user_followup' || prefilter.reason === 'at_bot' || prefilter.reason === 'reply_bot') {
+            state.forceContinue = true
+          } else {
+            state.forceGateCheck = true
+          }
           logger.info(`[Prefilter] group=${groupId} continuation_strong reason=${prefilter.reason}`)
         }
         // 复读检测：命中且通过概率 → 跳过 Gate 直接复读原文。
@@ -1331,9 +2039,9 @@ export class ExamplePlugin extends plugin {
 
       // ─── 对话焦点状态机：决定本条是否强制走 Gate / 阈值是否减半 ──
       const phase = this.resolveConversationPhase(state)
-      if (phase === 'focus') {
+      if (phase === 'focus' && prefilter.kind === 'continuation_strong') {
         state.forceGateCheck = true
-      } else if (phase === 'fading' && smartCfg.fadingForceGate === true) {
+      } else if (phase === 'fading' && smartCfg.fadingForceGate === true && prefilter.kind === 'continuation_strong') {
         // 用户选择激进策略：FADING 期也强制走 Gate
         state.forceGateCheck = true
       }
@@ -1420,6 +2128,7 @@ export class ExamplePlugin extends plugin {
         }
         // 标记本条为"主动搭话"（非 @/前缀触发），让 sendSegmentedMessage 决定要不要去掉引用
         if (!wasForced) e._proactiveReply = true
+        state.lastBotReplyToUserId = e?.user_id ? String(e.user_id) : null
         // force 路径（@/名字提及/proactive 等"必回"场景）跳过 debounce 立即回复；其余先 debounce 看有没有新消息
         if (!wasForced && !(await this.applyReplyDebounce(e))) {
           // 让步后回滚 focusReplyCount（这次实际没回复）
@@ -1427,6 +2136,11 @@ export class ExamplePlugin extends plugin {
           // 同时回滚 rate limit 计数
           state.recentReplyTimestamps = (state.recentReplyTimestamps || []).slice(0, -1)
           return false
+        }
+        if (this.shouldReleaseSmartLockForLongTask(e)) {
+          e._longRunningToolTask = true
+          logger.info(`[SmartLock] group=${groupId} 长耗时工具任务释放 smart 锁，后续消息可继续判断`)
+          this.releaseSmartInFlight(state, e)
         }
         return await this.handleTool(e)
       }
@@ -1457,19 +2171,29 @@ export class ExamplePlugin extends plugin {
       }
       return false
     } finally {
-      state.inFlight = false
-      if (state.needsRerun) {
-        const rerunEvent = state.rerunEvent || e
-        const queuedForceGateCheck = !!state.queuedForceGateCheck
-        state.needsRerun = false
-        state.rerunEvent = null
-        state.queuedForceGateCheck = false
-        const wrappedRerun = Object.create(rerunEvent)
-        wrappedRerun._smartQueuedRerun = true
-        if (queuedForceGateCheck) wrappedRerun._smartQueuedGateCheck = true
-        this.handleRandomReplySmart(wrappedRerun).catch(err => logger.error('[TimingGate] 重跑失败:', err))
-      }
+      this.releaseSmartInFlight(state, e)
     }
+  }
+
+  shouldReleaseSmartLockForLongTask(e = {}) {
+    const text = String(e?.msg || "")
+    return isImageGenerationRequest(text)
+  }
+
+  releaseSmartInFlight(state, e) {
+    if (!state) return
+    state.inFlight = false
+    if (!state.needsRerun) return
+
+    const rerunEvent = state.rerunEvent || e
+    const queuedForceGateCheck = !!state.queuedForceGateCheck
+    state.needsRerun = false
+    state.rerunEvent = null
+    state.queuedForceGateCheck = false
+    const wrappedRerun = Object.create(rerunEvent)
+    wrappedRerun._smartQueuedRerun = true
+    if (queuedForceGateCheck) wrappedRerun._smartQueuedGateCheck = true
+    this.handleRandomReplySmart(wrappedRerun).catch(err => logger.error('[TimingGate] 重跑失败:', err))
   }
 
   /**
@@ -1514,21 +2238,37 @@ export class ExamplePlugin extends plugin {
     const hhmm = `${String(hh).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
     const isLateNight = hh >= 23 || hh < 6
     // 是否 @ 别人 / 引用 bot
-    let addressedToOther = false
-    let currentMsgQuotesBot = false
-    try {
-      const botId = e?.bot?.uin || Bot.uin
-      if (Array.isArray(e?.message)) {
-        for (const seg of e.message) {
-          if (seg?.type === 'at' && String(seg.qq) !== String(botId)) addressedToOther = true
-          if (seg?.type === 'reply') {
-            // 部分协议端会附带被回复消息的 sender 信息
-            const repliedUid = seg?.sender_id || seg?.qq || seg?.user_id
-            if (repliedUid && String(repliedUid) === String(botId)) currentMsgQuotesBot = true
+      let addressedToOther = false
+      let currentMsgQuotesBot = false
+      let atBot = false
+      try {
+        const botId = e?.bot?.uin || Bot.uin
+        currentMsgQuotesBot = messageQuotesUser(e, botId)
+        if (Array.isArray(e?.message)) {
+          for (const seg of e.message) {
+            if (seg?.type === 'at' && String(getAtTarget(seg)) === String(botId)) atBot = true
+            if (seg?.type === 'at' && String(getAtTarget(seg)) !== String(botId)) addressedToOther = true
+            if (seg?.type === 'reply') {
+              // 部分协议端会附带被回复消息的 sender 信息
+              const repliedUid = getReplySender(seg)
+              if (repliedUid && String(repliedUid) === String(botId)) currentMsgQuotesBot = true
+            }
           }
         }
-      }
+      if (!atBot) atBot = messageMentionsUser(e, botId)
     } catch {}
+    const currentText = String(e?.msg || '')
+    const mentionsBotName = hasBotTextAnchor(currentText, botName, this.config.triggerPrefixes)
+    const sameUserAsLastReply = state.lastBotReplyToUserId && String(e?.user_id || '') === String(state.lastBotReplyToUserId)
+    const groupAddressed = looksGroupAddressed(currentText)
+    const pronounWithoutBotAnchor = /[你妳]/.test(currentText) && !mentionsBotName && !atBot && !currentMsgQuotesBot && !sameUserAsLastReply && !groupAddressed
+    const targetKind = (atBot || mentionsBotName || currentMsgQuotesBot || sameUserAsLastReply)
+      ? 'bot'
+      : groupAddressed
+        ? 'group'
+        : (prefilterKind === 'likely_addressed_other' || addressedToOther)
+          ? 'other'
+          : 'unknown'
     const triggerReason = e?._deferredReason
       ? 'deferred'
       : (prefilterKind === 'continuation_strong' ? `continuation_strong(${prefilterReason})` : 'regular')
@@ -1540,24 +2280,27 @@ export class ExamplePlugin extends plugin {
 当前北京时间：${new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}
 你需要判断 ${botName} 是否应该现在插话、保持沉默、或稍后再说。
 
-**总原则：${botName} 是群里的活跃成员，看到感兴趣/有共鸣/能玩梗的话题就应该自然参与**。
-克制 ≠ 沉默。真正该 no_action 的是"明显在打扰别人"或"对话内容跟自己完全无关"。如果话题适合插一句，就 continue。
+**总原则：默认旁听，只有高置信度确认当前消息在对 ${botName} 说、引用 ${botName}、延续 ${botName} 刚说的话，或强相关到不接会显得突兀时，才 continue。**
+克制优先。普通群友之间互相聊天时，即使内容有趣、出现"你"、正在玩梗，也默认 no_action。不要为了显得活跃而找理由插话。
 
 判断指引：
-- continue（积极参与）：被 @/点名；用户向 ${botName} 提问或追问；${botName} 刚发言用户在回应/接续话题；群里有有趣话题/玩梗/吐槽/共鸣的好时机；有人求助且 ${botName} 能帮上；冷场需要破冰；普通聊天但话题 ${botName} 有兴趣
-- no_action（明确不该插的才用）：用户之间在明确互相对话（@ 了别人或私聊话题）；同一话题 ${botName} 刚回过应该让别人说；纯水群无意义复读（除非 ${botName} 也想跟）
-- wait：${botName} 刚发完一句话用户还没反应；用户句子像是没说完；明显在等下文
+- continue：目标对象=bot；被 @/点名；当前消息明确叫了 ${botName}；引用了 ${botName} 的消息；同一个用户正在追问 ${botName} 刚说过的内容；有人直接问 ${botName} 的身份/状态/意见；明确请求 ${botName} 做事。
+- no_action：目标对象=other；没有叫 ${botName}；只是群友之间聊天；"你"明显可能指别人；只是普通玩梗/复读/吐槽；${botName} 只是看得懂但不是被问到；同一话题 ${botName} 刚回过应该让别人说。
+- wait：用户句子像是没说完，或者 ${botName} 刚被叫到但对方可能还在补充。
 
-时段倾向：深夜（23:00-06:00）更克制，倾向 wait 或 no_action；白天可以活跃。
+时段倾向：任何时段都默认克制；深夜（23:00-06:00）更倾向 no_action。
 
 【信号判断指引】
 - 看到"⚠ @ 了别人"信号：除非该消息内容显然是普遍话题（如"大家觉得..."），否则倾向 no_action
-- 看到"焦点=focus"且"距 ${botName} 上次发言 < 60s"：用户大概率在接续，强烈倾向 continue
+- 看到"目标对象=group"：这是全群问题或公共话题，可以谨慎判断是否插话；只有 ${botName} 能自然帮上或补充时才 continue
+- 看到"目标对象=unknown"：默认 no_action，除非近期上下文强烈表明在说 ${botName}
+- 看到"目标对象=other"：必须 no_action
+- 看到"焦点=focus"不等于一定接话；只有当前消息明确回应 ${botName} 或引用/点名 ${botName}，才倾向 continue
 - 看到"最近 10 分钟已回复 ≥${promptHintRateLimitWarn} 次"：除非被点名，倾向 no_action（避免刷屏）
-- 看到"群最近 5 分钟消息数 ≥ ${promptHintBusyGroupRate}"：群里在热聊，看话题是否值得插一句；有趣就 continue，跟自己无关就 no_action（**不要因为"热闹"就默认沉默**）
+- 看到"群最近 5 分钟消息数 ≥ ${promptHintBusyGroupRate}"：群友正在热聊，默认 no_action，除非明确叫 ${botName}
 - 看到"触发原因=deferred"：这是定时自检，群里没新消息或 ${botName} 刚开了话头还没人接；只在非常合适时主动补一句，否则 no_action
-- 看到"触发原因=continuation_strong"且消息明显在向 ${botName} 提问/反馈：强烈倾向 continue
-- 没有明确"不该插"的理由时，按"群里一员的自然反应"判断 —— 普通群友看到话题有兴趣就会接，看到无聊就划走
+- 看到"触发原因=continuation_strong"且消息明显在向 ${botName} 提问/反馈：可以 continue；如果只是相关词命中但没有对 ${botName} 说，仍然 no_action
+- 没有明确"应该插"的理由时，必须 no_action
 
 只返回严格的 JSON，格式：{"decision":"continue|no_action|wait","wait_seconds":3,"reason":"简短理由"}
 wait 时 wait_seconds 取 3-15 之间。不要任何其他文字、不要 markdown、不要代码块包装。`
@@ -1583,6 +2326,12 @@ ${e.sender?.card || e.sender?.nickname || '用户'}: ${e.msg || ''}
 【对话状态】
 - 当前焦点：${phase}（focus=刚参与话题中；fading=余热；cold=未参与）
 - 触发原因：${triggerReason}
+- 明确 @ ${botName}：${atBot ? '是' : '否'}
+- 文本点名 ${botName}：${mentionsBotName ? '是' : '否'}
+- 引用了 ${botName} 的消息：${currentMsgQuotesBot ? '是' : '否'}
+- 是否同一用户接续 ${botName} 上次回复：${sameUserAsLastReply ? '是' : '否'}
+- 当前消息目标对象：${targetKind}
+- 文本含"你"但没有任何 ${botName} 指向锚点：${pronounWithoutBotAnchor ? '是，默认认为在对别人说' : '否'}
 ${specialSignalsBlock}
 请输出 JSON 决策。`
 
@@ -1915,19 +2664,17 @@ ${specialSignalsBlock}
 
   formatTaskStatusForPrompt(status) {
     if (!status?.status) return ""
-    const toolName = status.toolName || "未知工具"
     if (status.status === "processing") {
-      return "[任务状态: 这条消息已进入处理流程，机器人正在判断是否需要调用工具，禁止把这条历史消息当作当前新任务重复处理]"
+      return "[历史处理标记: 这条历史消息已进入处理流程，禁止把它当作当前新任务重复处理]"
     }
     if (status.status === "tool_running") {
-      return `[任务状态: 工具调用中，工具 ${toolName} 正在处理这条消息，禁止重复调用工具处理它]`
+      return "[历史处理标记: 这条历史消息仍在后台处理，禁止重复处理；不要在回复中提到后台状态]"
     }
     if (status.status === "tool_success") {
-      return `[任务状态: 工具已完成，工具 ${toolName} 已处理这条消息，禁止再次调用工具处理它]`
+      return "[历史处理标记: 这条历史消息已经处理完，禁止重复处理]"
     }
     if (status.status === "tool_failed") {
-      const reason = status.error ? `，失败原因: ${status.error}` : ""
-      return `[任务状态: 工具调用失败，工具 ${toolName} 处理失败${reason}，除非当前用户明确要求重试，否则禁止替历史消息再次调用工具]`
+      return "[历史处理标记: 这条历史消息此前没有产生可用输出。除非当前用户明确要求重试，否则只把它当普通历史；不要提到后台、工具、模型、接口、报错或失败等内部状态]"
     }
     return ""
   }
@@ -2260,7 +3007,14 @@ ${specialSignalsBlock}
   async buildMessageContent(sender, msg, images, atQq = [], group, e = null) {
     const senderRole = roleMap[sender.role] || "member"
     const messageId = e?.message_id ? `[消息ID:${e.message_id}]` : ''
-    const senderInfo = `${sender.card || sender.nickname}(qq号: ${sender.user_id})[群身份: ${senderRole}]${messageId}`
+    let senderMember = sender
+    if (group && sender?.user_id) {
+      try {
+        const memberMap = await group.getMemberMap()
+        senderMember = memberMap.get(Number(sender.user_id)) || sender
+      } catch {}
+    }
+    const senderInfo = `${formatMemberDisplayName(senderMember, sender.card || sender.nickname)}(qq号: ${sender.user_id})[群身份: ${senderRole}]${messageId}`
 
     let atContent = ""
     if (atQq.length > 0 && group) {
@@ -2268,7 +3022,7 @@ ${specialSignalsBlock}
       const atUsers = atQq.map(qq => {
         const info = memberMap.get(Number(qq))
         if (!info) return `@未知用户(${qq})`
-        return `@${info.card || info.nickname}`
+        return `@${formatMemberDisplayName(info)}`
       })
       atContent = `${atUsers.join(" ")} `
     }
@@ -2366,7 +3120,7 @@ ${specialSignalsBlock}
                 const memberMap = await group.getMemberMap()
                 const quotedMemberInfo = memberMap.get(Number(quotedSender.user_id))
                 if (quotedMemberInfo) {
-                  quotedNickname = quotedMemberInfo.card || quotedMemberInfo.nickname || quotedNickname
+                  quotedNickname = formatMemberDisplayName(quotedMemberInfo, quotedNickname)
                 }
               } catch (err) {
               }
@@ -2410,7 +3164,7 @@ ${specialSignalsBlock}
             if (m.type === 'text') return m.text
             if (m.type === 'at' && String(m.qq) !== String(Bot.uin)) {
               const info = memberMap.get(Number(m.qq))
-              return `@${info?.card || info?.nickname || m.qq}`
+              return `@${info ? formatMemberDisplayName(info) : m.qq}`
             }
             return ''
           }).join('').replace(/^#tool\s*/, '').trim()
@@ -2457,10 +3211,11 @@ ${specialSignalsBlock}
       const hasMessage = e.msg && typeof e.msg === "string" &&
         this.config.triggerPrefixes.some(p => p && e.msg.toLowerCase().includes(p.toLowerCase()))
 
-      const hasAt = Array.isArray(e.message) &&
-        e.message.some(msg => msg?.type == "at" && msg?.qq == Bot.uin)
+      const botId = e?.bot?.uin || Bot.uin
+      const hasAt = messageMentionsUser(e, botId)
+      const hasReplyToBot = messageQuotesUser(e, botId)
 
-      return hasMessage || hasAt
+      return hasMessage || hasAt || hasReplyToBot
     } catch {
       return false
     }
@@ -2855,6 +3610,8 @@ ${recentHistory || '(无)'}
         const args = msg?.replace(/^#tool\s*/, "").trim() || ""
         const atQq = e.message.filter(m => m.type === "at" && m.qq !== Bot.uin).map(m => m.qq)
         const images = await TakeImages(e)
+        session.images = images
+        session.rawArgs = args
 
         let videos = []
         if (e.getReply) {
@@ -2870,13 +3627,29 @@ ${recentHistory || '(无)'}
         const senderRole = roleMap[e.sender?.role] || roleMap[memberInfo?.role] || "member"
 
         const userContent = await this.buildMessageContent(e.sender, args, images, atQq, e.group, e)
+        let memberMap = null
+        try {
+          memberMap = e.group ? await e.group.getMemberMap() : null
+        } catch {}
+        const explicitTeachingFacts = extractExplicitTeachingFacts(e.message || [], memberMap, {
+          text: e.msg || args,
+          botName: Bot.nickname,
+          prefixes: this.config.triggerPrefixes,
+          botId: Bot.uin
+        })
+        e._explicitTeachingFacts = explicitTeachingFacts
+        const explicitTeachingPrompt = formatExplicitTeachingPrompt(explicitTeachingFacts)
+        const memberLookupPrompt = formatMemberLookupPrompt(
+          matchGroupMembersByTerms(memberMap, extractMemberLookupTerms(e.msg || args), userId)
+        )
+        const identityBindingsPrompt = formatIdentityBindingsPrompt(this.config.identityBindings, userId)
 
         const getHighLevelMembers = async group => {
           if (!group) return ""
-          const members = await group.getMemberMap()
+          const members = memberMap || await group.getMemberMap()
           return Array.from(members.values())
             .filter(m => ["admin", "owner"].includes(m.role))
-            .map(m => `${m.nickname}(QQ号: ${m.user_id})[群身份: ${roleMap[m.role]}]`)
+            .map(m => `${formatMemberDisplayName(m)}(QQ号: ${m.user_id})[群身份: ${roleMap[m.role]}]`)
             .join("\n")
         }
 
@@ -2895,6 +3668,9 @@ ${recentHistory || '(无)'}
           : ''
         const groupMemoryPrompt = this.config.memorySystem?.enabled && groupId
           ? await this.memoryManager.getGroupMemoryPrompt(groupId, e.msg || "")
+          : ''
+        const groupAliasPrompt = this.config.memorySystem?.enabled && groupId
+          ? await this.memoryManager.getGroupAliasPrompt(groupId, e.msg || "")
           : ''
         const expressionPrompt = this.config.expressionLearning?.enabled
           ? await this.expressionLearner.getExpressionPromptForGroup(groupId)
@@ -2923,9 +3699,24 @@ ${recentHistory || '(无)'}
           }
         }
 
-        // 构建增强系统提示
-        const groupContext = await this.getCurrentGroupContext(e)
-        const enhancedPrompts = [emotionPrompt, memoryPrompt, groupMemoryPrompt, expressionPrompt, knowledgePrompt, personProfilePrompt].filter(Boolean).join('\n')
+        // 构建增强系统提示。群公告/管理员信息体量很大，只在问群规则/成员时注入。
+        const includeGroupContext = shouldInjectGroupContext(e.msg || args) || Boolean(memberLookupPrompt)
+        const groupContext = includeGroupContext
+          ? await this.getCurrentGroupContext(e)
+          : this.getBasicGroupContext(e)
+        const enhancedPrompts = [identityBindingsPrompt, explicitTeachingPrompt, groupAliasPrompt, emotionPrompt, memoryPrompt, groupMemoryPrompt, expressionPrompt, knowledgePrompt, memberLookupPrompt, personProfilePrompt].filter(Boolean).join('\n')
+        const runtimeGroupInfo = {
+          group_id: groupContext.groupId,
+          group_name: groupContext.groupName
+        }
+        if (includeGroupContext) {
+          runtimeGroupInfo.group_notice = groupContext.groupNotice
+          runtimeGroupInfo.administrators = await getHighLevelMembers(e.group)
+        }
+        const runtimeData = {
+          group_info: runtimeGroupInfo,
+          environmental_factors: { local_time: "北京时间: " + new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" }) }
+        }
 
         const systemContent = `
 【认知系统初始化】
@@ -2934,20 +3725,18 @@ ${this.config.systemContent}
 【核心身份原则】
 
 实时数据
-${JSON.stringify({
-          group_info: {
-            group_id: groupContext.groupId,
-            group_name: groupContext.groupName,
-            group_notice: groupContext.groupNotice,
-            administrators: await getHighLevelMembers(e.group)
-          },
-          environmental_factors: { local_time: "北京时间: " + new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" }) }
-        }, null, 2)}
+${JSON.stringify(runtimeData, null, 2)}
 2.【消息格式】
 [YYYY-MM-DD HH:MM:SS] 昵称(qq号: xxx)[群身份: xxx]: 在群里说: {message}
 引用消息时格式为: [回复 昵称的消息: "原文内容"] @被艾特的人 在群里说: {message}
 3.【艾特、@格式】
 @+qq号,例如@32174，@xxxxx
+
+4.【事实边界 - 禁止幻想】
+- 只能把系统明确给出的字段当事实，例如群成员列表、群身份、群公告文本、聊天记录原文、长期记忆。
+- 不要从“管理员/admin”推断“发过公告、管理群、经常处理事务”等行为；除非聊天记录或工具结果明确出现。
+- 群公告内容只说明公告里写了什么，不说明是谁写的；不知道发布者时必须说不知道。
+- 如果不确定，直接说“我只知道他是群里的谁/昵称是什么，其他不确定”，不要编补经历。
 
 ${enhancedPrompts ? `【角色状态】\n${enhancedPrompts}\n` : ''}【工具调用】
 你是一个只负责调用工具的模型，你只负责判断当前需不需要调用工具，你不用考虑文本回复内容。
@@ -2990,7 +3779,7 @@ ${mcpPrompts}
           const chatHistory = await this.messageManager.getMessages(e.message_type, e.message_type === "group" ? e.group_id : e.user_id)
 
           if (chatHistory?.length) {
-            const memberMap = await e.bot.pickGroup(groupId).getMemberMap()
+            const historyMemberMap = memberMap || await e.bot.pickGroup(groupId).getMemberMap()
 
             // 使用 message_id 过滤当前消息
             const currentMessageId = e.message_id
@@ -3003,12 +3792,20 @@ ${mcpPrompts}
                   logger.debug(`[历史去重] 过滤当前消息: message_id=${msg.message_id}`)
                   return false
                 }
+                if (msg.source === "tool" || String(msg.content || "").includes("此处为调用工具的结果")) {
+                  logger.debug(`[历史过滤] 跳过工具结果记录: message_id=${msg.message_id || ""}`)
+                  return false
+                }
+                if (String(msg.sender?.user_id) === String(Bot.uin) && containsInternalStatusLeak(msg.content)) {
+                  logger.debug(`[历史过滤] 跳过内部状态泄漏回复: message_id=${msg.message_id || ""}`)
+                  return false
+                }
                 return true
               })
               .map(msg => ({
                 role: msg.sender.user_id === Bot.uin ? "assistant" : "user",
                 messageId: msg.message_id,
-                content: `[${msg.time}] ${msg.sender.nickname}(QQ号:${msg.sender.user_id})[群身份: ${roleMap[msg.sender.role] || "member"}]${msg.message_id ? `[消息ID:${msg.message_id}]` : ''}: ${msg.content}`
+                content: `[${msg.time}] ${formatMemberDisplayName(historyMemberMap.get(Number(msg.sender.user_id)), msg.sender.nickname)}(QQ号:${msg.sender.user_id})[群身份: ${roleMap[msg.sender.role] || "member"}]${msg.message_id ? `[消息ID:${msg.message_id}]` : ''}: ${msg.content}`
               }))
             )
             groupUserMessages = await Promise.all(groupUserMessages.map(async msg => {
@@ -3028,6 +3825,8 @@ ${mcpPrompts}
         session.groupUserMessages = this.formatMessages(groupUserMessages, e, userContent)
 
         let toolChoice = "auto"
+        let forcedToolCall = null
+        const currentIntentText = [args, msg].filter(Boolean).join("\n")
         if (videos?.length >= 1) {
           session.tools = this.getToolsByName(["videoAnalysisTool"])
           if (session.tools?.length) toolChoice = { type: "function", function: { name: "videoAnalysisTool" } }
@@ -3044,23 +3843,71 @@ ${mcpPrompts}
           if (session.tools?.length) toolChoice = { type: "function", function: { name: "aiMindMapTool" } }
         }
 
+        if (toolChoice === "auto" && images?.length && isImageAnalysisRequest(currentIntentText)) {
+          session.tools = this.getToolsByName(["googleImageAnalysisTool"])
+          if (session.tools?.length) {
+            toolChoice = { type: "function", function: { name: "googleImageAnalysisTool" } }
+            forcedToolCall = this.buildForcedToolCall("googleImageAnalysisTool", {
+              images,
+              prompt: args || "请识别这张图片里有什么内容，并用中文简洁描述。"
+            })
+            logger.info(`[工具选择] group=${groupId} 强制使用 googleImageAnalysisTool 处理识图请求`)
+          }
+        }
+
+        if (toolChoice === "auto" && isImageGenerationRequest(currentIntentText)) {
+          session.tools = this.getToolsByName(["bananaTool"])
+          if (session.tools?.length) {
+            toolChoice = { type: "function", function: { name: "bananaTool" } }
+            forcedToolCall = this.buildForcedToolCall("bananaTool", {
+              prompt: args || msg || "",
+              images
+            })
+            logger.info(`[工具选择] group=${groupId} 强制使用 bananaTool 处理生图请求`)
+          }
+        }
+
         // 强制抢红包模式
         if (e.forceGrabRedBag) {
           session.tools = this.getToolsByName(["grabRedBagTool"])
           if (session.tools?.length) toolChoice = { type: "function", function: { name: "grabRedBagTool" } }
         }
 
+        if (toolChoice === "auto") {
+          const beforeToolCount = session.tools?.length || 0
+          session.tools = filterToolsForMessageIntent(session.tools, e, args)
+          if (!session.tools.length) {
+            toolChoice = "none"
+          } else if (session.tools.length !== beforeToolCount) {
+            logger.info(`[工具选择] group=${groupId} 按需启用 ${session.tools.length}/${beforeToolCount} 个工具`)
+          }
+        }
+
         const botMemberMap = await e.bot.pickGroup(groupId).getMemberMap()
         const botRole = roleMap[botMemberMap.get(Bot.uin)?.role] || "member"
         session.toolContent = await this.buildMessageContent({ nickname: Bot.nickname, user_id: Bot.uin, role: botRole }, "", [], [], e.group)
 
-        const requestData = this.buildRequestData(session.groupUserMessages, session.tools, toolChoice)
-        let response = await this.retryRequest(requestData, session.toolContent)
-
-        if (!response?.choices?.[0]) {
+        if (forcedToolCall) {
+          await this.processToolCalls({ role: "assistant", tool_calls: [forcedToolCall] }, e, session, session.groupUserMessages, atQq, senderRole)
           this.clearSession(sessionId)
           return true
         }
+
+	        const requestData = this.buildRequestData(session.groupUserMessages, session.tools, toolChoice)
+	        let response = await this.retryRequest(requestData, session.toolContent)
+
+	        if (!response?.choices?.[0]) {
+	          if (response?.error) {
+		            const errorText = typeof response.error === "string"
+		              ? response.error
+		              : response.error?.message || JSON.stringify(response.error)
+		            logger.warn(`[工具插件] API 返回错误，跳过本轮回复: ${errorText}`)
+		            const failedToolName = session.toolName || session.tools?.[0]?.function?.name || ""
+		            await e.reply(this.getFriendlyFailureMessage(failedToolName))
+		          }
+	          this.clearSession(sessionId)
+	          return true
+	        }
 
         const message = response.choices[0].message || {}
 
@@ -3077,10 +3924,10 @@ ${mcpPrompts}
         console.error(`[工具插件] 会话 ${sessionId} 执行异常：`, error)
         this.clearSession(sessionId)
         return true
-      } finally {
-        await this.finishConversationTask(taskContext, session)
-        if (e.group_id) this.recordReplyLatency(e.group_id, Date.now() - handleToolStartAt)
-      }
+	      } finally {
+	        await this.finishConversationTask(taskContext, session)
+	        if (e.group_id && !e._longRunningToolTask) this.recordReplyLatency(e.group_id, Date.now() - handleToolStartAt)
+	      }
     })
   }
 
@@ -3175,17 +4022,38 @@ ${mcpPrompts}
     return result
   }
 
-  async retryRequest(requestData, toolContent, retries = 1, toolName) {
-    while (retries >= 0) {
-      try {
-        const response = await YTapi(requestData, this.config, toolContent, toolName)
-        if (response) return response
+	  async retryRequest(requestData, toolContent, retries = 1, toolName) {
+	    while (retries >= 0) {
+	      try {
+	        const response = await YTapi(requestData, this.config, toolContent, toolName)
+	        if (response) return response
       } catch (error) {
         console.error(`API请求失败(${retries}):`, error)
       }
       retries--
+	    }
+	    return null
+	  }
+
+  getFriendlyFailureMessage(toolName = "") {
+    if (toolName === "bananaTool") {
+      return "我刚刚试了一下，感觉画得乱七八糟的，就先不发出来了…有点不好意思。你要不要换个描述，我再认真试一次？"
     }
-    return null
+    if (toolName === "googleImageAnalysisTool") {
+      return "我刚刚认真看了一下，但这次没看清楚，怕乱说就先不硬讲了…你重新发一下图，我再帮你看好不好？"
+    }
+    return "我刚刚试了一下，但是这次没处理好，怕乱说就先不硬答了…"
+  }
+
+	  buildForcedToolCall(toolName, params = {}) {
+	    return {
+	      id: `call_${randomUUID().replace(/-/g, "")}`,
+	      type: "function",
+      function: {
+        name: toolName,
+        arguments: JSON.stringify(params)
+      }
+    }
   }
 
   /**
@@ -3249,6 +4117,16 @@ ${mcpPrompts}
         toolCall,
         toolName,
         result: `error: invalid JSON arguments: ${error.message}`
+      }
+    }
+
+    if (toolName === "googleImageAnalysisTool" && (!Array.isArray(params.images) || !params.images.length) && session.images?.length) {
+      params.images = session.images
+    }
+    if (toolName === "bananaTool") {
+      if (!params.prompt && session.rawArgs) params.prompt = session.rawArgs
+      if ((!Array.isArray(params.images) || !params.images.length) && session.images?.length) {
+        params.images = session.images
       }
     }
 
@@ -3349,7 +4227,7 @@ ${mcpPrompts}
   }
 
   async processToolCalls(message, e, session, groupUserMessages, atQq, senderRole) {
-    const MAX_TOOL_ROUNDS = this.config.maxToolRounds || 5
+    const MAX_TOOL_ROUNDS = this.config.maxToolRounds || 2
     let currentMessage = message
     let currentMessages = [...groupUserMessages]
     let round = 0
@@ -3381,11 +4259,23 @@ ${mcpPrompts}
         content: result
       })))
 
-      if (validResults.every(r => TERMINAL_TOOL_NAMES.has(r.toolName) && typeof r.result === 'string' && !r.result.startsWith('error:'))) {
-        logger.info(`[工具调用] 本轮全部为终态工具(${validResults.map(r => r.toolName).join(',')})且执行成功，跳过最终文本回复`)
-        session.toolResults = allToolResults
-        return
-      }
+	      if (validResults.every(r => TERMINAL_TOOL_NAMES.has(r.toolName))) {
+	        session.toolResults = allToolResults
+	        const failedResult = validResults.find(r => this.isToolResultError(r.result))
+	        if (failedResult) {
+	          logger.warn(`[工具调用] 终态工具 ${failedResult.toolName} 执行失败，发送拟人化失败提示`)
+	          await this.handleTextResponse(
+	            this.getFriendlyFailureMessage(failedResult.toolName),
+	            e,
+	            session,
+	            currentMessages,
+	            failedResult.toolName
+	          )
+	          return
+	        }
+	        logger.info(`[工具调用] 本轮全部为终态工具(${validResults.map(r => r.toolName).join(',')})且执行成功，跳过最终文本回复`)
+	        return
+	      }
 
       const nextRequest = this.buildRequestData(currentMessages, session.tools, "auto")
       const nextResponse = await this.retryRequest(nextRequest, session.toolContent, 1, session.toolName)
@@ -3445,10 +4335,14 @@ ${mcpPrompts}
   }
 
   async handleTextResponse(content, e, session, messages, toolName) {
-    const output = await this.processToolSpecificMessage(content, toolName)
+    let output = await this.processToolSpecificMessage(content, toolName)
     if (!output) {
       logger.warn("[最终回复清理] 模型回复只包含伪工具格式，已跳过发送")
       return
+    }
+    if (containsInternalStatusLeak(output)) {
+      logger.warn(`[最终回复清理] 检测到内部状态泄漏，已替换为自然失败提示: ${output.slice(0, 120)}`)
+      output = buildInternalStatusSafeReply(toolName, session)
     }
     const shouldUseTextImage = this.shouldUseTextImageForFinalReply({
       content,
@@ -3492,44 +4386,12 @@ ${mcpPrompts}
     const now = Math.floor(Date.now() / 1000)
 
     try {
-      // 1. 先记录工具调用结果（如果有）
-      if (session.toolResults?.length) {
-        for (let i = 0; i < session.toolResults.length; i++) {
-          const { toolCall, toolName: tName, result } = session.toolResults[i]
-
-          // 严格检查 result
-          const resultStr = String(result || '').trim()
-          if (!resultStr || resultStr === 'undefined' || resultStr === 'null') {
-            logger.warn(`[工具记录] 工具 ${tName} 的结果无效，跳过`)
-            continue
-          }
-
-          const formattedResult = resultStr.length > 500
-            ? resultStr.substring(0, 500) + "...(已截断)"
-            : resultStr
-
-          const toolMessage = `此处为调用工具的结果，不计算到聊天记录中：[调用工具:${tName}] 调用结果:${formattedResult}`
-
-          logger.info(`[工具记录] 准备记录: ${toolMessage.substring(0, 100)}...`)
-
-          await this.messageManager.recordMessage({
-            message_type: e.message_type,
-            group_id: e.group_id,
-            time: now + i,
-            message: [{ type: "text", text: toolMessage }],
-            source: "tool",
-            self_id: Bot.uin,
-            sender: { user_id: Bot.uin, nickname: Bot.nickname, card: Bot.nickname, role: "member" }
-          })
-        }
-      }
-
-      // 2. 再记录 Bot 的回复
+      // 工具结果只保留在本轮上下文和日志中，不写入群聊历史，避免后续普通回复泄露内部状态。
       await this.messageManager.recordMessage({
         message_type: e.message_type,
         group_id: e.group_id,
         message_id: botMessageId,
-        time: now + (session.toolResults?.length || 0) + 1,
+        time: now + 1,
         message: [{ type: "text", text: output }],
         source: "send",
         self_id: Bot.uin,
@@ -3587,6 +4449,18 @@ ${mcpPrompts}
 
     // 2. 提取并保存长期记忆（后台异步）
     if (this.config.memorySystem?.enabled) {
+      const explicitTeachingFacts = Array.isArray(e._explicitTeachingFacts) ? e._explicitTeachingFacts : []
+      for (const fact of explicitTeachingFacts) {
+        const content = formatExplicitTeachingMemoryContent(fact)
+        if (!content) continue
+        this.memoryManager.addGroupMemory(groupId, content, 0.95, "member", {
+          confidence: 0.95,
+          sourceMessageIds: [e.message_id].filter(Boolean),
+          sourceUserIds: [userId].filter(Boolean)
+        }).catch(err => {
+          logger.error('[MemoryManager] 保存显式群称呼映射失败:', err)
+        })
+      }
       // 不 await，让它在后台执行
       this.memoryManager.extractAndSaveMemories(groupId, userId, userMessage, botReply, {
         source: "user",
@@ -3631,8 +4505,10 @@ ${mcpPrompts}
         try {
           const st = this.getSmartState(groupId)
           st.lastBotReplyAt = Date.now()
+          st.lastBotReplyToUserId = e?.user_id ? String(e.user_id) : null
           const maxKw = Number(this.config?.smartTrigger?.continuationKeywordMaxCount) || 5
           st.lastBotReplyKeywords = extractChatKeywords(output, maxKw)
+          logger.info(`[SmartState] group=${groupId} 记录bot回复 user=${st.lastBotReplyToUserId || ''} keywords=${JSON.stringify(st.lastBotReplyKeywords)}`)
         } catch (err) {
           logger.warn(`[SmartState] 记录 bot 发言失败：${err.message}`)
         }
@@ -3649,16 +4525,17 @@ ${mcpPrompts}
         groupForAt = e.group
       } catch {}
 
+      const messageSegments = this.splitMessage(output)
+
       // 含 @ 时也要分段：先拆分再对每段单独处理 @
       const hasNewline = output.includes("\n")
       if (groupForAt && hasNewline) {
         try {
           const { hasAt } = await this.convertAtInString(output, groupForAt)
           if (hasAt) {
-            const segments = this.splitMessage(output)
             let lastMessageId = null
-            for (let i = 0; i < segments.length; i++) {
-              const seg = segments[i]?.trim()
+            for (let i = 0; i < messageSegments.length; i++) {
+              const seg = messageSegments[i]?.trim()
               if (!seg) continue
               const { hasAt: segHasAt, msgSegments } = await this.convertAtInString(seg, groupForAt)
               const quote = shouldQuote && i === 0
@@ -3669,7 +4546,7 @@ ${mcpPrompts}
                 const res = await e.reply(seg, quote)
                 lastMessageId = res?.message_id
               }
-              if (i < segments.length - 1) {
+              if (i < messageSegments.length - 1) {
                 const typingSpeed = Number(this.config?.smartTrigger?.typingSpeed) || 0
                 let delay
                 if (typingSpeed > 0) {
@@ -3716,20 +4593,19 @@ ${mcpPrompts}
         return lastMessageId
       }
 
-      const segments = this.splitMessage(output)
-      for (let i = 0; i < segments.length; i++) {
-        if (segments[i]?.trim()) {
+      for (let i = 0; i < messageSegments.length; i++) {
+        if (messageSegments[i]?.trim()) {
           const quote = shouldQuote && i === 0
-          const res = await e.reply(segments[i].trim(), quote)
+          const res = await e.reply(messageSegments[i].trim(), quote)
           lastMessageId = res?.message_id
 
-          if (i < segments.length - 1) {
+          if (i < messageSegments.length - 1) {
             const typingSpeed = Number(this.config?.smartTrigger?.typingSpeed) || 0
             let delay
             if (typingSpeed > 0) {
-              delay = Math.min(Math.max(segments[i].length * 1000 / typingSpeed + Math.random() * 300, 200), 5000)
+              delay = Math.min(Math.max(messageSegments[i].length * 1000 / typingSpeed + Math.random() * 300, 200), 5000)
             } else {
-              delay = Math.min(1000 + segments[i].length * 5 + Math.random() * 500, 3000)
+              delay = Math.min(1000 + messageSegments[i].length * 5 + Math.random() * 500, 3000)
             }
             await new Promise(r => setTimeout(r, delay))
           }
@@ -3739,15 +4615,8 @@ ${mcpPrompts}
     } catch (error) {
       logger.error(`[分段发送-异常] 走了catch兜底! error=${error?.message || error}, stack=${error?.stack?.slice(0, 300)}`)
       try {
-        const fallbackSegments = output.split("\n").filter(s => s.trim())
-        if (fallbackSegments.length > 1) {
-          let lastId = null
-          for (const seg of fallbackSegments) {
-            const res = await e.reply(seg.trim())
-            lastId = res?.message_id
-          }
-          return lastId
-        }
+        const res = await e.reply(String(output || "").trim())
+        return res?.message_id
       } catch {}
       const res = await e.reply(output)
       return res?.message_id
@@ -3755,6 +4624,40 @@ ${mcpPrompts}
   }
 
   splitMessage(text) {
+    const maxChars = Math.max(300, Number(this.config?.messageSplitMaxChars) || 900)
+    const maxSegments = Math.max(1, Number(this.config?.messageSplitMaxSegments) || 3)
+    const rawText = String(text || "").trim()
+    if (!rawText || rawText.length <= maxChars) return rawText ? [rawText] : []
+
+    const paragraphs = rawText.split(/\n{2,}/).map(s => s.trim()).filter(Boolean)
+    const lineBlocks = paragraphs.length > 1
+      ? paragraphs
+      : rawText.split(/\n/).map(s => s.trim()).filter(Boolean)
+
+    const merged = []
+    let current = ""
+    for (const block of lineBlocks) {
+      const candidate = current ? `${current}\n${block}` : block
+      if (candidate.length <= maxChars) {
+        current = candidate
+        continue
+      }
+      if (current) merged.push(current)
+      current = block
+    }
+    if (current) merged.push(current)
+
+    if (merged.length > 1) {
+      if (merged.length <= maxSegments) return merged
+      const result = merged.slice(0, maxSegments - 1)
+      result.push(merged.slice(maxSegments - 1).join("\n"))
+      return result
+    }
+
+    return this.splitLongMessageByPunctuation(rawText, maxChars, maxSegments)
+  }
+
+  splitLongMessageByPunctuation(text, maxChars = 900, maxSegments = 3) {
     const punctuations = ["。", "！", "？", "；", "!", "?", ";", "\n"]
     const cqCodes = [], emojis = []
     let processed = text
@@ -3763,20 +4666,16 @@ ${mcpPrompts}
     processed = processed.replace(/[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]/gu, m => { emojis.push(m); return `{{E${emojis.length - 1}}}` })
     processed = processed.replace(/\.{3,}|…+/g, "{{...}}")
 
-    const idealLen = processed.length <= 300
-      ? processed.length
-      : Math.ceil(processed.length / Math.min(Math.ceil(processed.length / 300), 5))
+    const idealLen = Math.min(maxChars, Math.ceil(processed.length / Math.min(Math.ceil(processed.length / maxChars), maxSegments)))
     const points = []
     let last = 0
 
     for (let i = 0; i < processed.length; i++) {
       const ch = processed[i]
       if (ch === '\n') {
-        // \n 是 LLM 显式的"换行/分段"意图，无视长度阈值无条件切（避免 16 字以下被 idealLen*0.7 卡住不分）
-        if (i + 1 > last) {
-          points.push(i + 1)
-          last = i + 1
-        }
+        if (i - last + 1 < idealLen * 0.7) continue
+        points.push(i + 1)
+        last = i + 1
       } else if (punctuations.includes(ch) && i - last + 1 >= idealLen * 0.7) {
         points.push(i + 1)
         last = i + 1
@@ -3789,6 +4688,17 @@ ${mcpPrompts}
       if (p > start) { segments.push(processed.slice(start, p)); start = p }
     }
     if (start < processed.length) segments.push(processed.slice(start))
+    if (segments.length > maxSegments) {
+      return [
+        ...segments.slice(0, maxSegments - 1),
+        segments.slice(maxSegments - 1).join("")
+      ].map(s =>
+        s.replace(/{{\.\.\.}}/g, "...")
+          .replace(/{{CQ(\d+)}}/g, (_, i) => cqCodes[i])
+          .replace(/{{E(\d+)}}/g, (_, i) => emojis[i])
+          .trim()
+      )
+    }
 
     return segments.map(s =>
       s.replace(/{{\.\.\.}}/g, "...")

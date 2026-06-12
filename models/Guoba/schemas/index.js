@@ -2,6 +2,9 @@ import { readUserSettings, applyFlatUpdates } from "../../../utils/configWriter.
 
 import basic from "./basic.js"
 import permission from "./permission.js"
+import groupGuard from "./groupGuard.js"
+import groupNotice from "./groupNotice.js"
+import persona from "./persona.js"
 import aiCore from "./aiCore.js"
 import tracking from "./tracking.js"
 import emotion from "./emotion.js"
@@ -16,6 +19,9 @@ export const schemas = [
   basic,
   aiCore,
   permission,
+  persona,
+  groupGuard,
+  groupNotice,
   tracking,
   aiModels,
   emotion,

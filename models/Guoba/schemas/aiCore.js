@@ -17,6 +17,6 @@ export default [
     label: "最大工具调用轮次",
     component: "InputNumber",
     bottomHelpMessage: "单次对话中允许 LLM 连续调用工具的最大轮数，防止死循环",
-    componentProps: { min: 1, max: 20, placeholder: "5" }
+    componentProps: { min: 1, max: 20, placeholder: "2" }
   }
 ]

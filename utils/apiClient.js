@@ -13,7 +13,11 @@ export async function YTapi(requestData, config, toolContent, toolName) {
     try {
         let url, headers, finalRequestData;
 
-        if (config.useTools) {
+        const requestHasTools = Array.isArray(requestData?.tools) &&
+            requestData.tools.length > 0 &&
+            requestData.tool_choice !== "none";
+
+        if (config.useTools && requestHasTools) {
             // useTools 开启，先调用 OpenAI API
             const openaiUrl = `${config.toolsAiConfig.toolsAiUrl}`;
             // 确保使用OpenAiModel的模型
@@ -27,11 +31,11 @@ export async function YTapi(requestData, config, toolContent, toolName) {
             let openaiResponse;
             try {
                 // 使用config.OpenAiModel替换请求中的模型
-                const openaiRequestData = {
+                const openaiRequestData = normalizeToolChoiceForToolsProvider({
                     ...requestData,
                     model: config.toolsAiConfig.toolsAiModel,
                     stream: false
-                };
+                }, openaiUrl);
                 // logger.error(config.toolsAiConfig.toolsAiApikey, config.toolsAiConfig.toolsAiModel, JSON.stringify(openaiRequestData))
                 // logger.error('已触发全局AI对话', config.toolsAiConfig.toolsAiApikey, config.toolsAiConfig.toolsAiModel)
                 openaiResponse = await fetch(openaiUrl, {
@@ -71,7 +75,7 @@ export async function YTapi(requestData, config, toolContent, toolName) {
                 return { error: "OneAPI URL、模型或 API Key 未配置" };
             }
             url = config.chatAiConfig.chatApiUrl.endsWith('completions') ? config.chatAiConfig.chatApiUrl : `${config.chatAiConfig.chatApiUrl}/v1/chat/completions`;
-            const oneApiKey = config.chatAiConfig.chatApiKey;
+            const oneApiKey = getChatApiKey(config.chatAiConfig.chatApiKey);
             headers = {
                 'Authorization': `Bearer ${oneApiKey}`,
                 'Content-Type': 'application/json'
@@ -109,7 +113,7 @@ export async function YTapi(requestData, config, toolContent, toolName) {
                 return { error: "OneAPI URL、模型或 API Key 未配置" };
             }
             url = config.chatAiConfig.chatApiUrl.endsWith('completions') ? config.chatAiConfig.chatApiUrl : `${config.chatAiConfig.chatApiUrl}/v1/chat/completions`;
-            const oneApiKey = config.chatAiConfig.chatApiKey[Math.floor(Math.random() * config.chatAiConfig.chatApiKey.length)];
+            const oneApiKey = getChatApiKey(config.chatAiConfig.chatApiKey);
             headers = {
                 'Authorization': `Bearer ${oneApiKey}`,
                 'Content-Type': 'application/json'
@@ -167,6 +171,31 @@ export async function YTapi(requestData, config, toolContent, toolName) {
         console.error('YTapi 异常:', error);
         return { error: `发生异常：${error.message}` };
     }
+}
+
+function getChatApiKey(chatApiKey) {
+    if (Array.isArray(chatApiKey)) {
+        const keys = chatApiKey.filter(key => typeof key === 'string' && key.trim())
+        return keys[Math.floor(Math.random() * keys.length)]
+    }
+    return chatApiKey
+}
+
+function normalizeToolChoiceForToolsProvider(requestData, apiUrl) {
+    const toolChoice = requestData?.tool_choice;
+    const functionName = toolChoice?.function?.name;
+
+    if (!functionName || !/souimagery\.fun/i.test(String(apiUrl || ""))) {
+        return requestData;
+    }
+
+    return {
+        ...requestData,
+        tool_choice: {
+            type: toolChoice.type || "function",
+            name: functionName
+        }
+    };
 }
 
 /**
