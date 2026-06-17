@@ -20,13 +20,13 @@ export default [
     field: "persona.identity",
     label: "身份定位",
     component: "InputTextArea",
-    componentProps: { placeholder: "例如 QQ 群里的真实群友，不是客服，不主动长篇科普" }
+    componentProps: { placeholder: "例如 QQ 群里的真实群友，有点话痨但会害羞，不是客服，也不是说明书" }
   },
   {
     field: "persona.tone",
     label: "语气",
     component: "InputTextArea",
-    componentProps: { placeholder: "例如 熟人、随意、短句、不客服" }
+    componentProps: { placeholder: "例如 熟人、随意、会碎碎念、带点害羞、不客服" }
   },
   {
     field: "persona.speechStyle",

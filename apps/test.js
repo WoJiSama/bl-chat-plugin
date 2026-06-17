@@ -37,10 +37,12 @@ const RED_BAG_CONFIG = {
 const redBagCooldowns = new Map() // 红包冷却记录: key: groupId, value: lastGrabTime
 
 // 终态工具：本轮调用后不再请求 LLM 续话（工具的执行结果本身即为最终输出）
-const TERMINAL_TOOL_NAMES = new Set(['sendLocalEmojiTool', 'waitTool', 'bananaTool'])
+const TERMINAL_TOOL_NAMES = new Set(['sendLocalEmojiTool', 'waitTool', 'bananaTool', 'googleImageEditTool'])
 
 const activeDedupeToolRuns = new Map()
 const taskStatusCache = new Map()
+const activeUserToolTaskCache = new Map()
+const directTriggerMergeTimers = new Map()
 const activeConversations = new Map() // 会话追踪: key: `${groupId}_${userId}`, value: { lastActiveTime, chatHistory: [], timer: null }
 const trackingThrottle = new Map() // 节流: key: `${groupId}_${userId}`, value: lastCallTime
 const pendingJudgments = [] // 批量判断队列
@@ -124,7 +126,10 @@ const TOOL_INTENT_PATTERNS = [
 ]
 const IMAGE_GENERATION_PATTERNS = [
   /(画图|生图|生成图片|生成一?张图|生成一?个.*图|画一?张|绘制|出图|做一?张.*图|捏一?个.*图)/i,
-  /(帮我|给我|替我|可以|能不能|能|想要|要).{0,12}(画|生成|绘制|做|捏).{0,40}(图|图片|插画|壁纸|头像|封面|海报|表情包|logo|标志|立绘|角色|人物|少女|男孩|女孩|猫|猫咪|狗|狗狗|动物|风景|场景)/i,
+  /(?:把|将|给|帮我|替我|麻烦|可以|能不能|能|想要|要|一会|待会|等下).{0,24}(?:这个|这段|这句|上面|刚才|刚刚|内容|描述|设定|场景|它)?.{0,16}(?:画出来|画成图|画成图片|出成图|生成出来)/i,
+  /(?:画|绘制|生成).{0,16}(?:出来|成图|成图片|成一张图)/i,
+  /(帮我|给我|替我|可以|能不能|能|想要|要).{0,12}(画|生成|绘制|做|捏).{0,140}(图|图片|插画|壁纸|头像|封面|海报|表情包|logo|标志|立绘|角色|人物|少女|男孩|女孩|猫|猫咪|狗|狗狗|动物|风景|场景)/i,
+  /(?:帮我|给我|替我|麻烦|可以|能不能|想要|要).{0,12}(?:画|生成|绘制|做|捏)(?:一|1)?(?:个|张|幅|只|位)?.{1,180}(?:的)?(?:图|图片|插画|壁纸|头像|封面|海报|表情包|立绘)$/i,
   /(?:用|拿|以).{0,8}(?:图片|图|画面|画|插画).{0,16}(?:告诉|回答|表达|表示|说明|形容|描述|展示|呈现|说话)(?:我|一下|出来|吧|呀|嘛|呢)?/i,
   /(?:图片|图|画面|插画).{0,10}(?:告诉|回答|表达|表示|说明|形容|描述|展示|呈现)(?:我|一下|出来|吧|呀|嘛|呢)?/i,
   /(画|绘制|生成).{0,8}(一|1)?(只|个|位|张|幅).{0,32}(猫|猫咪|狗|狗狗|动物|角色|人物|少女|男孩|女孩|头像|立绘|风景|场景)/i
@@ -134,10 +139,45 @@ const IMAGE_ANALYSIS_PATTERNS = [
   /(看看|看下|看一下|帮我看|帮我看看|告诉我|识别一下|分析一下|描述一下).{0,18}(图|图片|照片|截图|表情|头像|里面|里边|上面|内容)/i,
   /(图里|图中|图片里|图片中|照片里|截图里|这里面|这上面).{0,16}(是什么|是啥|有啥|有什么|谁|哪|啥意思|什么意思)/i
 ]
+const IMAGE_EDIT_PATTERNS = [
+  /(修图|改图|美化图片|图片美化|编辑图片|图片编辑|P图|p图|图生图|重绘|局部重绘|扩图|抠图|去水印|换背景|换衣服|换颜色|换发型|换脸|加滤镜|上色|变清晰|高清修复|无损放大)/i,
+  /(?:把|将|给|帮我|替我|麻烦|可以|能不能|能|想要|要).{0,18}(?:这张|这个|图片|图|照片|截图|头像|它|猫|猫咪|人|角色|主体)?.{0,16}(?:加|加上|添加|放上|画上|换|换成|变成|改成|改为|改一下|改改|修|修一下|修修|美化|变美|变漂亮|变好看|弄好看|弄漂亮|优化|去掉|去除|删掉|删除|移除|擦掉|抹掉|保留|增强|修复|变清晰|放大|补全|扩展|扩成).{0,40}/i,
+  /(?:这个|这张|图片|图|照片|截图|头像).{0,16}(?:改一下|改改|修一下|修修|美化|变美|变漂亮|变好看|弄好看|弄漂亮|优化|精修)/i,
+  /(?:把|将|给|帮我|替我|麻烦|可以|能不能|能|想要|要).{0,48}(?:放到|放在|放上|摆到|摆在|坐到|坐在|站到|站在|贴到|贴在|塞到|塞进|加到|加进|放进).{0,32}(?:上|里|里面|图里|图片里|画面里|照片里|截图里|背景里|旁边|中间|前面|后面|左边|右边|椅子|桌子|沙发|床|地上|墙上)/i,
+  /(?:翅膀|尾巴|耳朵|帽子|眼镜|衣服|背景|文字|水印|光效|滤镜|颜色|表情|姿势|发型).{0,12}(?:加上|添加|换成|改成|去掉|去除|删除|移除|变成)/i
+]
+const IMAGE_COMPOSITION_EDIT_PATTERNS = [
+  /(?:把|将).{1,60}(?:放到|放在|放上|放进|摆到|摆在|摆上|坐到|坐在|站到|站在|贴到|贴在|塞到|塞进|加到|加进|放|摆|贴|塞).{0,36}/i,
+  /(?:让|叫).{1,40}(?:坐到|坐在|站到|站在|躺到|躺在|趴到|趴在).{0,36}/i,
+  /(?:给|帮我|替我).{0,20}(?:图里|图片里|画面里|照片里|截图里).{0,24}(?:加|放|摆|塞|贴).{1,40}/i
+]
+const IMAGE_COMPOSITION_ACTION_PATTERNS = [
+  /(?:放到|放在|放上|放进|放入|放|摆到|摆在|摆上|摆进|摆|坐到|坐在|站到|站在|贴到|贴在|贴上|贴进|贴|塞到|塞进|塞入|塞|加到|加进|加上|加入)/i
+]
+const IMAGE_COMPOSITION_TARGET_PATTERNS = [
+  /(?:图里|图片里|画面里|照片里|截图里|背景里|上面|里面|旁边|中间|前面|后面|左边|右边|角落|椅子|桌子|沙发|床|地上|墙上|怀里|头上|手里|身边)/i
+]
 const GROUP_CONTEXT_PATTERNS = [
   /(群公告|公告|群规|群规则|入群规则|群主|管理员|管理|群管|群成员|成员|群名片|头衔|谁是|是谁|哪位|哪个人|哪个群友|这人是谁|那人是谁|禁言规则|发公告)/i
 ]
 const SEARCH_TOOL_NAMES = new Set(['searchInformationTool', 'webParserTool', 'githubRepoTool'])
+const TOOL_COMMITMENT_PATTERNS = [
+  /(?:我|希洛)?(?:马上|现在|这就|等我|稍等|等一下|我来|我去|帮你|给你|让我).{0,24}(?:画|生成|出图|改|修|处理|弄|编辑|看看|看一下|识别|分析|查|搜|找)/i,
+  /(?:马上弄好|马上弄|马上画|马上改|马上处理|我来弄|我去弄|我来画|我去画|我来改|我去改|我来处理|我试试|我看看怎么|开始弄|开始画|开始改|等我一下)/i
+]
+const DRAW_TASK_STATUS_PATTERNS = [
+  /(?:我的|我那张|刚才|刚刚|上一张|前面|之前).{0,12}(?:图|图片|画|出图).{0,18}(?:呢|好了没|好了吗|画好|生成好|出来|进度|到哪|还在|卡住|忘了|是不是忘)/i,
+  /(?:图|图片|画|出图).{0,12}(?:呢|好了没|好了吗|画好|生成好|出来|进度|到哪|还在|卡住|是不是忘|忘了)/i,
+  /(?:是不是|不会是|你是不是).{0,8}(?:忘了|忘记).{0,12}(?:我的|那张|刚才|图|画|图片)/i
+]
+const SEMANTIC_TOOL_INTENTS = new Set(["chat", "image_generate", "image_edit", "image_analysis", "search"])
+const SEMANTIC_TOOL_INTENT_MIN_CONFIDENCE = 0.7
+const SEMANTIC_TOOL_INTENT_TIMEOUT_MS = 8000
+const SEMANTIC_TOOL_HINT_PATTERN =
+  /(画|绘制|生成|生图|出图|修图|改图|P图|p图|美化|去水印|换背景|看图|识图|分析|识别|看看|看一下|搜|查|找|天气|新闻|价格|汇率|比赛|最新|官网|链接|网址)/i
+const CASUAL_BOT_GREETING_PATTERNS = [
+  /(?:在吗|在不在|还好吗|还好嘛|还好不|你还好吗|你还好嘛|你没事吧|醒醒|理我|出来|冒泡|人呢|去哪了|干嘛呢|咋了|怎么了)/i
+]
 
 /**
  * 从一段文本提取关键词（给 R2 关键词命中识别用）。
@@ -215,6 +255,17 @@ function isLikelyFollowupMessage(text = "") {
   if (!msg) return false
   if (isQuestionMessage(msg)) return true
   return /(?:谁|誰|什么|啥|哪(?:个|位|里|裏)|怎么|怎样|咋|为什么|为啥|多少|几|能不能|可不可以|要不要|是不是|还记得|记得|刚才|刚刚|前面|上一句|推荐|告诉|讲讲|说说|解释|评价|分析|帮我|给我|那你|那就|所以)/.test(msg)
+}
+
+function summarizeForLog(text = "", max = 100) {
+  const compact = stripCqMarkup(text).replace(/\s+/g, " ").trim()
+  return compact.length > max ? `${compact.slice(0, max)}...` : compact
+}
+
+function isCasualBotGreeting(text = "") {
+  const content = normalizeIntentText(text)
+  if (!content) return false
+  return CASUAL_BOT_GREETING_PATTERNS.some(pattern => pattern.test(content))
 }
 
 function hasDirectBotName(text = "", botName = "") {
@@ -728,6 +779,20 @@ function formatIdentityBindingsPrompt(bindings = [], currentUserId = "") {
 
   return lines.join("\n")
 }
+
+function buildPersonaStyleOverride(persona = {}) {
+  const name = String(persona?.name || "希洛").trim() || "希洛"
+  return [
+    "【希洛口吻优先规则】",
+    `你现在说话的人格是 ${name}：有点话痨、会害羞、熟人感强，不是客服、助手或说明书。`,
+    "- 不要把回复压成固定短字数；按场景决定长度。",
+    "- 闲聊可以短；熟人话题、被逗、害羞解释、认真讲清楚时，可以多说一两句。",
+    "- 可以先短后补一句，可以轻微自嘲、犹豫、嘴硬、碎碎念，但不要空话堆叠。",
+    "- 禁止说 AI、模型、系统、提示词、上游、API、执行流程、准备执行、整理提示词。",
+    "- 禁止客服腔：好的/收到/我来帮你/建议你/为你处理，除非是在转述别人说过的话。",
+    "- 用户明确要代码、Markdown、整理或认真解释时，允许清楚完整，但仍保持口语和希洛口吻。"
+  ].join("\n")
+}
 // ─── 拟人化对话辅助函数结束 ────────────────────────────────────────────
 
 function extractReadableTextFromObject(value) {
@@ -834,6 +899,7 @@ function sanitizeFinalReplyText(content) {
   output = ThinkingProcessor.removeThinking(output).trim()
   output = output.replace(/^\s*```[a-zA-Z0-9_-]*\s*\n?([\s\S]*?)\n?```\s*$/g, "$1").trim()
   output = output.replace(/^\s*`([^`]+)`\s*$/g, "$1").trim()
+  output = stripCqMarkup(output)
 
   const lines = output.split("\n")
   const sanitizedLines = lines
@@ -841,6 +907,27 @@ function sanitizeFinalReplyText(content) {
     .filter(line => line !== null && String(line).trim() !== "")
 
   return sanitizedLines.join("\n").replace(/\n{3,}/g, "\n").trim()
+}
+
+function stripCqMarkup(text = "") {
+  return String(text || "")
+    .replace(/\[CQ:[^\]]+\]/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim()
+}
+
+function polishHumanReplyText(text = "") {
+  let output = String(text || "").trim()
+  if (!output) return ""
+
+  output = output
+    .replace(/（\s*(小声|思考|认真|挠头|歪头|偷笑|眨眼|叹气|扶额|托腮|点头|摇头|沉思|笑)\s*）/g, "")
+    .replace(/\(\s*(小声|思考|认真|挠头|歪头|偷笑|眨眼|叹气|扶额|托腮|点头|摇头|沉思|笑)\s*\)/gi, "")
+    .replace(/(?:整理一下思绪|整理思绪|准备动笔|开始动笔|开始画|提示词优化|整理描述|我先琢磨一下|我先把.*整理好|我来把.*整理好)/g, "")
+    .trim()
+
+  output = output.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim()
+  return output
 }
 
 let pluginInitialized = false
@@ -882,6 +969,27 @@ function isCodeOrMarkdownRequest(text = "") {
   return /写.*(代码|算法|函数|脚本|程序|markdown|md|文档)|给.*(代码|示例代码|算法|markdown|md文档)|实现.*(算法|函数|代码|脚本|程序)|生成.*(代码|markdown|md文档|文档)|编写.*(代码|markdown|md|文档)|代码给我|md文档|markdown文档|代码截图/.test(content)
 }
 
+function isEducationalExplanationRequest(text = "") {
+  const content = normalizeIntentText(text)
+  if (!content) return false
+  if (/(为什么|为何).{0,12}(失败|没回|没反应|报错|不能|不行|画不出来|发不出来|撤回|崩了|卡住)|怎么配置|怎么设置|接口|API|api|key|token|上游|日志/.test(content)) {
+    return false
+  }
+  return /(科普|讲解|讲讲|解释|解释一下|推导|证明|总结|整理|梳理|公式|原理|定义|概念|知识点|例题|举例|怎么理解|常见.*公式|什么是).{0,60}/.test(content) ||
+    /(导数|微积分|极限|积分|函数|定理|物理|化学|生物|历史|地理|天文|宇宙|经济|哲学|语法|算法|机器学习).{0,30}(讲|解释|公式|原理|定义|推导|证明|总结|科普)/.test(content)
+}
+
+function looksLikeEducationalExplanation(text = "") {
+  const content = String(text || "").trim()
+  if (content.length < 120) return false
+  let score = 0
+  if (/(公式|定义|原理|推导|证明|结论|本质|可以理解为|简单说|例如|比如|常见|注意|适用于)/.test(content)) score++
+  if (/(导数|微积分|极限|积分|函数|定理|物理|化学|生物|历史|地理|天文|宇宙|经济|哲学|语法|算法|机器学习)/.test(content)) score++
+  if (/(?:^|\n)\s*(?:[-*+•]|\d+\.)\s+\S/.test(content)) score++
+  if (/[a-zA-Z]\s*(?:\^|=|≈|≤|≥|<|>)|lim|sin|cos|tan|ln|log|∞|π|√|∑|∫/.test(content)) score++
+  return score >= 2
+}
+
 function normalizeIntentText(text = "") {
   return String(text || "")
     .replace(/\[CQ:[^\]]+\]/g, " ")
@@ -915,7 +1023,37 @@ function isImageGenerationRequest(text = "") {
 function isImageAnalysisRequest(text = "") {
   const content = normalizeIntentText(text)
   if (isImageGenerationRequest(content)) return false
+  if (isImageCompositionEditRequest(content)) return false
   return matchesAnyPattern(content, IMAGE_ANALYSIS_PATTERNS)
+}
+
+function isImageEditRequest(text = "") {
+  const content = normalizeIntentText(text)
+  return matchesAnyPattern(content, IMAGE_EDIT_PATTERNS)
+}
+
+function isImageCompositionEditRequest(text = "") {
+  const content = normalizeIntentText(text)
+  if (!content) return false
+  if (isImageEditRequest(content)) return true
+  if (matchesAnyPattern(content, IMAGE_COMPOSITION_EDIT_PATTERNS)) return true
+
+  const hasTaskSubject = /(?:把|将|让|叫|给|帮我|替我|麻烦|可以|能不能|能不能帮我)/i.test(content)
+  if (!hasTaskSubject) return false
+  return matchesAnyPattern(content, IMAGE_COMPOSITION_ACTION_PATTERNS) &&
+    matchesAnyPattern(content, IMAGE_COMPOSITION_TARGET_PATTERNS)
+}
+
+function hasToolCommitmentText(text = "") {
+  const content = normalizeIntentText(text)
+  if (!content) return false
+  return TOOL_COMMITMENT_PATTERNS.some(pattern => pattern.test(content))
+}
+
+function isDrawTaskStatusInquiry(text = "") {
+  const content = normalizeIntentText(text)
+  if (!content) return false
+  return DRAW_TASK_STATUS_PATTERNS.some(pattern => pattern.test(content))
 }
 
 function containsInternalStatusLeak(text = "") {
@@ -1221,6 +1359,7 @@ export class ExamplePlugin extends plugin {
     this.knowledgeSearcher = state.knowledgeSearcher
     this.REDIS_KEY_PREFIX = 'ytbot:messages:'
     this.TASK_STATUS_PREFIX = 'ytbot:tool_task_status:'
+    this.ACTIVE_TOOL_TASK_PREFIX = 'ytbot:active_tool_task:'
     this.dedupeToolNames = new Set()
     this._groupLimiters = new Map()
 
@@ -1443,7 +1582,7 @@ export class ExamplePlugin extends plugin {
     return data
   }
 
-  shouldUseTextImageForFinalReply({ content, output, session, toolName, e }) {
+  getTextImageTemplateForFinalReply({ content, output, session, toolName, e }) {
     if (toolName === "textImageTool") return false
     if (!toolConfigHasName(this.config.oneapi_tools, "textImageTool")) return false
     if (!this.toolInstances?.textImageTool?.execute) return false
@@ -1451,18 +1590,26 @@ export class ExamplePlugin extends plugin {
     const userText = `${session?.userContent || ""}\n${e?.msg || ""}`
     const userAskedForCodeOrMarkdown = isCodeOrMarkdownRequest(userText)
     const replyLooksLikeCodeOrMarkdown = looksLikeCodeOrMarkdown(content) || looksLikeCodeOrMarkdown(output)
+    const userAskedForEducation = isEducationalExplanationRequest(userText)
+    const replyLooksLikeEducation = looksLikeEducationalExplanation(output)
 
-    return replyLooksLikeCodeOrMarkdown || (userAskedForCodeOrMarkdown && String(output || "").trim().length > 30)
+    if (userAskedForEducation && (replyLooksLikeEducation || String(output || "").trim().length > 180)) {
+      return "parchment"
+    }
+    if (replyLooksLikeCodeOrMarkdown || (userAskedForCodeOrMarkdown && String(output || "").trim().length > 30)) {
+      return "chat"
+    }
+    return false
   }
 
-  async sendFinalReplyAsTextImage(e, output) {
+  async sendFinalReplyAsTextImage(e, output, template = "chat") {
     const tool = this.toolInstances?.textImageTool
     try {
-      const result = await tool.execute({ text: output }, e)
+      const result = await tool.execute({ text: output, template }, e)
       if (typeof result === "string" && result.trim().startsWith("error:")) {
         throw new Error(result)
       }
-      logger.info("[textImageTool] 最终回复已转为图片发送")
+      logger.info(`[textImageTool] 最终回复已转为图片发送 template=${template}`)
       return null
     } catch (error) {
       logger.warn(`[textImageTool] 最终回复转图失败，回退为普通文本: ${error.message}`)
@@ -1922,6 +2069,102 @@ export class ExamplePlugin extends plugin {
     return state
   }
 
+  getDirectTriggerMergeMs() {
+    const smartCfg = this.config.smartTrigger || {}
+    const configured = Number(smartCfg.directTriggerMergeMs)
+    if (Number.isFinite(configured)) return Math.max(0, Math.min(5000, configured))
+    const fallback = Number(smartCfg.replyDebounceMs)
+    return Math.max(0, Math.min(5000, Number.isFinite(fallback) ? fallback : 1500))
+  }
+
+  getDirectTriggerMergeMaxMessages() {
+    const configured = Number(this.config.smartTrigger?.directTriggerMergeMaxMessages)
+    if (Number.isFinite(configured)) return Math.max(2, Math.min(20, Math.floor(configured)))
+    return 8
+  }
+
+  isMergeableDirectTrigger(e = {}) {
+    if (!e?.group_id || !e?.user_id || e?._directTriggerMerged || e?._smartWaitRerun || e?._smartQueuedRerun || e?._proactiveReply) return false
+    if (e.forceGrabRedBag || this.isCommand(e)) return false
+    const message = Array.isArray(e.message) ? e.message : []
+    return !message.some(seg => ["image", "video", "record", "file"].includes(seg?.type))
+  }
+
+  buildMergedDirectTriggerEvent(baseEvent, messages = []) {
+    const latest = messages.at(-1)?.event || baseEvent
+    const merged = Object.create(latest)
+    const textLines = messages
+      .map(item => String(item.text || item.event?.msg || "").trim())
+      .filter(Boolean)
+    const droppedCount = Number(messages.droppedCount) || 0
+    const totalCount = textLines.length + droppedCount
+    const mergedText = textLines.length > 1
+      ? `同一个人连续发了 ${totalCount} 条消息${droppedCount > 0 ? `（这里只保留最后 ${textLines.length} 条）` : ""}：\n${textLines.map((text, index) => `${index + 1}. ${text}`).join("\n")}`
+      : textLines.join("\n")
+    merged.msg = mergedText
+    merged.raw_message = mergedText
+    merged.message = [{ type: "text", text: mergedText }]
+    merged._directTriggerMerged = true
+    merged._mergedMessageCount = totalCount
+    merged._mergedRetainedMessageCount = textLines.length
+    merged._mergedDroppedMessageCount = droppedCount
+    merged._mergedOriginalTexts = textLines
+    return merged
+  }
+
+  buildMergedDirectTriggerPrompt(e = {}) {
+    if (!e?._directTriggerMerged || !e?._mergedMessageCount) return ""
+    const count = Number(e._mergedMessageCount) || 0
+    const dropped = Number(e._mergedDroppedMessageCount) || 0
+    const droppedText = dropped > 0 ? `其中前面 ${dropped} 条较早消息已为防刷屏省略，只保留最后几条。` : ""
+    return [
+      "【连续点名合并】",
+      `同一位群友刚刚连续叫你/触发你 ${count} 次。${droppedText}`,
+      "请把这些内容当作同一轮连续发言来理解，只自然回复一次。",
+      "不要逐条编号回答，不要提到“合并”“系统”“触发窗口”或内部处理。"
+    ].join("\n")
+  }
+
+  scheduleMergedDirectTrigger(e, handler, reason = "direct") {
+    const mergeMs = this.getDirectTriggerMergeMs()
+    if (mergeMs <= 0 || !this.isMergeableDirectTrigger(e)) return null
+
+    const key = `${e.group_id}:${e.user_id}`
+    const previous = directTriggerMergeTimers.get(key)
+    if (previous?.timer) clearTimeout(previous.timer)
+
+    const messages = previous?.messages || []
+    messages.push({
+      event: e,
+      text: stripCqMarkup(e.msg || ""),
+      at: Date.now()
+    })
+    const maxMessages = this.getDirectTriggerMergeMaxMessages()
+    let droppedCount = previous?.droppedCount || 0
+    while (messages.length > maxMessages) {
+      messages.shift()
+      droppedCount++
+    }
+    messages.droppedCount = droppedCount
+
+    const timer = setTimeout(async () => {
+      const entry = directTriggerMergeTimers.get(key)
+      if (!entry || entry.timer !== timer) return
+      directTriggerMergeTimers.delete(key)
+      const mergedEvent = this.buildMergedDirectTriggerEvent(e, entry.messages)
+      logger.info(`[触发合并] group=${e.group_id} user=${e.user_id} total=${entry.messages.length + (entry.droppedCount || 0)} retained=${entry.messages.length} dropped=${entry.droppedCount || 0} reason=${reason} latest="${summarizeForLog(entry.messages.at(-1)?.text || "")}"`)
+      try {
+        await handler(mergedEvent)
+      } catch (error) {
+        logger.error(`[触发合并] 执行失败:`, error)
+      }
+    }, mergeMs)
+
+    directTriggerMergeTimers.set(key, { timer, messages, droppedCount, reason })
+    logger.info(`[触发合并] group=${e.group_id} user=${e.user_id} wait=${mergeMs}ms count=${messages.length} dropped=${droppedCount} reason=${reason} msg="${summarizeForLog(e.msg || "")}"`)
+    return false
+  }
+
   /**
    * smart 模式触发入口：每条群消息进入此函数，按 talkValue 阈值/空窗补偿/强制覆盖三种条件决定是否调 Timing Gate
    */
@@ -2054,6 +2297,7 @@ export class ExamplePlugin extends plugin {
       const cooldownSeconds = Number.isFinite(rawCooldownSeconds) ? rawCooldownSeconds : 8
       const cooldownMs = Math.max(0, cooldownSeconds) * 1000
       if (!state.forceContinue && !state.forceGateCheck && cooldownMs > 0 && Date.now() - state.lastGateNoActionAt < cooldownMs) {
+        logger.info(`[SmartSkip] group=${groupId} reason=gate_cooldown pending=${state.pendingCount} cooldownMs=${cooldownMs} msg="${summarizeForLog(e?.msg || "")}"`)
         return false
       }
 
@@ -2066,6 +2310,7 @@ export class ExamplePlugin extends plugin {
       const reachThreshold = state.pendingCount >= threshold
       const idleHit = this.idleCompensationMet(state, threshold, prevLastMsgAt)
       if (!state.forceContinue && !state.forceGateCheck && !reachThreshold && !idleHit) {
+        logger.info(`[SmartSkip] group=${groupId} reason=below_threshold phase=${phase} pending=${state.pendingCount}/${threshold} talkValue=${talkValue} idleHit=${idleHit} msg="${summarizeForLog(e?.msg || "")}"`)
         // 冷群兜底：phase=cold 且未达阈值时排 deferred timer，让 bot 在合适时机自己跑一轮 Gate
         this.scheduleDeferredGateCheck(e, state)
         return false
@@ -2089,9 +2334,16 @@ export class ExamplePlugin extends plugin {
 
       if (decision === 'continue') {
         const wasForced = gateResult?.__forceContinue === true
+        if (wasForced && !e?._directTriggerMerged) {
+          const scheduled = this.scheduleMergedDirectTrigger(e, async mergedEvent => {
+            await this.handleRandomReplySmart(mergedEvent)
+          }, 'smart_force')
+          if (scheduled === false) return false
+        }
         // 速率硬上限（force 路径不受限但仍记录时间戳，保证 rate limit 统计准确）
         if (!wasForced) {
           if (!this.applyRateLimitGuard(state, groupId)) {
+            logger.info(`[SmartSkip] group=${groupId} reason=rate_limit pending=${state.pendingCount} msg="${summarizeForLog(e?.msg || "")}"`)
             state.pendingCount = 0
             state.forceContinue = false
             state.forceGateCheck = false
@@ -2131,6 +2383,7 @@ export class ExamplePlugin extends plugin {
         state.lastBotReplyToUserId = e?.user_id ? String(e.user_id) : null
         // force 路径（@/名字提及/proactive 等"必回"场景）跳过 debounce 立即回复；其余先 debounce 看有没有新消息
         if (!wasForced && !(await this.applyReplyDebounce(e))) {
+          logger.info(`[SmartSkip] group=${groupId} reason=debounce_interrupted phase=${phase} msg="${summarizeForLog(e?.msg || "")}"`)
           // 让步后回滚 focusReplyCount（这次实际没回复）
           if (!wasForced) state.focusReplyCount = Math.max(0, (state.focusReplyCount || 0) - 1)
           // 同时回滚 rate limit 计数
@@ -2154,6 +2407,7 @@ export class ExamplePlugin extends plugin {
         return false
       }
       // no_action
+      logger.info(`[SmartSkip] group=${groupId} reason=gate_no_action phase=${phase} pending=${state.pendingCount} gateReason=${gateResult?.reason || ""} msg="${summarizeForLog(e?.msg || "")}"`)
       state.lastGateNoActionAt = Date.now()
       state.pendingCount = 0
       state.forceContinue = false
@@ -2354,14 +2608,22 @@ ${specialSignalsBlock}
         }),
         signal: controller.signal
       })
-      if (!response.ok) return { decision: 'no_action', reason: `http_${response.status}` }
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => '')
+        logger.warn(`[TimingGate] 请求失败 group=${e?.group_id || ''} status=${response.status} body=${errorText.slice(0, 240)}`)
+        return { decision: 'no_action', reason: `http_${response.status}` }
+      }
       const data = await response.json()
       const raw = data?.choices?.[0]?.message?.content?.trim() || ''
       const jsonMatch = raw.match(/\{[\s\S]*\}/)
-      if (!jsonMatch) return { decision: 'no_action', reason: 'no_json' }
+      if (!jsonMatch) {
+        logger.warn(`[TimingGate] 返回非JSON group=${e?.group_id || ''} raw=${raw.slice(0, 240)}`)
+        return { decision: 'no_action', reason: 'no_json' }
+      }
       const parsed = JSON.parse(jsonMatch[0])
       const dec = String(parsed.decision || '').toLowerCase()
       if (!['continue', 'no_action', 'wait'].includes(dec)) {
+        logger.warn(`[TimingGate] 非法decision group=${e?.group_id || ''} decision=${parsed.decision}`)
         return { decision: 'no_action', reason: 'invalid_decision' }
       }
       return {
@@ -2370,6 +2632,7 @@ ${specialSignalsBlock}
         reason: String(parsed.reason || '').slice(0, 80)
       }
     } catch (err) {
+      logger.warn(`[TimingGate] 异常 group=${e?.group_id || ''}: ${err.message}`)
       return { decision: 'no_action', reason: `exception:${err.message}` }
     } finally {
       clearTimeout(timeoutId)
@@ -2606,6 +2869,14 @@ ${specialSignalsBlock}
     return `${this.TASK_STATUS_PREFIX}${groupId}:${messageId}`
   }
 
+  getActiveToolTaskCacheKey(groupId, userId, toolName) {
+    return `${groupId}:${userId}:${toolName}`
+  }
+
+  getActiveToolTaskRedisKey(groupId, userId, toolName) {
+    return `${this.ACTIVE_TOOL_TASK_PREFIX}${groupId}:${userId}:${toolName}`
+  }
+
   getTaskStatusTtlSeconds() {
     return Math.max(60, Math.floor((this.config.groupChatMemoryDays || 1) * 24 * 60 * 60))
   }
@@ -2660,6 +2931,112 @@ ${specialSignalsBlock}
     } catch (error) {
       logger.warn(`[任务状态] 清理失败：${error.message}`)
     }
+  }
+
+  async updateUserToolTaskStatus({ groupId, userId, messageId = "", toolName, status, requesterName = "", detail = "", scopeKey = "" }) {
+    if (!groupId || !userId || !toolName || !status) return
+
+    const key = this.getActiveToolTaskCacheKey(groupId, userId, toolName)
+    const previous = activeUserToolTaskCache.get(key) || {}
+    const record = {
+      ...previous,
+      groupId: String(groupId),
+      userId: String(userId),
+      messageId: messageId ? String(messageId) : String(previous.messageId || ""),
+      toolName,
+      status,
+      requesterName: requesterName || previous.requesterName || "",
+      detail: detail ? String(detail).slice(0, 160) : "",
+      scopeKey: scopeKey || previous.scopeKey || "",
+      startedAt: previous.startedAt || Date.now(),
+      updatedAt: Date.now()
+    }
+    activeUserToolTaskCache.set(key, record)
+
+    try {
+      await redis.set(this.getActiveToolTaskRedisKey(groupId, userId, toolName), JSON.stringify(record), {
+        EX: this.getTaskStatusTtlSeconds()
+      })
+    } catch (error) {
+      logger.warn(`[活跃任务] 写入失败：${error.message}`)
+    }
+  }
+
+  async getUserToolTaskStatus(groupId, userId, toolName) {
+    if (!groupId || !userId || !toolName) return null
+
+    const key = this.getActiveToolTaskCacheKey(groupId, userId, toolName)
+    if (activeUserToolTaskCache.has(key)) return activeUserToolTaskCache.get(key)
+
+    try {
+      const raw = await redis.get(this.getActiveToolTaskRedisKey(groupId, userId, toolName))
+      if (!raw) return null
+      const record = JSON.parse(raw)
+      activeUserToolTaskCache.set(key, record)
+      return record
+    } catch (error) {
+      logger.warn(`[活跃任务] 读取失败：${error.message}`)
+      return null
+    }
+  }
+
+  async clearUserToolTaskStatus({ groupId, userId, toolName }) {
+    if (!groupId || !userId || !toolName) return
+    const key = this.getActiveToolTaskCacheKey(groupId, userId, toolName)
+    activeUserToolTaskCache.delete(key)
+
+    try {
+      await redis.del(this.getActiveToolTaskRedisKey(groupId, userId, toolName))
+    } catch (error) {
+      logger.warn(`[活跃任务] 清理失败：${error.message}`)
+    }
+  }
+
+  getRuntimeToolTaskStatus(groupId, userId, toolName) {
+    const runtime = activeDedupeToolRuns.get(this.getToolRunKey(groupId, userId, toolName))
+    if (!runtime) return null
+    return {
+      ...runtime,
+      groupId: String(groupId),
+      userId: String(userId),
+      toolName,
+      status: "running",
+      updatedAt: Date.now()
+    }
+  }
+
+  async getCurrentUserToolTaskStatus(groupId, userId, toolName) {
+    const runtime = this.getRuntimeToolTaskStatus(groupId, userId, toolName)
+    if (runtime) return runtime
+    const stored = await this.getUserToolTaskStatus(groupId, userId, toolName)
+    if (!stored || !["queued", "running"].includes(stored.status)) return null
+    return stored
+  }
+
+  buildDrawTaskStatusReply(status) {
+    const queued = status?.status === "queued"
+    const replies = queued
+      ? [
+          "没有忘啦，我记着你的图呢。现在前面还有图在画，我这边排着队，轮到你的时候会继续画，画完会@你。",
+          "唔，没有忘记你。你的图已经排上了，我现在还在处理前面的，等轮到你我会接着画，画完会叫你的。",
+          "我记着的，不是丢下你啦。现在还在排队，我忙完前面那张就会画你的，出来以后会@你。"
+        ]
+      : [
+          "没有忘啦，我正在画你的图呢。这个出图有点慢，我会等它出来，画完会@你看的。",
+          "在画在画，我没忘。现在还没出结果，我先盯着它，出来以后会直接发给你。",
+          "没有忘记你呀，图还在生成中。我知道你在等，我这边画完会@你，不会偷偷溜掉的。"
+        ]
+    return replies[Math.floor(Math.random() * replies.length)]
+  }
+
+  async handleActiveDrawStatusQuestion(e, text = "") {
+    if (!isDrawTaskStatusInquiry(text)) return false
+    const status = await this.getCurrentUserToolTaskStatus(e.group_id, e.user_id, "bananaTool")
+    if (!status) return false
+
+    logger.info(`[活跃任务] 命中画图进度追问 group=${e.group_id} user=${e.user_id} status=${status.status}`)
+    await e.reply(this.buildDrawTaskStatusReply(status))
+    return true
   }
 
   formatTaskStatusForPrompt(status) {
@@ -3544,6 +3921,10 @@ ${recentHistory || '(无)'}
       if (this.config.conversationTrackingEnabled) {
         this.setTrackingWithTimer(conversationKey)
       }
+      const scheduled = this.scheduleMergedDirectTrigger(e, async mergedEvent => {
+        await this.handleTool(mergedEvent)
+      }, 'strict_trigger')
+      if (scheduled === false) return false
       return await this.handleTool(e)
     }
 
@@ -3612,6 +3993,11 @@ ${recentHistory || '(无)'}
         const images = await TakeImages(e)
         session.images = images
         session.rawArgs = args
+
+        if (await this.handleActiveDrawStatusQuestion(e, args || msg || "")) {
+          this.clearSession(sessionId)
+          return true
+        }
 
         let videos = []
         if (e.getReply) {
@@ -3704,7 +4090,8 @@ ${recentHistory || '(无)'}
         const groupContext = includeGroupContext
           ? await this.getCurrentGroupContext(e)
           : this.getBasicGroupContext(e)
-        const enhancedPrompts = [identityBindingsPrompt, explicitTeachingPrompt, groupAliasPrompt, emotionPrompt, memoryPrompt, groupMemoryPrompt, expressionPrompt, knowledgePrompt, memberLookupPrompt, personProfilePrompt].filter(Boolean).join('\n')
+        const mergedTriggerPrompt = this.buildMergedDirectTriggerPrompt(e)
+        const enhancedPrompts = [identityBindingsPrompt, explicitTeachingPrompt, mergedTriggerPrompt, groupAliasPrompt, emotionPrompt, memoryPrompt, groupMemoryPrompt, expressionPrompt, knowledgePrompt, memberLookupPrompt, personProfilePrompt].filter(Boolean).join('\n')
         const runtimeGroupInfo = {
           group_id: groupContext.groupId,
           group_name: groupContext.groupName
@@ -3721,6 +4108,8 @@ ${recentHistory || '(无)'}
         const systemContent = `
 【认知系统初始化】
 ${this.config.systemContent}
+
+${buildPersonaStyleOverride(this.config.persona)}
 
 【核心身份原则】
 
@@ -3843,6 +4232,39 @@ ${mcpPrompts}
           if (session.tools?.length) toolChoice = { type: "function", function: { name: "aiMindMapTool" } }
         }
 
+        const semanticDecision = toolChoice === "auto"
+          ? await this.classifySemanticToolIntent({
+              e,
+              args,
+              msg,
+              images,
+              videos,
+              currentIntentText,
+              userContent
+            })
+          : null
+        const semanticToolCall = semanticDecision?.toolName
+          ? this.buildToolCallFromDecision(semanticDecision, { images, args, msg, currentIntentText })
+          : null
+        if (toolChoice === "auto" && semanticToolCall) {
+          session.tools = semanticToolCall.tools
+          toolChoice = { type: "function", function: { name: semanticToolCall.toolName } }
+          forcedToolCall = semanticToolCall.toolCall
+          logger.info(`[工具选择] group=${groupId} 语义分类强制使用 ${semanticToolCall.toolName} intent=${semanticToolCall.intent}`)
+        }
+
+        if (toolChoice === "auto" && images?.length && isImageCompositionEditRequest(currentIntentText)) {
+          session.tools = this.getToolsByName(["googleImageEditTool"])
+          if (session.tools?.length) {
+            toolChoice = { type: "function", function: { name: "googleImageEditTool" } }
+            forcedToolCall = this.buildForcedToolCall("googleImageEditTool", {
+              images,
+              prompt: args || msg || "请按用户要求编辑这张图片。"
+            })
+            logger.info(`[工具选择] group=${groupId} 强制使用 googleImageEditTool 处理图片编辑请求`)
+          }
+        }
+
         if (toolChoice === "auto" && images?.length && isImageAnalysisRequest(currentIntentText)) {
           session.tools = this.getToolsByName(["googleImageAnalysisTool"])
           if (session.tools?.length) {
@@ -3897,13 +4319,22 @@ ${mcpPrompts}
 	        let response = await this.retryRequest(requestData, session.toolContent)
 
 	        if (!response?.choices?.[0]) {
-	          if (response?.error) {
-		            const errorText = typeof response.error === "string"
-		              ? response.error
-		              : response.error?.message || JSON.stringify(response.error)
-		            logger.warn(`[工具插件] API 返回错误，跳过本轮回复: ${errorText}`)
-		            const failedToolName = session.toolName || session.tools?.[0]?.function?.name || ""
-		            await e.reply(this.getFriendlyFailureMessage(failedToolName))
+		          if (response?.error) {
+			            const errorText = typeof response.error === "string"
+			              ? response.error
+			              : response.error?.message || JSON.stringify(response.error)
+			            logger.warn(`[回复失败] group=${groupId} user=${userId} stage=initial_api toolChoice=${typeof toolChoice === "string" ? toolChoice : toolChoice?.function?.name || "auto"} merged=${e?._mergedMessageCount || 0} error=${errorText}`)
+			            const failedToolName = session.toolName || session.tools?.[0]?.function?.name || ""
+			            await e.reply(this.getFriendlyFailureMessage(failedToolName, {
+			              e,
+			              session,
+			              stage: "initial_api",
+			              error: errorText,
+			              toolChoice
+			            }))
+			          }
+		          else {
+		            logger.warn(`[回复失败] group=${groupId} user=${userId} stage=initial_api_empty toolChoice=${typeof toolChoice === "string" ? toolChoice : toolChoice?.function?.name || "auto"} merged=${e?._mergedMessageCount || 0} reason=no_choices`)
 		          }
 	          this.clearSession(sessionId)
 	          return true
@@ -3914,7 +4345,19 @@ ${mcpPrompts}
         if (message.tool_calls?.length) {
           await this.processToolCalls(message, e, session, session.groupUserMessages, atQq, senderRole)
         } else if (message.content) {
-          await this.handleTextResponse(message.content, e, session, session.groupUserMessages)
+          const missingToolCall = this.buildMissingToolCommitmentCall(message.content, {
+            args,
+            msg,
+            images,
+            currentIntentText
+          })
+          if (missingToolCall) {
+            session.tools = missingToolCall.tools
+            logger.warn(`[工具漏调守卫] 模型承诺执行但未调用工具，强制使用 ${missingToolCall.toolName} reason=${missingToolCall.reason}`)
+            await this.processToolCalls({ role: "assistant", tool_calls: [missingToolCall.toolCall] }, e, session, session.groupUserMessages, atQq, senderRole)
+          } else {
+            await this.handleTextResponse(message.content, e, session, session.groupUserMessages)
+          }
         }
 
         this.clearSession(sessionId)
@@ -4035,14 +4478,29 @@ ${mcpPrompts}
 	    return null
 	  }
 
-  getFriendlyFailureMessage(toolName = "") {
+  getFriendlyFailureMessage(toolName = "", context = {}) {
     if (toolName === "bananaTool") {
       return "我刚刚试了一下，感觉画得乱七八糟的，就先不发出来了…有点不好意思。你要不要换个描述，我再认真试一次？"
     }
     if (toolName === "googleImageAnalysisTool") {
       return "我刚刚认真看了一下，但这次没看清楚，怕乱说就先不硬讲了…你重新发一下图，我再帮你看好不好？"
     }
-    return "我刚刚试了一下，但是这次没处理好，怕乱说就先不硬答了…"
+    if (toolName === "googleImageEditTool") {
+      return "我刚刚试着改了一下，但这版改出来不太对劲，就先不发出来了…你换个说法或者重新发图，我再认真帮你弄一次。"
+    }
+    if (toolName === "searchInformationTool" || toolName === "webParserTool" || toolName === "githubRepoTool") {
+      return "刚刚查的时候卡了一下，我不想拿不确定的东西糊弄你…你再问我一次，我重新看。"
+    }
+
+    const userText = [
+      context?.session?.rawArgs,
+      context?.session?.userContent,
+      context?.e?.msg
+    ].filter(Boolean).join("\n")
+    if (context?.e?._mergedMessageCount || isCasualBotGreeting(userText)) {
+      return "刚刚一下子没接住，像是卡了一下…我在的。你刚才是叫我吗？"
+    }
+    return "刚刚卡了一下，我没太接住你那句…你再说一遍嘛。"
   }
 
 	  buildForcedToolCall(toolName, params = {}) {
@@ -4054,6 +4512,232 @@ ${mcpPrompts}
         arguments: JSON.stringify(params)
       }
     }
+  }
+
+  shouldUseSemanticToolIntent(e = {}, text = "", images = [], videos = []) {
+    const content = normalizeIntentText(text || e?.msg || "")
+    if (!content && !images.length && !videos.length) return false
+    if (images.length || videos.length) return true
+    if (isExplicitToolIntent(content) || isRealtimeInfoRequest(content) || isExplicitSearchRequest(content)) return true
+    return SEMANTIC_TOOL_HINT_PATTERN.test(content)
+  }
+
+  normalizeToolDecision(decision = {}, context = {}) {
+    const intent = String(decision.intent || "chat").trim()
+    const confidence = Number(decision.confidence)
+    if (!SEMANTIC_TOOL_INTENTS.has(intent)) return null
+    if (!Number.isFinite(confidence) || confidence < SEMANTIC_TOOL_INTENT_MIN_CONFIDENCE) return null
+
+    const images = Array.isArray(context.images) ? context.images : []
+    if (intent === "image_edit" && !images.length) return null
+    if (intent === "image_analysis" && !images.length) return null
+
+    const prompt = String(decision.prompt || context.args || context.msg || context.currentIntentText || "").trim()
+    const query = String(decision.query || decision.prompt || context.args || context.msg || context.currentIntentText || "").trim()
+
+    if (intent === "image_generate") {
+      return { intent, toolName: "bananaTool", params: { prompt, images } }
+    }
+    if (intent === "image_edit") {
+      return { intent, toolName: "googleImageEditTool", params: { images, prompt: prompt || "请按用户要求编辑这张图片。" } }
+    }
+    if (intent === "image_analysis") {
+      return { intent, toolName: "googleImageAnalysisTool", params: { images, prompt: prompt || "请识别这张图片里有什么内容，并用中文简洁描述。" } }
+    }
+    if (intent === "search") {
+      if (!query) return null
+      return { intent, toolName: "searchInformationTool", params: { query } }
+    }
+    return { intent: "chat" }
+  }
+
+  resolveChatCompletionUrl(apiUrl = "") {
+    const url = String(apiUrl || "").trim().replace(/\/+$/, "")
+    if (!url) return ""
+    if (/\/chat\/completions$/i.test(url)) return url
+    if (/\/v1$/i.test(url)) return `${url}/chat/completions`
+    return `${url}/v1/chat/completions`
+  }
+
+  extractJsonObject(text = "") {
+    const content = String(text || "").trim()
+    if (!content) return null
+    const fenced = content.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)
+    const raw = fenced ? fenced[1].trim() : content
+    try {
+      return JSON.parse(raw)
+    } catch {}
+    const start = raw.indexOf("{")
+    const end = raw.lastIndexOf("}")
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(raw.slice(start, end + 1))
+      } catch {}
+    }
+    return null
+  }
+
+  async fetchWithTimeout(url, options = {}, timeoutMs = SEMANTIC_TOOL_INTENT_TIMEOUT_MS) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      return await fetch(url, { ...options, signal: controller.signal })
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        throw new Error(`请求超过 ${Math.round(timeoutMs / 1000)} 秒没有返回`)
+      }
+      throw error
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  async classifySemanticToolIntent(context = {}) {
+    if (!this.shouldUseSemanticToolIntent(context.e, context.currentIntentText, context.images, context.videos)) return null
+
+    const cfg = this.config.toolsAiConfig || {}
+    const apiUrl = cfg.toolsAiUrl
+    const apiKey = cfg.toolsAiApikey
+    const model = cfg.toolsAiModel
+    if (!apiUrl || !apiKey || !model || String(apiKey).includes("sk-xxx")) return null
+
+    const url = this.resolveChatCompletionUrl(apiUrl)
+    const userText = String(context.currentIntentText || "").slice(0, 1200)
+    const hasImages = Array.isArray(context.images) && context.images.length > 0
+    const hasVideos = Array.isArray(context.videos) && context.videos.length > 0
+    const quoted = String(context.userContent || "").slice(0, 1600)
+
+    try {
+      const response = await this.fetchWithTimeout(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+          model,
+          stream: false,
+          temperature: 0,
+          messages: [
+            {
+              role: "system",
+              content: [
+                "你是QQ群机器人前置工具意图分类器，只输出严格 JSON。",
+                "可选 intent: chat, image_generate, image_edit, image_analysis, search。",
+                "image_generate: 用户要从文字生成新图片、画图、出图、做图。",
+                "image_edit: 用户给了图片并要求修改、去水印、加东西、换背景、美化、图生图。",
+                "image_analysis: 用户给了图片并要求看图、识别、分析、说明图片内容。",
+                "search: 用户询问实时信息或明确要搜索/查询/最新信息。",
+                "chat: 普通闲聊、问能不能做某事但没有给出具体任务、玩梗、情绪回应。",
+                "不要受角色人设影响；只判断用户真实语义。用户明确要求做图时，不要因为角色说不会画而选 chat。",
+                "输出格式: {\"intent\":\"...\",\"confidence\":0到1,\"prompt\":\"给工具用的中文任务文本\",\"query\":\"搜索词或空字符串\",\"reason\":\"简短原因\"}"
+              ].join("\n")
+            },
+            {
+              role: "user",
+              content: [
+                `当前文本: ${userText || "(空)"}`,
+                `是否带图片: ${hasImages ? "是" : "否"}`,
+                `是否带视频: ${hasVideos ? "是" : "否"}`,
+                `格式化消息: ${quoted || "(空)"}`
+              ].join("\n")
+            }
+          ]
+        })
+      }, SEMANTIC_TOOL_INTENT_TIMEOUT_MS)
+
+      const text = await response.text()
+      if (!response.ok) {
+        logger.warn(`[语义工具分类] 请求失败: ${response.status} ${text.slice(0, 240)}`)
+        return null
+      }
+      const data = JSON.parse(text)
+      const content = data?.choices?.[0]?.message?.content
+      const parsed = this.extractJsonObject(content)
+      const normalized = this.normalizeToolDecision(parsed, context)
+      if (normalized) {
+        logger.info(`[语义工具分类] intent=${normalized.intent} tool=${normalized.toolName || "none"} confidence=${parsed?.confidence ?? ""} reason=${String(parsed?.reason || "").slice(0, 80)}`)
+      }
+      return normalized
+    } catch (error) {
+      logger.warn(`[语义工具分类] 失败: ${error.message}`)
+      return null
+    }
+  }
+
+  buildToolCallFromDecision(decision, context = {}) {
+    if (!decision?.toolName) return null
+    const tools = this.getToolsByName([decision.toolName])
+    if (!tools?.length) return null
+    return {
+      ...decision,
+      tools,
+      toolCall: this.buildForcedToolCall(decision.toolName, decision.params || {})
+    }
+  }
+
+  buildMissingToolCommitmentCall(content, context = {}) {
+    if (!hasToolCommitmentText(content)) return null
+
+    const images = Array.isArray(context.images) ? context.images : []
+    const args = context.args || ""
+    const msg = context.msg || ""
+    const currentIntentText = context.currentIntentText || [args, msg].filter(Boolean).join("\n")
+    const combinedText = [currentIntentText, content].filter(Boolean).join("\n")
+    const userRequestedImageEdit = images.length && isImageCompositionEditRequest(currentIntentText)
+
+    const candidates = []
+    if (userRequestedImageEdit || (images.length && isImageCompositionEditRequest(combinedText))) {
+      candidates.push({
+        toolName: "googleImageEditTool",
+        reason: "commitment_image_edit",
+        params: {
+          images,
+          prompt: args || msg || "请按用户要求编辑这张图片。"
+        }
+      })
+    }
+    if (!userRequestedImageEdit && images.length && isImageAnalysisRequest(combinedText)) {
+      candidates.push({
+        toolName: "googleImageAnalysisTool",
+        reason: "commitment_image_analysis",
+        params: {
+          images,
+          prompt: args || msg || "请识别这张图片里有什么内容，并用中文简洁描述。"
+        }
+      })
+    }
+    if (isImageGenerationRequest(combinedText)) {
+      candidates.push({
+        toolName: "bananaTool",
+        reason: "commitment_image_generation",
+        params: {
+          prompt: args || msg || currentIntentText,
+          images
+        }
+      })
+    }
+    if (isRealtimeInfoRequest(combinedText) || isExplicitSearchRequest(combinedText)) {
+      candidates.push({
+        toolName: "searchInformationTool",
+        reason: "commitment_search",
+        params: {
+          query: args || msg || currentIntentText
+        }
+      })
+    }
+
+    for (const candidate of candidates) {
+      const tools = this.getToolsByName([candidate.toolName])
+      if (!tools?.length) continue
+      return {
+        ...candidate,
+        tools,
+        toolCall: this.buildForcedToolCall(candidate.toolName, candidate.params)
+      }
+    }
+
+    return null
   }
 
   /**
@@ -4121,6 +4805,9 @@ ${mcpPrompts}
     }
 
     if (toolName === "googleImageAnalysisTool" && (!Array.isArray(params.images) || !params.images.length) && session.images?.length) {
+      params.images = session.images
+    }
+    if (toolName === "googleImageEditTool" && (!Array.isArray(params.images) || !params.images.length) && session.images?.length) {
       params.images = session.images
     }
     if (toolName === "bananaTool") {
@@ -4261,14 +4948,19 @@ ${mcpPrompts}
 
 	      if (validResults.every(r => TERMINAL_TOOL_NAMES.has(r.toolName))) {
 	        session.toolResults = allToolResults
-	        const failedResult = validResults.find(r => this.isToolResultError(r.result))
-	        if (failedResult) {
-	          logger.warn(`[工具调用] 终态工具 ${failedResult.toolName} 执行失败，发送拟人化失败提示`)
-	          await this.handleTextResponse(
-	            this.getFriendlyFailureMessage(failedResult.toolName),
-	            e,
-	            session,
-	            currentMessages,
+		        const failedResult = validResults.find(r => this.isToolResultError(r.result))
+		        if (failedResult) {
+		          logger.warn(`[工具调用] 终态工具 ${failedResult.toolName} 执行失败，发送拟人化失败提示 result=${String(failedResult.result || "").slice(0, 240)}`)
+		          await this.handleTextResponse(
+		            this.getFriendlyFailureMessage(failedResult.toolName, {
+		              e,
+		              session,
+		              stage: "terminal_tool_failed",
+		              error: failedResult.result
+		            }),
+		            e,
+		            session,
+		            currentMessages,
 	            failedResult.toolName
 	          )
 	          return
@@ -4277,10 +4969,13 @@ ${mcpPrompts}
 	        return
 	      }
 
-      const nextRequest = this.buildRequestData(currentMessages, session.tools, "auto")
-      const nextResponse = await this.retryRequest(nextRequest, session.toolContent, 1, session.toolName)
-      const nextMessage = nextResponse?.choices?.[0]?.message
-      if (!nextMessage) break
+	      const nextRequest = this.buildRequestData(currentMessages, session.tools, "auto")
+	      const nextResponse = await this.retryRequest(nextRequest, session.toolContent, 1, session.toolName)
+	      const nextMessage = nextResponse?.choices?.[0]?.message
+	      if (!nextMessage) {
+	        logger.warn(`[回复失败] group=${e?.group_id || ""} user=${e?.user_id || ""} stage=tool_round_summary tool=${session.toolName || ""} error=${nextResponse?.error ? JSON.stringify(nextResponse.error).slice(0, 240) : "no_choices"}`)
+	        break
+	      }
 
       currentMessage = nextMessage
       if (!currentMessage.tool_calls?.length && currentMessage.content) {
@@ -4304,16 +4999,18 @@ ${mcpPrompts}
     const finalRequest = this.buildRequestData(currentMessages, [], "none")
     const finalResponse = await this.retryRequest(finalRequest, session.toolContent, 1, session.toolName)
 
-    if (finalResponse?.choices?.[0]?.message?.content) {
-      await this.handleTextResponse(
-        finalResponse.choices[0].message.content,
+	    if (finalResponse?.choices?.[0]?.message?.content) {
+	      await this.handleTextResponse(
+	        finalResponse.choices[0].message.content,
         e,
         session,
         currentMessages,
-        session.toolName
-      )
-    }
-  }
+	        session.toolName
+	      )
+	    } else {
+	      logger.warn(`[回复失败] group=${e?.group_id || ""} user=${e?.user_id || ""} stage=final_tool_summary tool=${session.toolName || ""} error=${finalResponse?.error ? JSON.stringify(finalResponse.error).slice(0, 240) : "no_choices"}`)
+	    }
+	  }
 
   async executeTool(tool, params, e, isRetry = false) {
     try {
@@ -4344,15 +5041,16 @@ ${mcpPrompts}
       logger.warn(`[最终回复清理] 检测到内部状态泄漏，已替换为自然失败提示: ${output.slice(0, 120)}`)
       output = buildInternalStatusSafeReply(toolName, session)
     }
-    const shouldUseTextImage = this.shouldUseTextImageForFinalReply({
+    output = polishHumanReplyText(output)
+    const textImageTemplate = this.getTextImageTemplateForFinalReply({
       content,
       output,
       session,
       toolName,
       e
     })
-    const botMessageId = shouldUseTextImage
-      ? await this.sendFinalReplyAsTextImage(e, output)
+    const botMessageId = textImageTemplate
+      ? await this.sendFinalReplyAsTextImage(e, output, textImageTemplate)
       : await this.sendSegmentedMessage(e, output)
 
     // 更新会话追踪中的对话历史

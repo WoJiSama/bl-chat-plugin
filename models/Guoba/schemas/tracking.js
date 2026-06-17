@@ -135,6 +135,20 @@ export default [
     componentProps: { min: 0, max: 5000, step: 100, placeholder: "1500" }
   },
   {
+    field: "smartTrigger.directTriggerMergeMs",
+    label: "同人触发合并窗口 (ms)",
+    component: "InputNumber",
+    bottomHelpMessage: "同一群同一用户连续 @/前缀/名字点名找 bot 时，等待这个窗口后合并成一次回复；0=关闭",
+    componentProps: { min: 0, max: 5000, step: 100, placeholder: "3000" }
+  },
+  {
+    field: "smartTrigger.directTriggerMergeMaxMessages",
+    label: "触发合并保留条数",
+    component: "InputNumber",
+    bottomHelpMessage: "同人连续触发时最多保留最后 N 条，较早消息只计入日志，避免刷屏把提示词撑爆",
+    componentProps: { min: 2, max: 20, placeholder: "8" }
+  },
+  {
     field: "smartTrigger.maxConsecutiveInterrupts",
     label: "连续打断上限 (次)",
     component: "InputNumber",

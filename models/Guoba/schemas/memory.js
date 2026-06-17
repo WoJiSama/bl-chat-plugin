@@ -27,8 +27,20 @@ export default [
     field: "memorySystem.importanceThreshold",
     label: "重要性阈值",
     component: "InputNumber",
-    bottomHelpMessage: "低于此值的事实不会保存",
+    bottomHelpMessage: "仅在严格过滤模式下作为兜底阈值；默认更建议让 AI 自己判断重要性",
     componentProps: { min: 0, max: 1, step: 0.05, placeholder: "0.5" }
+  },
+  {
+    field: "memorySystem.aiDecidesImportance",
+    label: "AI 决定是否保存",
+    component: "Switch",
+    bottomHelpMessage: "开启后不再用代码按重要性阈值丢弃 AI 抽取结果；更符合“让 AI 自己决定记什么”"
+  },
+  {
+    field: "memorySystem.strictCodeFiltering",
+    label: "严格代码过滤",
+    component: "Switch",
+    bottomHelpMessage: "开启后会用代码额外过滤低信号内容和身份类风险；关闭时只保留工具/系统内容等安全过滤"
   },
   {
     field: "memorySystem.memoryDecayDays",

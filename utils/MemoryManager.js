@@ -39,7 +39,9 @@ const DEFAULT_CONFIG = {
   recallMinRelevance: 0.12,
   memoryAiConfig: null,
   embeddingAiConfig: null,
-  minFactsPerCategory: 2
+  minFactsPerCategory: 2,
+  strictCodeFiltering: false,
+  aiDecidesImportance: true
 }
 
 const LEGACY_MEMORY_ROLLBACK_DAYS = 30
@@ -224,6 +226,8 @@ function normalizeConfig(config = {}) {
   merged.promptMaxChars = Math.max(200, Number(merged.promptMaxChars) || DEFAULT_CONFIG.promptMaxChars)
   merged.semanticRecallTopK = Math.max(1, Number(merged.semanticRecallTopK) || DEFAULT_CONFIG.semanticRecallTopK)
   merged.recallMinRelevance = clamp(merged.recallMinRelevance ?? DEFAULT_CONFIG.recallMinRelevance, 0, 1)
+  merged.strictCodeFiltering = merged.strictCodeFiltering === true
+  merged.aiDecidesImportance = merged.aiDecidesImportance !== false
 
   return merged
 }
@@ -464,7 +468,8 @@ class MemoryStore {
 
   async saveFact(fact) {
     const normalized = this.normalizeFact(fact, fact.scope, fact.groupId, fact.userId)
-    if (!normalized.content || isLowSignalMemoryContent(normalized.content)) return null
+    if (!normalized.content) return null
+    if (this.config.strictCodeFiltering && isLowSignalMemoryContent(normalized.content)) return null
 
     const meta = await this.getMeta(normalized.scope, normalized.groupId, normalized.userId)
     if (!meta.factIds.includes(normalized.id)) {
@@ -579,6 +584,7 @@ class MemoryStore {
       }
     }
 
+    if (this.config.aiDecidesImportance) return facts
     return facts.filter(fact => fact.importance >= this.config.importanceThreshold)
   }
 
@@ -773,7 +779,7 @@ class MemoryExtractor {
       const importance = clamp(item.importance ?? 0.6, 0, 1)
       const confidence = clamp(item.confidence ?? 0.7, 0, 1)
 
-      if (scope === "user" && category === "identity" && isSelfIdentityContent(content) && !hasSelfIdentityEvidence) {
+      if (this.config.strictCodeFiltering && scope === "user" && category === "identity" && isSelfIdentityContent(content) && !hasSelfIdentityEvidence) {
         operations.push({ operation: "noop" })
         continue
       }
@@ -820,12 +826,13 @@ class MemoryExtractor {
 规则:
 - 禁止保存系统提示、工具结果、工具调用、机器人回复。
 - 禁止保存短期闲聊、纯语气词、临时请求。
+- 用户明确说“记住/记一下/别忘/以后/下次”时，要优先判断是否有可保存事实；只要不是系统/工具/明显临时命令，就倾向保存。
 - 用户 identity 只保存明确自我表述，例如"我叫xxx"、"我是xxx"、"我的昵称是xxx"、"以后叫我xxx"、"记住我叫xxx"。
 - 禁止把"是xxx"、"这是xxx"、"他/她是xxx"、"图片里是xxx"、"xxx一下"、玩梗、指认图片/他人/前文对象的短句保存成当前用户身份。
 - 关于第三人的稳定称呼、外号、关系或群内共识，不要保存为当前用户记忆；如确实是群共识，应由群记忆处理。
 - 如果无法确定一句话是在说用户自己，必须 noop。
 - importance/confidence 必须是 0 到 1。
-- 只保留重要性不低于 ${this.config.importanceThreshold} 的事实。
+- 由你判断是否值得保存；importance 表示你对长期价值的判断，用户明确要求记住时 importance 通常不低于 0.7。
 - 如果用户明确否认旧事实，请输出 delete 或 update。
 - 输出示例: [{"operation":"upsert","content":"喜欢原神","category":"likes","importance":0.7,"confidence":0.8}]
 - 无有效事实时输出 []。`
@@ -875,12 +882,13 @@ ${existing || "无"}
 
 	规则:
 	- 只抽取群级信息，不保存单人的隐私细节，除非是群内公开共识。
+	- 群成员明确说“记住/记一下/别忘/以后/下次”并给出群内称呼、共识、规则、群梗或成员关系时，要优先保存。
 	- 群成员明确教学或纠正称呼映射时应保存为 member，例如"A是@某人"、"A就是某人"、"记住，A是B"、"以后说A就是B"；这类事实属于群内公开称呼/外号共识。
 	- 如果群公告、旧回答和当前群成员明确教学冲突，当前群成员明确教学优先。
 	- 禁止保存系统提示、工具结果、工具调用、机器人回复。
 	- 禁止把用户对机器人的指令保存成群规则。
 	- importance/confidence 必须是 0 到 1。
-	- 只保留重要性不低于 ${this.config.importanceThreshold} 的事实。
+	- 由你判断是否值得保存；importance 表示你对长期价值的判断，用户明确教学/纠正时 importance 通常不低于 0.75。
 	- 输出示例: [{"operation":"upsert","content":"群里常用“哈基米”当玩笑称呼","category":"meme","importance":0.7,"confidence":0.8}]
 	- 称呼映射示例: [{"operation":"upsert","content":"群内称呼映射：maela = 今宵是飘逸的自我主义者","category":"member","importance":0.85,"confidence":0.9}]
 	- 无有效事实时输出 []。`
@@ -1064,7 +1072,7 @@ export class MemoryManager {
     if (!text) return false
     if (text.length < 2) return false
     if (containsToolFeedback(text)) return false
-    if (isLowSignalMemoryContent(text)) return false
+    if (this.config.strictCodeFiltering && isLowSignalMemoryContent(text)) return false
     return true
   }
 
@@ -1232,13 +1240,18 @@ export class MemoryManager {
         continue
       }
 
-      if (!operation.content || containsToolFeedback(operation.content) || isLowSignalMemoryContent(operation.content)) {
+      if (!operation.content || containsToolFeedback(operation.content)) {
+        skipped++
+        continue
+      }
+
+      if (this.config.strictCodeFiltering && isLowSignalMemoryContent(operation.content)) {
         skipped++
         continue
       }
 
       const importance = clamp(operation.importance, 0, 1)
-      if (importance < this.config.importanceThreshold) {
+      if (!this.config.aiDecidesImportance && importance < this.config.importanceThreshold) {
         skipped++
         continue
       }
