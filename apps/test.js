@@ -122,17 +122,17 @@ const EXPLICIT_SEARCH_PATTERNS = [
   /(搜一下|搜索|查一下|查查|帮我查|帮我搜|联网查|网上查|百度一下|谷歌一下|找一下资料|最新的|最新版|最新版本|官网|链接|网址|网页|页面|repo|github)/i
 ]
 const TOOL_INTENT_PATTERNS = [
-  /(画图|生图|修图|改图|图片分析|看图|识图|视频分析|语音|点歌|音乐|提醒我|定时提醒|撤回|禁言|改名片|戳一下|点赞|送礼物|红包|思维导图|导图|生成图片|生成语音)/i
+  /(画图|生图|修图|改图|图片分析|看图|识图|视频分析|语音|点歌|音乐|提醒我|定时提醒|撤回|禁言|改名片|戳一下|点赞|送礼物|红包|思维导图|导图|生成图片|生成照片|生成照|生成语音)/i
 ]
 const IMAGE_GENERATION_PATTERNS = [
-  /(画图|生图|生成图片|生成一?张图|生成一?个.*图|画一?张|绘制|出图|做一?张.*图|捏一?个.*图)/i,
+  /(画图|生图|生成图片|生成照片|生成照|生成一?张(?:图|照片|照)|生成一?个.*(?:图|照片|照)|画一?张|绘制|出图|做一?张.*(?:图|照片|照)|捏一?个.*(?:图|照片|照))/i,
   /(?:把|将|给|帮我|替我|麻烦|可以|能不能|能|想要|要|一会|待会|等下).{0,24}(?:这个|这段|这句|上面|刚才|刚刚|内容|描述|设定|场景|它)?.{0,16}(?:画出来|画成图|画成图片|出成图|生成出来)/i,
   /(?:画|绘制|生成).{0,16}(?:出来|成图|成图片|成一张图)/i,
-  /(帮我|给我|替我|可以|能不能|能|想要|要).{0,12}(画|生成|绘制|做|捏).{0,140}(图|图片|插画|壁纸|头像|封面|海报|表情包|logo|标志|立绘|角色|人物|少女|男孩|女孩|猫|猫咪|狗|狗狗|动物|风景|场景)/i,
-  /(?:帮我|给我|替我|麻烦|可以|能不能|想要|要).{0,12}(?:画|生成|绘制|做|捏)(?:一|1)?(?:个|张|幅|只|位)?.{1,180}(?:的)?(?:图|图片|插画|壁纸|头像|封面|海报|表情包|立绘)$/i,
+  /(帮我|给我|替我|可以|能不能|能|想要|要).{0,12}(画|生成|绘制|做|捏).{0,140}(图|图片|照片|照|插画|壁纸|头像|封面|海报|表情包|logo|标志|立绘|角色|人物|少女|男孩|女孩|猫|猫咪|狗|狗狗|动物|风景|场景)/i,
+  /(?:帮我|给我|替我|麻烦|可以|能不能|想要|要).{0,12}(?:画|生成|绘制|做|捏)(?:一|1)?(?:个|张|幅|只|位)?.{1,180}(?:的)?(?:图|图片|照片|照|插画|壁纸|头像|封面|海报|表情包|立绘)$/i,
   /(?:用|拿|以).{0,8}(?:图片|图|画面|画|插画).{0,16}(?:告诉|回答|表达|表示|说明|形容|描述|展示|呈现|说话)(?:我|一下|出来|吧|呀|嘛|呢)?/i,
   /(?:图片|图|画面|插画).{0,10}(?:告诉|回答|表达|表示|说明|形容|描述|展示|呈现)(?:我|一下|出来|吧|呀|嘛|呢)?/i,
-  /(画|绘制|生成).{0,8}(一|1)?(只|个|位|张|幅).{0,32}(猫|猫咪|狗|狗狗|动物|角色|人物|少女|男孩|女孩|头像|立绘|风景|场景)/i
+  /(画|绘制|生成).{0,8}(一|1)?(只|个|位|张|幅)?.{0,32}(猫|猫咪|狗|狗狗|动物|角色|人物|少女|男孩|女孩|头像|立绘|风景|场景|照片|照)/i
 ]
 const IMAGE_ANALYSIS_PATTERNS = [
   /(图|图片|照片|截图|表情|头像).{0,16}(是什么|是啥|有啥|有什么|啥意思|什么意思|怎么看|看得出|看出来|识别|分析|描述|讲讲|说说)/i,
@@ -162,8 +162,8 @@ const GROUP_CONTEXT_PATTERNS = [
 ]
 const SEARCH_TOOL_NAMES = new Set(['searchInformationTool', 'webParserTool', 'githubRepoTool'])
 const TOOL_COMMITMENT_PATTERNS = [
-  /(?:我|希洛)?(?:马上|现在|这就|等我|稍等|等一下|我来|我去|帮你|给你|让我).{0,24}(?:画|生成|出图|改|修|处理|弄|编辑|看看|看一下|识别|分析|查|搜|找)/i,
-  /(?:马上弄好|马上弄|马上画|马上改|马上处理|我来弄|我去弄|我来画|我去画|我来改|我去改|我来处理|我试试|我看看怎么|开始弄|开始画|开始改|等我一下)/i
+  /(?:我|希洛)?(?:马上|现在|这就|等我|稍等|等一下|我来|我去|帮你|给你|让我|这就).{0,24}(?:画|生成|出图|改|修|处理|弄|编辑|看看|看一下|识别|分析|查|搜|找|搓|捏|整|做)/i,
+  /(?:马上弄好|马上弄|马上画|马上改|马上处理|我来弄|我去弄|我来画|我去画|我来改|我去改|我来处理|我试试|我看看怎么|开始弄|开始画|开始改|等我一下|这就搓|这就捏|这就整|这就做|搓一个|捏一个|整一个|做一个)/i
 ]
 const DRAW_TASK_STATUS_PATTERNS = [
   /(?:我的|我那张|刚才|刚刚|上一张|前面|之前).{0,12}(?:图|图片|画|出图).{0,18}(?:呢|好了没|好了吗|画好|生成好|出来|进度|到哪|还在|卡住|忘了|是不是忘)/i,
@@ -4677,14 +4677,18 @@ ${mcpPrompts}
   }
 
   buildMissingToolCommitmentCall(content, context = {}) {
-    if (!hasToolCommitmentText(content)) return null
-
     const images = Array.isArray(context.images) ? context.images : []
     const args = context.args || ""
     const msg = context.msg || ""
     const currentIntentText = context.currentIntentText || [args, msg].filter(Boolean).join("\n")
     const combinedText = [currentIntentText, content].filter(Boolean).join("\n")
     const userRequestedImageEdit = images.length && isImageCompositionEditRequest(currentIntentText)
+    const userRequestedImageGeneration = isImageGenerationRequest(currentIntentText)
+    const userRequestedSearch = isRealtimeInfoRequest(currentIntentText) || isExplicitSearchRequest(currentIntentText)
+    const userRequestedImageAnalysis = images.length && isImageAnalysisRequest(currentIntentText)
+    const modelCommitted = hasToolCommitmentText(content)
+
+    if (!modelCommitted && !userRequestedImageEdit && !userRequestedImageGeneration && !userRequestedSearch && !userRequestedImageAnalysis) return null
 
     const candidates = []
     if (userRequestedImageEdit || (images.length && isImageCompositionEditRequest(combinedText))) {
@@ -4707,7 +4711,7 @@ ${mcpPrompts}
         }
       })
     }
-    if (isImageGenerationRequest(combinedText)) {
+    if (userRequestedImageGeneration || isImageGenerationRequest(combinedText)) {
       candidates.push({
         toolName: "bananaTool",
         reason: "commitment_image_generation",
@@ -4717,7 +4721,7 @@ ${mcpPrompts}
         }
       })
     }
-    if (isRealtimeInfoRequest(combinedText) || isExplicitSearchRequest(combinedText)) {
+    if (userRequestedSearch || isRealtimeInfoRequest(combinedText) || isExplicitSearchRequest(combinedText)) {
       candidates.push({
         toolName: "searchInformationTool",
         reason: "commitment_search",
