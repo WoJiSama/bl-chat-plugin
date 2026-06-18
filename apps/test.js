@@ -1148,9 +1148,7 @@ function buildMemoryConfig(config) {
   return {
     ...memorySystem,
     memoryAiConfig: config.memoryAiConfig || null,
-    embeddingAiConfig: config.embeddingAiConfig || null,
-    groupExtractMinIntervalMinutes:
-      memorySystem.groupExtractMinIntervalMinutes ?? memorySystem.groupExtractMinInterval ?? 10
+    embeddingAiConfig: config.embeddingAiConfig || null
   }
 }
 
@@ -1205,7 +1203,7 @@ function initializeSharedState(config) {
     // 情感系统
     emotionManager: new EmotionManager(config.emotionSystem || {}),
     // 长期记忆
-    memoryManager: new MemoryManager(buildMemoryConfig(config)),
+    memoryManager: new MemoryManager(buildMemoryConfig(config), { redis: globalThis.redis }),
     // 表达学习
     expressionLearner: new ExpressionLearner({
       ...config.expressionLearning || {},
@@ -4030,6 +4028,15 @@ ${recentHistory || '(无)'}
         )
         const identityBindingsPrompt = formatIdentityBindingsPrompt(this.config.identityBindings, userId)
 
+        if (groupId && this.config.memorySystem?.enabled && this.config.identityBindings?.length) {
+          this._seededGroups ??= new Set()
+          if (!this._seededGroups.has(groupId)) {
+            this._seededGroups.add(groupId)
+            this.memoryManager.seedFromConfig(groupId, this.config.identityBindings)
+              .catch(err => logger.error('[MemoryManager] config seed 失败:', err))
+          }
+        }
+
         const getHighLevelMembers = async group => {
           if (!group) return ""
           const members = memberMap || await group.getMemberMap()
@@ -5153,15 +5160,13 @@ ${mcpPrompts}
     if (this.config.memorySystem?.enabled) {
       const explicitTeachingFacts = Array.isArray(e._explicitTeachingFacts) ? e._explicitTeachingFacts : []
       for (const fact of explicitTeachingFacts) {
-        const content = formatExplicitTeachingMemoryContent(fact)
-        if (!content) continue
-        this.memoryManager.addGroupMemory(groupId, content, 0.95, "member", {
-          confidence: 0.95,
-          sourceMessageIds: [e.message_id].filter(Boolean),
-          sourceUserIds: [userId].filter(Boolean)
-        }).catch(err => {
-          logger.error('[MemoryManager] 保存显式群称呼映射失败:', err)
-        })
+        if (!fact?.alias || !fact?.targetUserId) continue
+        this.memoryManager.addAliasMapping(groupId, {
+          alias: fact.alias,
+          targetQQ: fact.targetUserId,
+          by: [userId].filter(Boolean),
+          confidence: 0.95
+        }).catch(err => logger.error('[MemoryManager] 保存显式称呼映射失败:', err))
       }
       // 不 await，让它在后台执行
       this.memoryManager.extractAndSaveMemories(groupId, userId, userMessage, botReply, {
@@ -5169,15 +5174,6 @@ ${mcpPrompts}
         messageId: e.message_id,
         senderName: e.sender?.card || e.sender?.nickname
       })
-      const latestEmotionEvent = emotionState?.recentEvents?.[0]
-      if (latestEmotionEvent && Number.isFinite(latestEmotionEvent.delta)) {
-        const relationDelta = Math.max(-0.03, Math.min(0.03, latestEmotionEvent.delta * 0.2))
-        if (relationDelta !== 0) {
-          this.memoryManager.updateRelationship(groupId, userId, relationDelta).catch(err => {
-            logger.error('[MemoryManager] 根据情绪更新关系分失败:', err)
-          })
-        }
-      }
       // 提取群全局记忆（传入聊天记录）
       if (groupId) {
         const history = await this.messageManager.getMessages('group', groupId)
@@ -5612,18 +5608,8 @@ ${mcpPrompts}
     }
 
     try {
-      const prefix = this.memoryManager.REDIS_PREFIX
-      const groupId = e.group_id
-      // 群全局记忆
-      const groupKey = this.memoryManager.getGroupRedisKey(groupId)
-      // 该群下所有用户记忆 ytbot:memory:{groupId}:*
-      const userKeys = await this.scanRedisKeys(`${prefix}${groupId}:*`)
-
-      const allKeys = [groupKey, ...userKeys]
-      if (allKeys.length) {
-        await this.deleteRedisKeys(allKeys)
-      }
-      await e.reply(`已清除本群记忆（群共识 + ${userKeys.length} 条用户记忆）`)
+      const cleared = await this.memoryManager.clearGroupRedis(e.group_id)
+      await e.reply(`已清除本群记忆，共 ${cleared} 项存储键。`)
     } catch (error) {
       logger.error("[群记忆] 清除失败:", error)
       await e.reply("清除失败，请查看日志")
@@ -5654,7 +5640,7 @@ ${mcpPrompts}
   formatMemoryFacts(title, facts = []) {
     if (!facts.length) return `${title}\n暂无记忆`
     const lines = this.formatMemoryFactLines(facts)
-    return `${title}\n${lines.join("\n")}\n\n删除单条记忆可发送：#删除记忆 <ID>`.slice(0, 4500)
+    return `${title}\n${lines.join("\n")}\n\n删除单条记忆可发送：#删除记忆 alias:<别名> 或 #删除记忆 fact:<群事实前缀>`.slice(0, 4500)
   }
 
   async replyMemoryForward(e, title, sections = []) {
@@ -5675,7 +5661,7 @@ ${mcpPrompts}
       }
     }
 
-    msgs.push("删除单条记忆可发送：#删除记忆 <ID>")
+    msgs.push("删除单条记忆可发送：#删除记忆 alias:<别名> 或 #删除记忆 fact:<群事实前缀>")
 
     try {
       const forwardMsg = await common.makeForwardMsg(e, msgs, title)
@@ -5711,7 +5697,7 @@ ${mcpPrompts}
       })
       const lines = [
         `记忆系统：${status.enabled ? "开启" : "关闭"}`,
-        `用户记忆：${status.user?.disabled ? "已禁用" : "启用"}，${status.user?.factCount || 0} 条，关系分 ${Number(status.user?.relationshipScore ?? 0.5).toFixed(2)}`,
+        `用户记忆：${status.user?.disabled ? "已禁用" : "启用"}，${status.user?.factCount || 0} 条`,
         `群记忆：${status.group?.disabled ? "已禁用" : "启用"}，${status.group?.factCount || 0} 条`,
         `用户上次抽取：${this.formatMemoryTime(status.user?.lastAttemptAt)}`,
         `群上次抽取：${this.formatMemoryTime(status.group?.lastAttemptAt)}`,
@@ -5807,20 +5793,7 @@ ${mcpPrompts}
     }
 
     try {
-      let result = await this.memoryManager.adminDeleteMemory({
-        scope: "user",
-        groupId: e.group_id,
-        userId: e.user_id,
-        id
-      })
-
-      if (!result.deleted && this.isGroupMemoryAdmin(e)) {
-        result = await this.memoryManager.adminDeleteMemory({
-          scope: "group",
-          groupId: e.group_id,
-          id
-        })
-      }
+      const result = await this.memoryManager.adminDeleteMemory({ groupId: e.group_id, userId: e.user_id, id })
 
       await e.reply(result.deleted ? `已删除记忆 ${id}` : "没有找到可删除的记忆，普通用户只能删除自己的记忆")
     } catch (error) {

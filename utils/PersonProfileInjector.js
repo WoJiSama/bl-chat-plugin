@@ -85,16 +85,6 @@ export class PersonProfileInjector {
     if (groupPrompt) lines.push(groupPrompt)
 
     const userLines = [`【当前对话者画像】`, `- 昵称: ${senderName} (QQ: ${userId})`]
-    const userProfile = findById(config?.userProfiles, userId, "qq")
-    if (userProfile) {
-      addField(userLines, "固定称呼/别名", userProfile.aliases)
-      addField(userLines, "关系定位", userProfile.relationship)
-      addField(userLines, "偏好/常聊话题", userProfile.preferences)
-      addField(userLines, "说话风格", userProfile.speechStyle)
-      addField(userLines, "不要这样对待", userProfile.doNot)
-      addField(userLines, "备注", userProfile.notes)
-      hasData = true
-    }
 
     try {
       const recent = await sharedState?.messageManager?.getMessages?.("group", groupId)
