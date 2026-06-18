@@ -195,10 +195,10 @@ export class MemoryManager {
   async extractAndSaveMemories(groupId, userId, userMessage, _botReply = '', meta = {}) {
     if (!this.config.enabled) return { queued: false }
     if (classifyBoundary(userMessage).verdict === 'drop') return { queued: false, reason: 'boundary' }
-    return this.enqueueGroup(groupId, async () => {
-      const ops = await this.extractor.extract({ groupId, speakerQQ: String(userId), messages: [{ content: compactText(userMessage, 500) }], at: nowMs() })
-      return this.applyOps(groupId, ops)
-    })
+    // 抽取(只读 LLM 调用)不需要 per-group 写锁;只有 applyOps 的 read-modify-write 需要,
+    // 它会自行 enqueueGroup。这里若再包一层同 key 的 enqueueGroup 会与内层互相等待造成死锁。
+    const ops = await this.extractor.extract({ groupId, speakerQQ: String(userId), messages: [{ content: compactText(userMessage, 500) }], at: nowMs() })
+    return this.applyOps(groupId, ops)
   }
 
   async extractAndSaveGroupMemories(groupId, chatHistory = []) {
@@ -208,12 +208,11 @@ export class MemoryManager {
       .filter(m => classifyBoundary(m.content).verdict === 'candidate')
       .slice(-this.config.groupExtractMaxBatchMessages)
     if (!messages.length) return { queued: false, reason: 'no-candidate' }
-    return this.enqueueGroup(groupId, async () => {
-      const ops = await this.extractor.extract({ groupId, speakerQQ: '', messages, at: nowMs() })
-      // 群抽取只接受 groupFact / alias（teaching），过滤掉需要 speaker 的 self/preference
-      const safe = ops.filter(op => op.stream === 'groupFact' || (op.stream === 'alias' && op.authority === 'teaching'))
-      return this.applyOps(groupId, safe)
-    })
+    // 同 extractAndSaveMemories:抽取在锁外,applyOps 自行加锁,避免同 key 嵌套 enqueue 死锁。
+    const ops = await this.extractor.extract({ groupId, speakerQQ: '', messages, at: nowMs() })
+    // 群抽取只接受 groupFact / alias（teaching），过滤掉需要 speaker 的 self/preference
+    const safe = ops.filter(op => op.stream === 'groupFact' || (op.stream === 'alias' && op.authority === 'teaching'))
+    return this.applyOps(groupId, safe)
   }
 
   // ---- admin 命令（保留返回契约）----
