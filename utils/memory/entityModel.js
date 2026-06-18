@@ -1,10 +1,25 @@
 // utils/memory/entityModel.js
 import { clamp, compactText } from './constants.js'
 
+const FACT_ORIGINS = Object.freeze(['extract', 'reflection', 'config'])
+
 function uniqStrings(values = []) {
   return [...new Set((values || [])
     .filter(v => v !== undefined && v !== null && String(v).trim() !== '')
     .map(String))]
+}
+
+function normalizeEmbedding(value) {
+  return Array.isArray(value) ? value : null
+}
+
+function normalizeEventAt(value) {
+  const n = Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
+function normalizeOrigin(value) {
+  return FACT_ORIGINS.includes(value) ? value : 'extract'
 }
 
 export function makeAlias(input = {}) {
@@ -26,7 +41,10 @@ export function makeFact(input = {}) {
     authority: input.authority || 'mention',
     confidence: clamp(input.confidence ?? 0.7),
     at: Number(input.at) || 0,
-    superseded: input.superseded === true
+    superseded: input.superseded === true,
+    embedding: normalizeEmbedding(input.embedding),
+    eventAt: normalizeEventAt(input.eventAt),
+    origin: normalizeOrigin(input.origin)
   }
 }
 

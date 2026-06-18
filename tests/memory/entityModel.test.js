@@ -10,10 +10,46 @@ test('makeAlias produces slim shape, no bloat fields', () => {
   assert.equal(a.superseded, false)
 })
 
-test('makeFact drops sourceMessageIds/embedding/score bloat', () => {
+test('makeFact keeps slim shape with embedding/eventAt/origin, drops other bloat', () => {
   const f = makeFact({ text: 'likes 原神', tags: ['偏好'], refs: ['2'], authority: 'self', confidence: 0.8, at: 1,
-    sourceMessageIds: ['x'], embedding: [1,2], score: 0.5, relevance: 0.3 })
-  assert.deepEqual(Object.keys(f).sort(), ['at','authority','confidence','refs','superseded','tags','text'].sort())
+    sourceMessageIds: ['x'], embedding: [1,2], eventAt: 1000, origin: 'extract', score: 0.5, relevance: 0.3 })
+  assert.deepEqual(Object.keys(f).sort(),
+    ['at','authority','confidence','embedding','eventAt','origin','refs','superseded','tags','text'].sort())
+  assert.equal(f.sourceMessageIds, undefined)
+  assert.equal(f.score, undefined)
+})
+
+test('makeFact normalizes embedding: Array kept, non-Array → null', () => {
+  assert.deepEqual(makeFact({ text: 't', embedding: [0.1, 0.2] }).embedding, [0.1, 0.2])
+  assert.equal(makeFact({ text: 't', embedding: 'nope' }).embedding, null)
+  assert.equal(makeFact({ text: 't', embedding: 42 }).embedding, null)
+  assert.equal(makeFact({ text: 't', embedding: { 0: 1 } }).embedding, null)
+  assert.equal(makeFact({ text: 't' }).embedding, null) // default
+})
+
+test('makeFact normalizes eventAt: finite number kept, otherwise → null', () => {
+  assert.equal(makeFact({ text: 't', eventAt: 1718000000000 }).eventAt, 1718000000000)
+  assert.equal(makeFact({ text: 't', eventAt: 0 }).eventAt, 0)
+  assert.equal(makeFact({ text: 't', eventAt: 'soon' }).eventAt, null)
+  assert.equal(makeFact({ text: 't', eventAt: NaN }).eventAt, null)
+  assert.equal(makeFact({ text: 't', eventAt: Infinity }).eventAt, null)
+  assert.equal(makeFact({ text: 't' }).eventAt, null) // default
+})
+
+test('makeFact normalizes origin: whitelist kept, otherwise → extract', () => {
+  assert.equal(makeFact({ text: 't', origin: 'extract' }).origin, 'extract')
+  assert.equal(makeFact({ text: 't', origin: 'reflection' }).origin, 'reflection')
+  assert.equal(makeFact({ text: 't', origin: 'config' }).origin, 'config')
+  assert.equal(makeFact({ text: 't', origin: 'hacker' }).origin, 'extract')
+  assert.equal(makeFact({ text: 't', origin: 123 }).origin, 'extract')
+  assert.equal(makeFact({ text: 't' }).origin, 'extract') // default
+})
+
+test('makeAlias does not gain embedding/eventAt/origin fields', () => {
+  const a = makeAlias({ text: 'x', embedding: [1,2], eventAt: 1, origin: 'reflection' })
+  assert.equal(a.embedding, undefined)
+  assert.equal(a.eventAt, undefined)
+  assert.equal(a.origin, undefined)
 })
 
 test('makeEntity normalizes qq to string|null and defaults arrays', () => {
