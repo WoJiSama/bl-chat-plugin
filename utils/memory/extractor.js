@@ -2,9 +2,21 @@
 import { ROUTES, clamp, compactText } from './constants.js'
 import { makeFact } from './entityModel.js'
 
+const DAY_MS = 86400000
+
+// item.eventInDays（整数，相对今天的天数，未来正/过去负）+ ctx.now → eventAt(epoch ms)。
+// 仅在 ctx.now 存在且 eventInDays 为有限数字时计算；否则返回 undefined（省略，
+// 由 makeFact 归一为 null —— 注意不能传 null，makeFact 会把 Number(null)=0 当成有效 eventAt）。
+function resolveEventAt(item, ctx) {
+  const now = Number(ctx.now)
+  const days = Number(item.eventInDays)
+  if (!Number.isFinite(now) || !Number.isFinite(days)) return undefined
+  return now + days * DAY_MS
+}
+
 // 把 AI 输出的结构化数组映射为存储操作。纯函数，无网络。
-// item: {route, alias?, targetQQ?, content?, tags?, refs?, confidence?}
-// ctx: {speakerQQ, at}
+// item: {route, alias?, targetQQ?, content?, tags?, refs?, confidence?, eventInDays?}
+// ctx: {speakerQQ, at, now?}
 export function parseAndRoute(items, ctx = {}) {
   const ops = []
   const at = Number(ctx.at) || 0
@@ -13,6 +25,7 @@ export function parseAndRoute(items, ctx = {}) {
     const route = ROUTES.has(item.route) ? item.route : null
     if (!route || route === 'ordinary_chat') continue
     const confidence = clamp(item.confidence ?? 0.7)
+    const eventAt = resolveEventAt(item, ctx)
 
     if (route === 'explicit_teaching') {
       const alias = compactText(item.alias, 64)
@@ -20,7 +33,7 @@ export function parseAndRoute(items, ctx = {}) {
         ops.push({ stream: 'alias', qq: String(item.targetQQ), text: alias, authority: 'teaching', confidence, by: [String(ctx.speakerQQ || '')].filter(Boolean), at })
       } else {
         const text = compactText(item.content, 240)
-        if (text) ops.push({ stream: 'groupFact', authority: 'teaching', fact: makeFact({ text, tags: item.tags, refs: item.refs, authority: 'teaching', confidence, at }) })
+        if (text) ops.push({ stream: 'groupFact', authority: 'teaching', fact: makeFact({ text, tags: item.tags, refs: item.refs, authority: 'teaching', confidence, at, eventAt }) })
       }
       continue
     }
@@ -31,7 +44,7 @@ export function parseAndRoute(items, ctx = {}) {
         ops.push({ stream: 'alias', qq: String(ctx.speakerQQ), text: alias, authority: 'self', confidence, by: [String(ctx.speakerQQ)], at })
       } else {
         const text = compactText(item.content, 240)
-        if (text && ctx.speakerQQ) ops.push({ stream: 'entityFact', qq: String(ctx.speakerQQ), authority: 'self', fact: makeFact({ text, tags: item.tags, refs: item.refs, authority: 'self', confidence, at }) })
+        if (text && ctx.speakerQQ) ops.push({ stream: 'entityFact', qq: String(ctx.speakerQQ), authority: 'self', fact: makeFact({ text, tags: item.tags, refs: item.refs, authority: 'self', confidence, at, eventAt }) })
       }
       continue
     }
@@ -40,14 +53,14 @@ export function parseAndRoute(items, ctx = {}) {
       const text = compactText(item.content, 240)
       if (text && ctx.speakerQQ) {
         const tags = [...new Set(['偏好', ...(item.tags || [])])]
-        ops.push({ stream: 'entityFact', qq: String(ctx.speakerQQ), authority: 'self', fact: makeFact({ text, tags, refs: item.refs, authority: 'self', confidence, at }) })
+        ops.push({ stream: 'entityFact', qq: String(ctx.speakerQQ), authority: 'self', fact: makeFact({ text, tags, refs: item.refs, authority: 'self', confidence, at, eventAt }) })
       }
       continue
     }
 
     if (route === 'group_consensus') {
       const text = compactText(item.content, 240)
-      if (text) ops.push({ stream: 'groupFact', authority: 'mention', fact: makeFact({ text, tags: item.tags, refs: item.refs, authority: 'mention', confidence, at }) })
+      if (text) ops.push({ stream: 'groupFact', authority: 'mention', fact: makeFact({ text, tags: item.tags, refs: item.refs, authority: 'mention', confidence, at, eventAt }) })
       continue
     }
   }
@@ -71,6 +84,7 @@ const SYSTEM_PROMPT = `你是群聊长期记忆抽取器。对每条真实用户
 - content: self_statement(非别名)/user_preference/group_consensus 的事实文本
 - tags: 可选轻量标签数组（如 职业/关系/群规/梗/偏好）
 - confidence: 0~1
+- eventInDays: 时间相关事实可附（整数，相对今天的天数，未来为正、过去为负，如"下周考试"约 7、"昨天面试"为 -1）；无明确时间则省略
 规则：
 - 工具结果/系统提示/机器人回复/纯语气词 -> route=ordinary_chat（会被丢弃）。
 - 只有"本人在说自己"才用 self_statement；指认他人用 explicit_teaching。

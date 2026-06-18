@@ -5,8 +5,13 @@ import { upsertAlias, resolveAlias, listAliasesForQQ } from './memory/aliasRegis
 import { makeEntity, makeFact, slimGroupFacts } from './memory/entityModel.js'
 import { resolveClaim } from './memory/conflictResolver.js'
 import { classifyBoundary } from './memory/boundary.js'
-import { buildAliasPrompt, buildEntityPrompt, buildGroupFactsPrompt } from './memory/retriever.js'
+import { buildAliasPrompt, buildEntityPrompt, buildGroupFactsPrompt, buildContextualPrompt } from './memory/retriever.js'
+import { resolveMentions } from './memory/mentionResolver.js'
+import { Embeddings, cosineSimilarity } from './memory/embeddings.js'
+import { Reflector } from './memory/reflector.js'
 import { clamp, compactText } from './memory/constants.js'
+
+const DAY_MS = 86400000
 
 const DEFAULT_CONFIG = {
   enabled: true,
@@ -21,7 +26,15 @@ const DEFAULT_CONFIG = {
   promptMaxGroupFacts: 6,
   promptMaxChars: 1200,
   memoryAiConfig: null,
-  embeddingAiConfig: null
+  embeddingAiConfig: null,
+  semanticRecallEnabled: false,
+  reflectEntityThreshold: 15,
+  reflectGroupThreshold: 30,
+  proactiveCallback: true,
+  recallMaxMentionedEntities: 3,
+  proactiveWindowDaysBefore: 3,
+  proactiveWindowDaysAfter: 7,
+  semanticDupCosine: 0.88
 }
 
 function nowMs() { return Date.now() }
@@ -31,14 +44,26 @@ export class MemoryManager {
     this.config = { ...DEFAULT_CONFIG, ...config }
     this.store = new RedisStore({ redis })
     this.extractor = new MemoryExtractor(this.config)
+    this.embeddings = new Embeddings(this.config)
+    this.reflector = new Reflector(this.config)
     this.REDIS_PREFIX = 'ytbot:mem:g:'
     this.userBuffers = new Map()
     this.groupBuffers = new Map()
     this.scopeQueues = new Map()
   }
 
-  setAiConfig(aiConfig) { this.config.memoryAiConfig = aiConfig; this.extractor.config = this.config }
-  updateConfig(config = {}) { this.config = { ...this.config, ...config }; this.extractor.config = this.config }
+  setAiConfig(aiConfig) {
+    this.config.memoryAiConfig = aiConfig
+    this.extractor.config = this.config
+    this.reflector.config = this.config
+  }
+
+  updateConfig(config = {}) {
+    this.config = { ...this.config, ...config }
+    this.extractor.config = this.config
+    this.embeddings.config = this.config
+    this.reflector.config = this.config
+  }
 
   // ---- 串行队列（每群一个，保证 read-modify-write 安全）----
   enqueueGroup(groupId, task) {
@@ -53,7 +78,7 @@ export class MemoryManager {
   // ---- 写入：把 parseAndRoute 的 ops 落库 ----
   async applyOps(groupId, ops = []) {
     if (!ops.length) return { written: 0 }
-    return this.enqueueGroup(groupId, async () => {
+    const result = await this.enqueueGroup(groupId, async () => {
       const meta = await this.store.getMeta(groupId)
       if (meta.disabled) return { written: 0 }
 
@@ -71,19 +96,28 @@ export class MemoryManager {
             written++
           }
         } else if (op.stream === 'entityFact') {
-          entities = this._addEntityFact(entities, op)
+          entities = await this._addEntityFact(entities, op)
           written++
         } else if (op.stream === 'groupFact') {
-          facts = this._addGroupFact(facts, op.fact)
+          facts = await this._addGroupFact(facts, op.fact)
           written++
         }
       }
 
-      await this.store.saveEntities(groupId, this._trimEntities(entities))
+      entities = this._trimEntities(entities)
+      facts = this._trimFacts(facts)
+      await this.store.saveEntities(groupId, entities)
       await this.store.saveAlias(groupId, aliasDoc)
-      await this.store.saveFacts(groupId, this._trimFacts(facts))
-      return { written }
+      await this.store.saveFacts(groupId, facts)
+      // 反思目标在锁内计算，但反思本身在锁外独立 enqueue（见 _maybeReflect）。
+      const reflectTargets = this._collectReflectTargets(ops, entities, facts)
+      return { written, reflectTargets }
     })
+
+    // 复刻已修死锁的教训：反思绝不嵌套在 applyOps 自身的 enqueue task 内，
+    // 必须新起一次 enqueueGroup。fire-and-forget，失败仅 log。
+    this._maybeReflect(groupId, result.reflectTargets)
+    return { written: result.written }
   }
 
   _ensureEntityAlias(entities, op) {
@@ -97,11 +131,11 @@ export class MemoryManager {
     return next
   }
 
-  _addEntityFact(entities, op) {
+  async _addEntityFact(entities, op) {
     const next = { ...entities }
     const e = makeEntity(next[op.qq] || { qq: op.qq })
-    const incoming = makeFact(op.fact)
-    const dupIdx = e.facts.findIndex(f => f.text === incoming.text)
+    const incoming = await this._withEmbedding(makeFact(op.fact))
+    const dupIdx = this._findDupFactIndex(e.facts, incoming)
     if (dupIdx >= 0) {
       const { winner } = resolveClaim(e.facts[dupIdx], incoming)
       e.facts = e.facts.map((f, i) => (i === dupIdx ? winner : f))
@@ -113,14 +147,99 @@ export class MemoryManager {
     return next
   }
 
-  _addGroupFact(facts, fact) {
-    const incoming = makeFact(fact)
-    const dupIdx = facts.findIndex(f => f.text === incoming.text)
+  async _addGroupFact(facts, fact) {
+    const incoming = await this._withEmbedding(makeFact(fact))
+    const dupIdx = this._findDupFactIndex(facts, incoming)
     if (dupIdx >= 0) {
       const { winner } = resolveClaim(facts[dupIdx], incoming)
       return facts.map((f, i) => (i === dupIdx ? winner : f))
     }
     return [...facts, incoming]
+  }
+
+  // semanticRecall 开启时为 fact 补 embedding（失败/未启用 → 原样返回，embedding 保持 null）。
+  async _withEmbedding(fact) {
+    if (!this.embeddings.canUse()) return fact
+    const vector = await this.embeddings.embed(fact.text)
+    return vector ? { ...fact, embedding: vector } : fact
+  }
+
+  // 去重定位：完全同文本永远算同一事实；embedding 都在且 cosine≥semanticDupCosine 也算同一。
+  _findDupFactIndex(facts, incoming) {
+    const list = facts || []
+    const exact = list.findIndex(f => f.text === incoming.text)
+    if (exact >= 0) return exact
+    if (!this.embeddings.canUse() || !Array.isArray(incoming.embedding)) return -1
+    const threshold = Number.isFinite(this.config.semanticDupCosine) ? this.config.semanticDupCosine : 0.88
+    for (let i = 0; i < list.length; i++) {
+      const f = list[i]
+      if (f.superseded || !Array.isArray(f.embedding)) continue
+      if (cosineSimilarity(incoming.embedding, f.embedding) >= threshold) return i
+    }
+    return -1
+  }
+
+  // ---- 反思触发（阈值，锁外独立 enqueue，fire-and-forget）----
+  // 收集本次写入后越过阈值的反思目标：受影响的实体 QQ 集合 + 群是否越阈。
+  _collectReflectTargets(ops, entities, facts) {
+    if (!this.reflector.canUse()) return null
+    const entityThreshold = Number.isFinite(this.config.reflectEntityThreshold) ? this.config.reflectEntityThreshold : 15
+    const groupThreshold = Number.isFinite(this.config.reflectGroupThreshold) ? this.config.reflectGroupThreshold : 30
+
+    const touchedQQs = new Set()
+    for (const op of ops || []) {
+      if ((op.stream === 'entityFact' || op.stream === 'alias') && op.qq) touchedQQs.add(String(op.qq))
+    }
+    const entityQQs = []
+    for (const qq of touchedQQs) {
+      const e = entities[qq]
+      const activeCount = (e?.facts || []).filter(f => !f.superseded).length
+      if (activeCount > entityThreshold) entityQQs.push(qq)
+    }
+    const activeGroupFacts = (facts || []).filter(f => !f.superseded).length
+    const groupOverThreshold = activeGroupFacts > groupThreshold
+
+    if (!entityQQs.length && !groupOverThreshold) return null
+    return { entityQQs, groupOverThreshold }
+  }
+
+  // 新起一次 enqueueGroup（绝不嵌套在 applyOps 的 task 内）。失败仅 log，不阻塞主流程。
+  _maybeReflect(groupId, targets) {
+    if (!targets || !this.reflector.canUse()) return
+    this.enqueueGroup(groupId, () => this._runReflection(groupId, targets))
+      .catch(err => globalThis.logger?.error?.(`[Memory] 反思失败 group=${groupId}: ${err?.message || err}`))
+  }
+
+  // 锁内只做 read → consolidate/reflect → store.save*，绝不再调 applyOps。
+  async _runReflection(groupId, targets) {
+    const meta = await this.store.getMeta(groupId)
+    if (meta.disabled) return
+
+    if (targets.entityQQs?.length) {
+      const entities = await this.store.getEntities(groupId)
+      let changedAny = false
+      for (const qq of targets.entityQQs) {
+        const entity = entities[qq]
+        if (!entity) continue
+        const { facts, changed } = await this.reflector.consolidateEntity(entity)
+        if (changed) {
+          entities[qq] = { ...entity, facts, updatedAt: nowMs() }
+          changedAny = true
+        }
+      }
+      if (changedAny) await this.store.saveEntities(groupId, this._trimEntities(entities))
+    }
+
+    if (targets.groupOverThreshold) {
+      const facts = await this.store.getFacts(groupId)
+      const recentTexts = facts.filter(f => !f.superseded).slice(-this.config.groupExtractMaxBatchMessages).map(f => f.text)
+      const { insights } = await this.reflector.reflectGroup({ groupId, facts, recentTexts })
+      if (insights.length) {
+        let merged = facts
+        for (const insight of insights) merged = await this._addGroupFact(merged, insight)
+        await this.store.saveFacts(groupId, this._trimFacts(merged))
+      }
+    }
   }
 
   _trimEntities(entities) {
@@ -145,6 +264,93 @@ export class MemoryManager {
 
   _trimFacts(facts) {
     return this._capFacts(slimGroupFacts(facts), this.config.maxFactsPerGroup)
+  }
+
+  // ---- 语境化注入（mention 感知 / 语义召回 / refs 反查 / 时间回扣）----
+  // 一次性读 entities/alias/facts，解析提及，组装六段语境提示。disabled 群返回 ''。
+  async getContextualMemoryPrompt(groupId, speakerQQ, message, now = Date.now()) {
+    if (!this.config.enabled) return ''
+    const meta = await this.store.getMeta(groupId)
+    if (meta.disabled) return ''
+
+    const [entities, aliasDoc, facts] = await Promise.all([
+      this.store.getEntities(groupId),
+      this.store.getAlias(groupId),
+      this.store.getFacts(groupId)
+    ])
+
+    const speaker = String(speakerQQ)
+    const query = String(message || '')
+
+    const { qqs: mentionedQQs } = resolveMentions(query, {
+      aliasDoc,
+      entities,
+      speakerQQ: speaker,
+      max: this.config.recallMaxMentionedEntities
+    })
+
+    const speakerEntity = entities[speaker] || null
+    const mentionedEntities = mentionedQQs.map(qq => entities[qq]).filter(Boolean)
+
+    const relevantQQs = new Set([speaker, ...mentionedQQs])
+    const refsFacts = this._collectRefsFacts(entities, relevantQQs)
+    const groupFacts = await this._rankGroupFacts(facts, query)
+    const pendingFacts = this._collectPendingFacts([speakerEntity, ...mentionedEntities], now)
+
+    return buildContextualPrompt({
+      speakerEntity,
+      mentionedEntities,
+      refsFacts,
+      groupFacts,
+      aliasDoc,
+      pendingFacts,
+      query,
+      config: this.config
+    })
+  }
+
+  // 遍历所有实体的 facts，收集 refs 命中说话人/被提及人的活跃 fact（排除目标实体自身的 fact）。
+  _collectRefsFacts(entities, relevantQQs) {
+    const out = []
+    for (const [qq, entity] of Object.entries(entities || {})) {
+      if (relevantQQs.has(qq)) continue
+      for (const f of entity.facts || []) {
+        if (f.superseded) continue
+        if ((f.refs || []).some(ref => relevantQQs.has(String(ref)))) out.push(f)
+      }
+    }
+    return out
+  }
+
+  // 群事实排序：embeddings 可用且有 query → cosine(queryEmb, fact.embedding) 排序取前 N；否则交给 retriever 现有排序。
+  async _rankGroupFacts(facts, query) {
+    const active = (facts || []).filter(f => f && !f.superseded && f.text)
+    if (!this.embeddings.canUse() || !query.trim()) return active
+    const queryEmb = await this.embeddings.embed(query)
+    if (!Array.isArray(queryEmb)) return active
+    const limit = Number.isFinite(this.config.promptMaxGroupFacts) ? this.config.promptMaxGroupFacts : 6
+    return [...active]
+      .map(f => ({ f, score: Array.isArray(f.embedding) ? cosineSimilarity(queryEmb, f.embedding) : -1 }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, Math.max(0, limit))
+      .map(({ f }) => f)
+  }
+
+  // 收集 eventAt 落在 [now - after*天, now + before*天] 的活跃 fact（仅 proactiveCallback 开启时）。
+  _collectPendingFacts(entityList, now) {
+    if (!this.config.proactiveCallback) return []
+    const before = (Number.isFinite(this.config.proactiveWindowDaysBefore) ? this.config.proactiveWindowDaysBefore : 3) * DAY_MS
+    const after = (Number.isFinite(this.config.proactiveWindowDaysAfter) ? this.config.proactiveWindowDaysAfter : 7) * DAY_MS
+    const lo = now - after
+    const hi = now + before
+    const out = []
+    for (const entity of entityList) {
+      for (const f of entity?.facts || []) {
+        if (f.superseded || !Number.isFinite(f.eventAt)) continue
+        if (f.eventAt >= lo && f.eventAt <= hi) out.push(f)
+      }
+    }
+    return out
   }
 
   // ---- 注入（保留旧签名）----

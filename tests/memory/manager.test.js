@@ -70,3 +70,122 @@ test('extractAndSaveGroupMemories completes (no deadlock) and persists group fac
   const prompt = await m.getGroupMemoryPrompt('981339693', '')
   assert.ok(prompt.includes('群里不要刷屏'))
 })
+
+// ---- getContextualMemoryPrompt 端到端：说话人 + 被提及 + refs + pending ----
+test('getContextualMemoryPrompt assembles speaker, mentioned, refs and pending sections', async () => {
+  const m = mgr(createFakeRedis())
+  const now = 1_000_000_000_000
+  await m.applyOps('g', [
+    // 说话人事实
+    { stream: 'entityFact', qq: '111', authority: 'self', fact: { text: '在上海做后端', authority: 'self', confidence: 0.9, at: now } },
+    // 被提及人的别名 + 事实
+    { stream: 'alias', qq: '222', text: '希洛', authority: 'teaching', confidence: 0.95, by: ['111'], at: now },
+    { stream: 'entityFact', qq: '222', authority: 'teaching', fact: { text: '喜欢猫', authority: 'teaching', confidence: 0.8, at: now } },
+    // 第三方实体里 refs 命中说话人的 fact（关联信息）
+    { stream: 'entityFact', qq: '333', authority: 'mention', fact: { text: '和 111 是同事', refs: ['111'], authority: 'mention', confidence: 0.7, at: now } },
+    // 说话人时间相关事实：未来 2 天内（落在回扣窗口）
+    { stream: 'entityFact', qq: '111', authority: 'self', fact: { text: '下周有考试', authority: 'self', confidence: 0.9, at: now, eventAt: now + 2 * 86400000 } }
+  ])
+
+  const prompt = await m.getContextualMemoryPrompt('g', '111', '希洛最近怎么样', now)
+
+  assert.ok(prompt.includes('【长期记忆】'))
+  assert.ok(prompt.includes('在上海做后端'))
+  assert.ok(prompt.includes('【相关的人】'))
+  assert.ok(prompt.includes('喜欢猫'))
+  assert.ok(prompt.includes('【关联信息】'))
+  assert.ok(prompt.includes('和 111 是同事'))
+  assert.ok(prompt.includes('【可自然提起】'))
+  assert.ok(prompt.includes('下周有考试'))
+})
+
+test('getContextualMemoryPrompt returns empty for disabled group', async () => {
+  const m = mgr(createFakeRedis())
+  await m.applyOps('g', [{ stream: 'entityFact', qq: '111', authority: 'self', fact: { text: '在上海', authority: 'self', confidence: 0.9, at: 1 } }])
+  await m.adminSetGroupMemoryEnabled({ groupId: 'g', enabled: false })
+  assert.equal(await m.getContextualMemoryPrompt('g', '111', 'hi', 1), '')
+})
+
+// ---- 反思触发不死锁：阈值越过后 fire-and-forget enqueue，覆写 reflector._callChat ----
+test('applyOps triggers entity reflection without deadlocking', { timeout: 5000 }, async () => {
+  const m = mgr(createFakeRedis())
+  m.config.reflectEntityThreshold = 2
+  // 让 reflector 可用并覆写 _callChat 返回固定合并结果。
+  m.reflector.config = { ...m.config, memoryAiConfig: { memoryAiUrl: 'u', memoryAiApikey: 'k' } }
+  let reflectCalls = 0
+  m.reflector._callChat = async () => { reflectCalls += 1; return '[{"text":"巩固后的事实","sources":[1,2,3]}]' }
+
+  await m.applyOps('g', [
+    { stream: 'entityFact', qq: '111', authority: 'self', fact: { text: '事实A', authority: 'self', confidence: 0.8, at: 1 } },
+    { stream: 'entityFact', qq: '111', authority: 'self', fact: { text: '事实B', authority: 'self', confidence: 0.8, at: 2 } },
+    { stream: 'entityFact', qq: '111', authority: 'self', fact: { text: '事实C', authority: 'self', confidence: 0.8, at: 3 } }
+  ])
+
+  // 反思是独立 enqueue 的 fire-and-forget；用同 key 的下一个 enqueue 等它跑完（若死锁则 timeout 失败）。
+  await m.enqueueGroup('g', async () => {})
+
+  assert.equal(reflectCalls, 1)
+  const entities = await m.store.getEntities('g')
+  assert.ok(entities['111'].facts.some(f => f.origin === 'reflection' && f.text === '巩固后的事实'))
+})
+
+test('applyOps skips reflection when reflector unconfigured', { timeout: 5000 }, async () => {
+  const m = mgr(createFakeRedis())
+  m.config.reflectEntityThreshold = 1
+  let reflectCalls = 0
+  m.reflector._callChat = async () => { reflectCalls += 1; return '[]' }
+
+  await m.applyOps('g', [
+    { stream: 'entityFact', qq: '111', authority: 'self', fact: { text: 'x', authority: 'self', confidence: 0.8, at: 1 } },
+    { stream: 'entityFact', qq: '111', authority: 'self', fact: { text: 'y', authority: 'self', confidence: 0.8, at: 2 } }
+  ])
+  await m.enqueueGroup('g', async () => {})
+  assert.equal(reflectCalls, 0) // reflector.canUse() 为假 → 不触发
+})
+
+// ---- 语义去重：注入假 embeddings，cosine≥阈值视为同一事实，按权威 resolveClaim ----
+test('semantic dedup merges near-duplicate entity facts via injected embeddings', async () => {
+  const m = mgr(createFakeRedis())
+  m.config.semanticRecallEnabled = true
+  m.config.semanticDupCosine = 0.88
+  m.embeddings.config = m.config
+  // 强制 canUse()，并按文本映射到固定向量：相近文本 → 近乎平行向量。
+  m.embeddings.canUse = () => true
+  m.embeddings.embed = async (text) => {
+    if (String(text).includes('上海')) return [1, 0]      // 两条"上海"事实向量相同 → cosine=1
+    return [0, 1]
+  }
+
+  await m.applyOps('g', [
+    { stream: 'entityFact', qq: '111', authority: 'mention', fact: { text: '他在上海', authority: 'mention', confidence: 0.6, at: 1 } }
+  ])
+  await m.applyOps('g', [
+    { stream: 'entityFact', qq: '111', authority: 'self', fact: { text: '在上海工作', authority: 'self', confidence: 0.9, at: 2 } }
+  ])
+
+  const entities = await m.store.getEntities('g')
+  const facts = entities['111'].facts
+  // 语义去重：两条"上海"事实合并为一条，self 权威胜出。
+  assert.equal(facts.length, 1)
+  assert.equal(facts[0].text, '在上海工作')
+  assert.equal(facts[0].authority, 'self')
+})
+
+test('semantic dedup keeps distinct facts when below cosine threshold', async () => {
+  const m = mgr(createFakeRedis())
+  m.config.semanticRecallEnabled = true
+  m.config.semanticDupCosine = 0.88
+  m.embeddings.config = m.config
+  m.embeddings.canUse = () => true
+  m.embeddings.embed = async (text) => (String(text).includes('上海') ? [1, 0] : [0, 1])
+
+  await m.applyOps('g', [
+    { stream: 'entityFact', qq: '111', authority: 'self', fact: { text: '在上海', authority: 'self', confidence: 0.9, at: 1 } }
+  ])
+  await m.applyOps('g', [
+    { stream: 'entityFact', qq: '111', authority: 'self', fact: { text: '喜欢咖啡', authority: 'self', confidence: 0.9, at: 2 } }
+  ])
+
+  const entities = await m.store.getEntities('g')
+  assert.equal(entities['111'].facts.length, 2) // 正交向量 cosine=0 < 0.88 → 不合并
+})
