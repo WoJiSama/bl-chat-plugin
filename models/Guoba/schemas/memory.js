@@ -82,5 +82,59 @@ export default [
     component: "InputNumber",
     bottomHelpMessage: "记忆部分注入 system prompt 的总字符上限，控制 token 消耗",
     componentProps: { min: 100, max: 8000, placeholder: "1200" }
+  },
+  {
+    field: "memorySystem.semanticRecallEnabled",
+    label: "语义召回开关",
+    component: "Switch",
+    bottomHelpMessage: "开启后用 embedding 做语义排序与去重(需在「AI 模型配置」页填好 embeddingAiConfig 的 key);默认关,无 key 自动降级为常规排序"
+  },
+  {
+    field: "memorySystem.reflectEntityThreshold",
+    label: "实体反思触发条数",
+    component: "InputNumber",
+    bottomHelpMessage: "单个实体活跃记忆超过该条数后触发反思巩固(合并去冗余)",
+    componentProps: { min: 1, max: 200, placeholder: "15" }
+  },
+  {
+    field: "memorySystem.reflectGroupThreshold",
+    label: "群反思触发条数",
+    component: "InputNumber",
+    bottomHelpMessage: "群共识记忆超过该条数后触发反思,产出高层洞察",
+    componentProps: { min: 1, max: 500, placeholder: "30" }
+  },
+  {
+    field: "memorySystem.proactiveCallback",
+    label: "自然回扣开关",
+    component: "Switch",
+    bottomHelpMessage: "开启后会在回复内自然提起时间相关记忆(如'下周考试');绝不主动发消息"
+  },
+  {
+    field: "memorySystem.recallMaxMentionedEntities",
+    label: "最大被提及实体数",
+    component: "InputNumber",
+    bottomHelpMessage: "一条消息中最多解析并注入多少个被提及的人的记忆",
+    componentProps: { min: 0, max: 20, placeholder: "3" }
+  },
+  {
+    field: "memorySystem.proactiveWindowDaysBefore",
+    label: "回扣窗口(未来天数)",
+    component: "InputNumber",
+    bottomHelpMessage: "事件时间落在未来 N 天内时可自然回扣(如临近的考试)",
+    componentProps: { min: 0, max: 90, placeholder: "3" }
+  },
+  {
+    field: "memorySystem.proactiveWindowDaysAfter",
+    label: "回扣窗口(过去天数)",
+    component: "InputNumber",
+    bottomHelpMessage: "事件时间落在过去 N 天内时可自然回扣(如'考得咋样')",
+    componentProps: { min: 0, max: 90, placeholder: "7" }
+  },
+  {
+    field: "memorySystem.semanticDupCosine",
+    label: "语义去重阈值",
+    component: "InputNumber",
+    bottomHelpMessage: "写入记忆时两条 fact 的 embedding 余弦相似度 ≥ 该值视为同一事实(需开启语义召回)",
+    componentProps: { min: 0, max: 1, step: 0.01, placeholder: "0.88" }
   }
 ]

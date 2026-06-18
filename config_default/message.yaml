@@ -244,6 +244,14 @@ pluginSettings:
     groupExtractMaxBatchMessages: 12
     promptMaxGroupFacts: 6
     promptMaxChars: 1200
+    semanticRecallEnabled: false
+    reflectEntityThreshold: 15
+    reflectGroupThreshold: 30
+    proactiveCallback: true
+    recallMaxMentionedEntities: 3
+    proactiveWindowDaysBefore: 3
+    proactiveWindowDaysAfter: 7
+    semanticDupCosine: 0.88
   expressionLearning:
     enabled: true
     minWordFrequency: 3

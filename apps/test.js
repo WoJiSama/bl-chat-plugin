@@ -4057,13 +4057,7 @@ ${recentHistory || '(无)'}
           ? await this.emotionManager.getEmotionPromptForGroup(groupId)
           : ''
         const memoryPrompt = this.config.memorySystem?.enabled
-          ? await this.memoryManager.getMemoryPromptForUser(groupId, userId, e.msg || "")
-          : ''
-        const groupMemoryPrompt = this.config.memorySystem?.enabled && groupId
-          ? await this.memoryManager.getGroupMemoryPrompt(groupId, e.msg || "")
-          : ''
-        const groupAliasPrompt = this.config.memorySystem?.enabled && groupId
-          ? await this.memoryManager.getGroupAliasPrompt(groupId, e.msg || "")
+          ? await this.memoryManager.getContextualMemoryPrompt(groupId, userId, e.msg || "", Date.now())
           : ''
         const expressionPrompt = this.config.expressionLearning?.enabled
           ? await this.expressionLearner.getExpressionPromptForGroup(groupId)
@@ -4098,7 +4092,7 @@ ${recentHistory || '(无)'}
           ? await this.getCurrentGroupContext(e)
           : this.getBasicGroupContext(e)
         const mergedTriggerPrompt = this.buildMergedDirectTriggerPrompt(e)
-        const enhancedPrompts = [identityBindingsPrompt, explicitTeachingPrompt, mergedTriggerPrompt, groupAliasPrompt, emotionPrompt, memoryPrompt, groupMemoryPrompt, expressionPrompt, knowledgePrompt, memberLookupPrompt, personProfilePrompt].filter(Boolean).join('\n')
+        const enhancedPrompts = [identityBindingsPrompt, explicitTeachingPrompt, mergedTriggerPrompt, emotionPrompt, memoryPrompt, expressionPrompt, knowledgePrompt, memberLookupPrompt, personProfilePrompt].filter(Boolean).join('\n')
         const runtimeGroupInfo = {
           group_id: groupContext.groupId,
           group_name: groupContext.groupName
