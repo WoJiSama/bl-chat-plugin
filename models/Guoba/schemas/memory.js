@@ -7,47 +7,39 @@ export default [
     field: "memorySystem.enabled",
     label: "长期记忆开关",
     component: "Switch",
-    bottomHelpMessage: "开启前需在「AI 模型配置」页填好 memoryAiConfig。每个群的每个用户独立记忆，群记忆作为群共识独立维护"
+    bottomHelpMessage: "开启前需在「AI 模型配置」页填好 memoryAiConfig。每个群的每个用户独立记忆,群记忆作为群共识独立维护"
   },
   {
-    field: "memorySystem.maxFactsPerUser",
-    label: "每用户最大记忆条数",
+    field: "memorySystem.maxEntitiesPerGroup",
+    label: "每群最大实体数",
     component: "InputNumber",
-    bottomHelpMessage: "每个用户在每个群最多保存多少条记忆（所有类别总计），超过会按重要性淘汰",
-    componentProps: { min: 10, max: 1000, placeholder: "100" }
+    bottomHelpMessage: "每个群最多记录多少个实体(人/物),超过会按权重淘汰",
+    componentProps: { min: 10, max: 2000, placeholder: "200" }
   },
   {
     field: "memorySystem.maxFactsPerGroup",
     label: "每群最大记忆条数",
     component: "InputNumber",
-    bottomHelpMessage: "每个群的全局共识记忆最多保存多少条（所有类别总计）",
+    bottomHelpMessage: "每个群的全局共识记忆最多保存多少条(所有类别总计)",
     componentProps: { min: 10, max: 1000, placeholder: "50" }
   },
   {
-    field: "memorySystem.importanceThreshold",
-    label: "重要性阈值",
+    field: "memorySystem.maxFactsPerEntity",
+    label: "每实体最大记忆条数",
     component: "InputNumber",
-    bottomHelpMessage: "仅在严格过滤模式下作为兜底阈值；默认更建议让 AI 自己判断重要性",
-    componentProps: { min: 0, max: 1, step: 0.05, placeholder: "0.5" }
+    bottomHelpMessage: "每个实体最多保存多少条记忆,超过会按重要性淘汰",
+    componentProps: { min: 1, max: 200, placeholder: "20" }
   },
   {
-    field: "memorySystem.aiDecidesImportance",
-    label: "AI 决定是否保存",
-    component: "Switch",
-    bottomHelpMessage: "开启后不再用代码按重要性阈值丢弃 AI 抽取结果；更符合“让 AI 自己决定记什么”"
-  },
-  {
-    field: "memorySystem.strictCodeFiltering",
-    label: "严格代码过滤",
-    component: "Switch",
-    bottomHelpMessage: "开启后会用代码额外过滤低信号内容和身份类风险；关闭时只保留工具/系统内容等安全过滤"
-  },
-  {
-    field: "memorySystem.memoryDecayDays",
-    label: "记忆参考时效（天）",
-    component: "InputNumber",
-    bottomHelpMessage: "记忆召回时参考的时效天数，越远的记忆权重越低",
-    componentProps: { min: 1, max: 365, placeholder: "7" }
+    field: 'memorySystem.saveStrictness',
+    label: '记忆保存严格度',
+    component: 'Select',
+    bottomHelpMessage: 'off=AI 全权决定;normal=代码边界过滤+AI;strict=最严格过滤',
+    componentProps: { options: [
+      { label: '宽松(off)', value: 'off' },
+      { label: '正常(normal)', value: 'normal' },
+      { label: '严格(strict)', value: 'strict' }
+    ] }
   },
   {
     field: "memorySystem.userExtractDebounceSeconds",
@@ -78,13 +70,6 @@ export default [
     componentProps: { min: 1, max: 100, placeholder: "12" }
   },
   {
-    field: "memorySystem.promptMaxUserFacts",
-    label: "注入用户记忆最大条数",
-    component: "InputNumber",
-    bottomHelpMessage: "每次对话时注入 prompt 的用户记忆条数上限",
-    componentProps: { min: 0, max: 50, placeholder: "8" }
-  },
-  {
     field: "memorySystem.promptMaxGroupFacts",
     label: "注入群记忆最大条数",
     component: "InputNumber",
@@ -97,25 +82,5 @@ export default [
     component: "InputNumber",
     bottomHelpMessage: "记忆部分注入 system prompt 的总字符上限，控制 token 消耗",
     componentProps: { min: 100, max: 8000, placeholder: "1200" }
-  },
-  {
-    field: "memorySystem.recallMinRelevance",
-    label: "召回最低相关性",
-    component: "InputNumber",
-    bottomHelpMessage: "当前消息有明确内容时，低于该相关性的记忆不会注入，避免旧记忆乱入。0 更宽松，0.1~0.2 更稳",
-    componentProps: { min: 0, max: 1, step: 0.01, placeholder: "0.12" }
-  },
-  {
-    field: "memorySystem.semanticRecallEnabled",
-    label: "语义召回开关",
-    component: "Switch",
-    bottomHelpMessage: "开启前需在「AI 模型配置」页填好 embeddingAiConfig，默认关闭即可"
-  },
-  {
-    field: "memorySystem.semanticRecallTopK",
-    label: "语义召回候选数",
-    component: "InputNumber",
-    bottomHelpMessage: "仅在开启语义召回时生效，先筛选多少条候选记忆",
-    componentProps: { min: 1, max: 100, placeholder: "20" }
   }
 ]
