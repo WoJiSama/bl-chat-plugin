@@ -4,7 +4,9 @@
   "type": "module",
   "version": "0.0.1",
   "main": "index.js",
-  "scripts": {},
+  "scripts": {
+    "test": "node --test \"tests/memory/**/*.test.js\""
+  },
   "repository": {
     "type": "git",
     "url": ""
