@@ -31,13 +31,6 @@ export default [
     componentProps: { min: -1, max: 1, step: 0.01, placeholder: "-0.15" }
   },
   {
-    field: "emotionSystem.eventWeights.ignored",
-    label: "被忽略权重",
-    component: "InputNumber",
-    bottomHelpMessage: "被忽略时心情下降值",
-    componentProps: { min: -1, max: 1, step: 0.01, placeholder: "-0.05" }
-  },
-  {
     field: "emotionSystem.eventWeights.mentioned",
     label: "被@权重",
     component: "InputNumber",

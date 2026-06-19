@@ -3,6 +3,7 @@ export default [
     component: "SOFT_GROUP_BEGIN",
     label: "长期记忆系统 (memorySystem)"
   },
+  { component: "Divider", label: "基础与容量" },
   {
     field: "memorySystem.enabled",
     label: "长期记忆开关",
@@ -41,34 +42,36 @@ export default [
       { label: '严格(strict)', value: 'strict' }
     ] }
   },
+  { component: "Divider", label: "抽取调度（节流，省 LLM 调用）" },
   {
     field: "memorySystem.userExtractDebounceSeconds",
     label: "用户记忆提取防抖（秒）",
     component: "InputNumber",
-    bottomHelpMessage: "用户对话结束后，等待 N 秒再触发记忆提取，避免短时间重复调用",
+    bottomHelpMessage: "用户发言后等待 N 秒(期间无新消息)再抽取,把连续发言合并为一次;0=不防抖即时抽取",
     componentProps: { min: 0, max: 600, placeholder: "90" }
   },
   {
     field: "memorySystem.userExtractMaxBatchMessages",
     label: "用户记忆批量大小",
     component: "InputNumber",
-    bottomHelpMessage: "用户记忆每次提取时一次性分析的消息条数",
+    bottomHelpMessage: "缓冲攒满 N 条用户消息时立即抽取一次(防抖未到也会触发)",
     componentProps: { min: 1, max: 50, placeholder: "6" }
   },
   {
     field: "memorySystem.groupExtractMinIntervalMinutes",
     label: "群记忆最小整理间隔（分钟）",
     component: "InputNumber",
-    bottomHelpMessage: "群记忆两次整理之间至少间隔 N 分钟",
+    bottomHelpMessage: "同一群两次记忆整理至少间隔 N 分钟,间隔内的触发会被跳过",
     componentProps: { min: 1, max: 120, placeholder: "10" }
   },
   {
     field: "memorySystem.groupExtractMaxBatchMessages",
     label: "群记忆触发条数",
     component: "InputNumber",
-    bottomHelpMessage: "群累计多少条消息后立即整理一次",
+    bottomHelpMessage: "每次群整理最多取最近 N 条候选消息分析",
     componentProps: { min: 1, max: 100, placeholder: "12" }
   },
+  { component: "Divider", label: "注入控制" },
   {
     field: "memorySystem.promptMaxGroupFacts",
     label: "注入群记忆最大条数",
@@ -84,11 +87,27 @@ export default [
     componentProps: { min: 100, max: 8000, placeholder: "1200" }
   },
   {
+    field: "memorySystem.recallMaxMentionedEntities",
+    label: "最大被提及实体数",
+    component: "InputNumber",
+    bottomHelpMessage: "一条消息中最多解析并注入多少个被提及的人的记忆",
+    componentProps: { min: 0, max: 20, placeholder: "3" }
+  },
+  { component: "Divider", label: "语义召回（需 embeddingAiConfig）" },
+  {
     field: "memorySystem.semanticRecallEnabled",
     label: "语义召回开关",
     component: "Switch",
     bottomHelpMessage: "开启后用 embedding 做语义排序与去重(需在「AI 模型配置」页填好 embeddingAiConfig 的 key);默认关,无 key 自动降级为常规排序"
   },
+  {
+    field: "memorySystem.semanticDupCosine",
+    label: "语义去重阈值",
+    component: "InputNumber",
+    bottomHelpMessage: "写入记忆时两条 fact 的 embedding 余弦相似度 ≥ 该值视为同一事实(需开启语义召回)",
+    componentProps: { min: 0, max: 1, step: 0.01, placeholder: "0.88" }
+  },
+  { component: "Divider", label: "反思巩固（需 memoryAiConfig）" },
   {
     field: "memorySystem.reflectEntityThreshold",
     label: "实体反思触发条数",
@@ -103,18 +122,12 @@ export default [
     bottomHelpMessage: "群共识记忆超过该条数后触发反思,产出高层洞察",
     componentProps: { min: 1, max: 500, placeholder: "30" }
   },
+  { component: "Divider", label: "时间回扣（仅回复内自然提起，不主动发消息）" },
   {
     field: "memorySystem.proactiveCallback",
     label: "自然回扣开关",
     component: "Switch",
     bottomHelpMessage: "开启后会在回复内自然提起时间相关记忆(如'下周考试');绝不主动发消息"
-  },
-  {
-    field: "memorySystem.recallMaxMentionedEntities",
-    label: "最大被提及实体数",
-    component: "InputNumber",
-    bottomHelpMessage: "一条消息中最多解析并注入多少个被提及的人的记忆",
-    componentProps: { min: 0, max: 20, placeholder: "3" }
   },
   {
     field: "memorySystem.proactiveWindowDaysBefore",
@@ -129,12 +142,5 @@ export default [
     component: "InputNumber",
     bottomHelpMessage: "事件时间落在过去 N 天内时可自然回扣(如'考得咋样')",
     componentProps: { min: 0, max: 90, placeholder: "7" }
-  },
-  {
-    field: "memorySystem.semanticDupCosine",
-    label: "语义去重阈值",
-    component: "InputNumber",
-    bottomHelpMessage: "写入记忆时两条 fact 的 embedding 余弦相似度 ≥ 该值视为同一事实(需开启语义召回)",
-    componentProps: { min: 0, max: 1, step: 0.01, placeholder: "0.88" }
   }
 ]

@@ -10,7 +10,6 @@ export class EmotionManager {
       eventWeights: {
         praised: 0.1,
         scolded: -0.15,
-        ignored: -0.05,
         mentioned: 0.05,
         conversation: 0.02,
         ...config.eventWeights

@@ -13,14 +13,14 @@ export default [
     field: "knowledgeSystem.topN",
     label: "最大返回条数",
     component: "InputNumber",
-    bottomHelpMessage: "检索命中后最多返回几条最相关的知识",
-    componentProps: { min: 1, max: 50, placeholder: "10" }
+    bottomHelpMessage: "检索命中后最多返回几条最相关的知识（默认 4）",
+    componentProps: { min: 1, max: 50, placeholder: "4" }
   },
   {
     field: "knowledgeSystem.threshold",
     label: "相似度阈值",
     component: "InputNumber",
-    bottomHelpMessage: "0~1，只有相似度 ≥ 此值的知识才会被返回，建议 0.3~0.5",
-    componentProps: { min: 0, max: 1, step: 0.05, placeholder: "0.35" }
+    bottomHelpMessage: "0~1，只有相似度 ≥ 此值的知识才会被返回，建议 0.5~0.7（默认 0.6）",
+    componentProps: { min: 0, max: 1, step: 0.05, placeholder: "0.6" }
   }
 ]
