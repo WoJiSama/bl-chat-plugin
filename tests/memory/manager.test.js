@@ -46,11 +46,12 @@ test('adminClearMemories wipes the group', async () => {
   assert.equal(await m.getGroupMemoryPrompt('g', ''), '')
 })
 
-// Regression: extractAndSaveMemories/extractAndSaveGroupMemories must not deadlock.
-// They run extraction outside the per-group queue and delegate the locked write to applyOps.
-// A nested same-key enqueue would hang forever; { timeout } makes that fail fast instead.
-test('extractAndSaveMemories completes (no nested-queue deadlock) and persists', { timeout: 5000 }, async () => {
+// Regression: extract paths must not deadlock (no nested same-key enqueue).
+// { timeout } makes a regression fail fast instead of hanging.
+// 用户抽取带防抖+批量缓冲:maxBatch=1 时首条即 flush。
+test('extractAndSaveMemories flushes on batch full and persists', { timeout: 5000 }, async () => {
   const m = mgr(createFakeRedis())
+  m.config.userExtractMaxBatchMessages = 1
   m.extractor.extract = async () => ([
     { stream: 'alias', qq: '925640859', text: '咖啡大人', authority: 'self', confidence: 0.9, by: ['925640859'], at: 1 }
   ])
@@ -60,15 +61,38 @@ test('extractAndSaveMemories completes (no nested-queue deadlock) and persists',
   assert.ok(alias.includes('咖啡大人'))
 })
 
-test('extractAndSaveGroupMemories completes (no deadlock) and persists group facts', { timeout: 5000 }, async () => {
+// 防抖:未达 batch 上限时只缓冲不抽取;攒满后一次性把全部消息交给 extractor。
+test('extractAndSaveMemories buffers until batch full, then extracts the whole batch', { timeout: 5000 }, async () => {
   const m = mgr(createFakeRedis())
+  m.config.userExtractMaxBatchMessages = 3
+  m.config.userExtractDebounceSeconds = 90 // 不靠定时器,靠 batch 满触发
+  let seenBatch = 0
+  m.extractor.extract = async ({ messages }) => { seenBatch = messages.length; return [] }
+
+  const r1 = m.extractAndSaveMemories('g', '111', '消息一')
+  assert.equal(r1.queued, true)
+  assert.equal(r1.buffered, 1)
+  assert.equal(seenBatch, 0) // 还没抽取
+  m.extractAndSaveMemories('g', '111', '消息二')
+  const r3 = await m.extractAndSaveMemories('g', '111', '消息三') // 第3条达上限 → flush
+  assert.equal(seenBatch, 3) // 三条一起抽取
+  assert.ok(r3) // flush 返回 applyOps 结果
+})
+
+// 群抽取最小间隔节流:间隔内的第二次调用被跳过。
+test('extractAndSaveGroupMemories persists then throttles within min interval', { timeout: 5000 }, async () => {
+  const m = mgr(createFakeRedis())
+  m.config.groupExtractMinIntervalMinutes = 10
   m.extractor.extract = async () => ([
     { stream: 'groupFact', authority: 'mention', fact: { text: '群里不要刷屏', tags: ['群规'], refs: [], authority: 'mention', confidence: 0.8, at: 1, superseded: false } }
   ])
-  const result = await m.extractAndSaveGroupMemories('981339693', [{ content: '大家注意群里不要刷屏好吗' }])
-  assert.equal(result.written, 1)
-  const prompt = await m.getGroupMemoryPrompt('981339693', '')
-  assert.ok(prompt.includes('群里不要刷屏'))
+  const first = await m.extractAndSaveGroupMemories('981339693', [{ content: '大家注意群里不要刷屏好吗' }])
+  assert.equal(first.written, 1)
+  assert.ok((await m.getGroupMemoryPrompt('981339693', '')).includes('群里不要刷屏'))
+
+  const second = await m.extractAndSaveGroupMemories('981339693', [{ content: '再说一遍不要刷屏' }])
+  assert.equal(second.queued, false)
+  assert.equal(second.reason, 'throttled') // 10 分钟内不再重复抽取
 })
 
 // ---- getContextualMemoryPrompt 端到端：说话人 + 被提及 + refs + pending ----

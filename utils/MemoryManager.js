@@ -49,6 +49,7 @@ export class MemoryManager {
     this.REDIS_PREFIX = 'ytbot:mem:g:'
     this.userBuffers = new Map()
     this.groupBuffers = new Map()
+    this.lastGroupExtractAt = new Map()
     this.scopeQueues = new Map()
   }
 
@@ -398,23 +399,68 @@ export class MemoryManager {
   }
 
   // ---- 抽取入口（用户 + 群，后台 fire-and-forget）----
-  async extractAndSaveMemories(groupId, userId, userMessage, _botReply = '', meta = {}) {
+  // 用户记忆抽取:防抖 + 批量缓冲。同一用户的连续发言先攒到 buffer,
+  // 静默 userExtractDebounceSeconds 后或攒满 userExtractMaxBatchMessages 时,一次性抽取,
+  // 避免每条消息都打一次 LLM。
+  extractAndSaveMemories(groupId, userId, userMessage, _botReply = '', meta = {}) {
     if (!this.config.enabled) return { queued: false }
     if (classifyBoundary(userMessage).verdict === 'drop') return { queued: false, reason: 'boundary' }
-    // 抽取(只读 LLM 调用)不需要 per-group 写锁;只有 applyOps 的 read-modify-write 需要,
-    // 它会自行 enqueueGroup。这里若再包一层同 key 的 enqueueGroup 会与内层互相等待造成死锁。
-    const ops = await this.extractor.extract({ groupId, speakerQQ: String(userId), messages: [{ content: compactText(userMessage, 500) }], at: nowMs() })
-    return this.applyOps(groupId, ops)
+
+    const key = `${groupId}:${userId}`
+    const buf = this.userBuffers.get(key) || { groupId, userId, messages: [], timer: null }
+    buf.messages.push(compactText(userMessage, 500))
+    this.userBuffers.set(key, buf)
+
+    const maxBatch = Math.max(1, Number(this.config.userExtractMaxBatchMessages) || 6)
+    if (buf.messages.length >= maxBatch) {
+      return this._flushUserBuffer(key)
+    }
+
+    if (buf.timer) clearTimeout(buf.timer)
+    const debounceMs = Math.max(0, Number(this.config.userExtractDebounceSeconds) || 0) * 1000
+    if (debounceMs > 0) {
+      buf.timer = setTimeout(() => {
+        this._flushUserBuffer(key).catch(err => globalThis.logger?.error?.('[MemoryManager] 用户记忆抽取失败:', err))
+      }, debounceMs)
+      buf.timer.unref?.()
+    } else {
+      // 防抖关闭 → 退化为即时抽取
+      return this._flushUserBuffer(key)
+    }
+    return { queued: true, buffered: buf.messages.length }
   }
 
+  async _flushUserBuffer(key) {
+    const buf = this.userBuffers.get(key)
+    if (!buf || !buf.messages.length) return { written: 0 }
+    this.userBuffers.delete(key)
+    if (buf.timer) clearTimeout(buf.timer)
+    // 抽取在锁外,applyOps 自行加锁(避免同 key 嵌套 enqueue 死锁)。
+    const ops = await this.extractor.extract({
+      groupId: buf.groupId,
+      speakerQQ: String(buf.userId),
+      messages: buf.messages.map(content => ({ content })),
+      at: nowMs()
+    })
+    return this.applyOps(buf.groupId, ops)
+  }
+
+  // 群记忆抽取:最小间隔节流。距上次该群抽取不足 groupExtractMinIntervalMinutes 则跳过,
+  // 避免每次回复都整理一遍群记忆。
   async extractAndSaveGroupMemories(groupId, chatHistory = []) {
     if (!this.config.enabled || !Array.isArray(chatHistory) || !chatHistory.length) return { queued: false }
-    // 群抽取：逐发言人不强求，这里把整段作为 group_consensus 候选交给 AI（speakerQQ 取空，alias/self 不会误挂）
+
+    const intervalMs = Math.max(0, Number(this.config.groupExtractMinIntervalMinutes) || 0) * 60000
+    const last = this.lastGroupExtractAt.get(groupId) || 0
+    if (intervalMs > 0 && nowMs() - last < intervalMs) return { queued: false, reason: 'throttled' }
+
     const messages = chatHistory
       .filter(m => classifyBoundary(m.content).verdict === 'candidate')
       .slice(-this.config.groupExtractMaxBatchMessages)
     if (!messages.length) return { queued: false, reason: 'no-candidate' }
-    // 同 extractAndSaveMemories:抽取在锁外,applyOps 自行加锁,避免同 key 嵌套 enqueue 死锁。
+
+    this.lastGroupExtractAt.set(groupId, nowMs())
+    // 抽取在锁外,applyOps 自行加锁。
     const ops = await this.extractor.extract({ groupId, speakerQQ: '', messages, at: nowMs() })
     // 群抽取只接受 groupFact / alias（teaching），过滤掉需要 speaker 的 self/preference
     const safe = ops.filter(op => op.stream === 'groupFact' || (op.stream === 'alias' && op.authority === 'teaching'))
