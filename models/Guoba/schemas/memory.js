@@ -80,6 +80,13 @@ export default [
     componentProps: { min: 0, max: 50, placeholder: "6" }
   },
   {
+    field: "memorySystem.promptMaxEntityFacts",
+    label: "注入个人记忆最大条数",
+    component: "InputNumber",
+    bottomHelpMessage: "每个人（说话人/被提及人）注入 prompt 的个人事实条数上限，按与当前问题的相关度排序后截取",
+    componentProps: { min: 0, max: 50, placeholder: "6" }
+  },
+  {
     field: "memorySystem.promptMaxChars",
     label: "记忆 prompt 字符上限",
     component: "InputNumber",

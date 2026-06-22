@@ -1,7 +1,14 @@
 // utils/memory/entityModel.js
+import { createHash } from 'node:crypto'
 import { clamp, compactText } from './constants.js'
 
 const FACT_ORIGINS = Object.freeze(['extract', 'reflection', 'config'])
+
+// 稳定短 id（§0.1）：sha256(text) 前 8 位 hex。展示与按 id 删除引用同一短 id，
+// 保证"看到的 id"能删到对应事实。纯函数，对相同文本恒定。
+export function factShortId(text) {
+  return createHash('sha256').update(String(text ?? '')).digest('hex').slice(0, 8)
+}
 
 function uniqStrings(values = []) {
   return [...new Set((values || [])

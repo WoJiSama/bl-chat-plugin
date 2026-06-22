@@ -1,8 +1,21 @@
 // utils/memory/extractor.js
 import { ROUTES, clamp, compactText } from './constants.js'
 import { makeFact } from './entityModel.js'
+import { memStats } from './stats.js'
 
 const DAY_MS = 86400000
+const CHAT_TIMEOUT_MS = 8000
+
+// 把 refs 过滤为纯数字字符串数组（防 AI 幻觉非数字/非法 QQ）。
+// 入参可为任意值；逐项 String 化后只保留全数字的，去重。
+function normalizeRefs(refs) {
+  const out = []
+  for (const ref of Array.isArray(refs) ? refs : []) {
+    const s = String(ref ?? '').trim()
+    if (s && /^\d+$/.test(s) && !out.includes(s)) out.push(s)
+  }
+  return out
+}
 
 // item.eventInDays（整数，相对今天的天数，未来正/过去负）+ ctx.now → eventAt(epoch ms)。
 // 仅在 ctx.now 存在且 eventInDays 为有限数字时计算；否则返回 undefined（省略，
@@ -26,6 +39,7 @@ export function parseAndRoute(items, ctx = {}) {
     if (!route || route === 'ordinary_chat') continue
     const confidence = clamp(item.confidence ?? 0.7)
     const eventAt = resolveEventAt(item, ctx)
+    const refs = normalizeRefs(item.refs)
 
     if (route === 'explicit_teaching') {
       const alias = compactText(item.alias, 64)
@@ -33,7 +47,7 @@ export function parseAndRoute(items, ctx = {}) {
         ops.push({ stream: 'alias', qq: String(item.targetQQ), text: alias, authority: 'teaching', confidence, by: [String(ctx.speakerQQ || '')].filter(Boolean), at })
       } else {
         const text = compactText(item.content, 240)
-        if (text) ops.push({ stream: 'groupFact', authority: 'teaching', fact: makeFact({ text, tags: item.tags, refs: item.refs, authority: 'teaching', confidence, at, eventAt }) })
+        if (text) ops.push({ stream: 'groupFact', authority: 'teaching', fact: makeFact({ text, tags: item.tags, refs, authority: 'teaching', confidence, at, eventAt }) })
       }
       continue
     }
@@ -44,7 +58,7 @@ export function parseAndRoute(items, ctx = {}) {
         ops.push({ stream: 'alias', qq: String(ctx.speakerQQ), text: alias, authority: 'self', confidence, by: [String(ctx.speakerQQ)], at })
       } else {
         const text = compactText(item.content, 240)
-        if (text && ctx.speakerQQ) ops.push({ stream: 'entityFact', qq: String(ctx.speakerQQ), authority: 'self', fact: makeFact({ text, tags: item.tags, refs: item.refs, authority: 'self', confidence, at, eventAt }) })
+        if (text && ctx.speakerQQ) ops.push({ stream: 'entityFact', qq: String(ctx.speakerQQ), authority: 'self', fact: makeFact({ text, tags: item.tags, refs, authority: 'self', confidence, at, eventAt }) })
       }
       continue
     }
@@ -53,14 +67,14 @@ export function parseAndRoute(items, ctx = {}) {
       const text = compactText(item.content, 240)
       if (text && ctx.speakerQQ) {
         const tags = [...new Set(['偏好', ...(item.tags || [])])]
-        ops.push({ stream: 'entityFact', qq: String(ctx.speakerQQ), authority: 'self', fact: makeFact({ text, tags, refs: item.refs, authority: 'self', confidence, at, eventAt }) })
+        ops.push({ stream: 'entityFact', qq: String(ctx.speakerQQ), authority: 'self', fact: makeFact({ text, tags, refs, authority: 'self', confidence, at, eventAt }) })
       }
       continue
     }
 
     if (route === 'group_consensus') {
       const text = compactText(item.content, 240)
-      if (text) ops.push({ stream: 'groupFact', authority: 'mention', fact: makeFact({ text, tags: item.tags, refs: item.refs, authority: 'mention', confidence, at, eventAt }) })
+      if (text) ops.push({ stream: 'groupFact', authority: 'mention', fact: makeFact({ text, tags: item.tags, refs, authority: 'mention', confidence, at, eventAt }) })
       continue
     }
   }
@@ -83,11 +97,13 @@ const SYSTEM_PROMPT = `你是群聊长期记忆抽取器。对每条真实用户
 - targetQQ: explicit_teaching 中"A 是 @某人"的某人 QQ（纯数字）
 - content: self_statement(非别名)/user_preference/group_consensus 的事实文本
 - tags: 可选轻量标签数组（如 职业/关系/群规/梗/偏好）
+- refs: 该事实涉及的其他人 QQ 数组(纯数字),如"我和@QQ:123是同事"→refs:["123"];无则省略
 - confidence: 0~1
 - eventInDays: 时间相关事实可附（整数，相对今天的天数，未来为正、过去为负，如"下周考试"约 7、"昨天面试"为 -1）；无明确时间则省略
 规则：
 - 工具结果/系统提示/机器人回复/纯语气词 -> route=ordinary_chat（会被丢弃）。
-- 只有"本人在说自己"才用 self_statement；指认他人用 explicit_teaching。
+- 只有"本人在说自己"才用 self_statement；指认他人用 explicit_teaching。提到他人(同事/朋友/对手等)时把其 QQ 填入 refs。
+- group_consensus 涉及具体某些人时，同样把相关人的 QQ 填入 refs。
 - 普通闲聊/临时请求 -> ordinary_chat。
 - 无可抽取内容时输出 []。`
 
@@ -101,16 +117,28 @@ export class MemoryExtractor {
     return Boolean(c.memoryAiUrl && c.memoryAiApikey)
   }
 
+  // 可被测试覆写。加 AbortSignal.timeout（§0.5）+ 调用计数/耗时打点（§0.3/P1-4）；
+  // 失败只 inc fail + logger.warn 状态码，绝不记 prompt/fact 全文（隐私）。
   async _callChat(messages, maxTokens = 800) {
     const c = this.config.memoryAiConfig || {}
-    const res = await fetch(c.memoryAiUrl, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${c.memoryAiApikey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: c.memoryAiModel || 'gpt-4o-mini', messages, temperature: 0.2, max_tokens: maxTokens })
-    })
-    if (!res.ok) throw new Error(`记忆 AI 请求失败：${res.status}`)
-    const data = await res.json()
-    return data?.choices?.[0]?.message?.content?.trim() || '[]'
+    const startedAt = Date.now()
+    try {
+      const res = await fetch(c.memoryAiUrl, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${c.memoryAiApikey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: c.memoryAiModel || 'gpt-4o-mini', messages, temperature: 0.2, max_tokens: maxTokens }),
+        signal: AbortSignal.timeout(CHAT_TIMEOUT_MS)
+      })
+      if (!res.ok) throw new Error(`记忆 AI 请求失败：${res.status}`)
+      const data = await res.json()
+      memStats.inc('llm.extract.call')
+      memStats.observe('llm.extract.ms', Date.now() - startedAt)
+      return data?.choices?.[0]?.message?.content?.trim() || '[]'
+    } catch (e) {
+      memStats.inc('llm.extract.fail')
+      globalThis.logger?.warn?.(`[memory] extract LLM 调用失败：${e?.message || e}`)
+      throw e
+    }
   }
 
   // 返回 parseAndRoute 的 ops 数组

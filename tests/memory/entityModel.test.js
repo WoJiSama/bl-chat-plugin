@@ -1,7 +1,8 @@
 // tests/memory/entityModel.test.js
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { makeEntity, makeAlias, makeFact, slimEntityDoc } from '../../utils/memory/entityModel.js'
+import { makeEntity, makeAlias, makeFact, slimEntityDoc, factShortId } from '../../utils/memory/entityModel.js'
+import { createHash } from 'node:crypto'
 
 test('makeAlias produces slim shape, no bloat fields', () => {
   const a = makeAlias({ text: 'Maela', authority: 'teaching', confidence: 0.9, by: ['1','1'], at: 100 })
@@ -59,6 +60,21 @@ test('makeEntity normalizes qq to string|null and defaults arrays', () => {
   assert.deepEqual(e.facts, [])
   const e2 = makeEntity({})
   assert.equal(e2.qq, null)
+})
+
+test('factShortId returns 8-char sha256 prefix and is stable for same text', () => {
+  const id = factShortId('在上海工作')
+  assert.equal(id.length, 8)
+  assert.match(id, /^[0-9a-f]{8}$/)
+  assert.equal(id, factShortId('在上海工作')) // 稳定：同文本恒定
+  assert.equal(id, createHash('sha256').update('在上海工作').digest('hex').slice(0, 8))
+})
+
+test('factShortId differs for different text and handles empty/nullish', () => {
+  assert.notEqual(factShortId('A'), factShortId('B'))
+  assert.equal(factShortId(''), createHash('sha256').update('').digest('hex').slice(0, 8))
+  assert.equal(factShortId(undefined), factShortId('')) // nullish -> '' 处理一致
+  assert.equal(factShortId(null), factShortId(''))
 })
 
 test('slimEntityDoc strips legacy/transient fields from loaded data', () => {

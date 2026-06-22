@@ -117,3 +117,24 @@ test('buildContextualPrompt hard-truncates to promptMaxChars', () => {
   const p = buildContextualPrompt({ speakerEntity, config: { promptMaxChars: 80 } })
   assert.ok(p.length <= 80)
 })
+
+// §0.4：entity 段消费 MM 传入的"已排序好的 facts"，按既定顺序渲染，不再自己重排。
+test('buildContextualPrompt renders speaker facts in the given (pre-sorted) order', () => {
+  const speakerEntity = {
+    qq: '1', canonicalName: null, aliases: [], facts: [
+      fact('第一条', { authority: 'self', confidence: 0.5 }),
+      fact('第二条', { authority: 'self', confidence: 0.9 }) // 置信度更高但排在后 → 不应被前移
+    ]
+  }
+  const p = buildContextualPrompt({ speakerEntity, config: {} })
+  assert.ok(p.indexOf('第一条') < p.indexOf('第二条')) // 保持传入顺序
+})
+
+// §0.4：entity 段按 promptMaxEntityFacts 截断（向后兼容：给到全量时仍受上限保护）。
+test('buildContextualPrompt caps entity facts at promptMaxEntityFacts', () => {
+  const facts = Array.from({ length: 10 }, (_, i) => fact(`事实${i}`, { authority: 'self', confidence: 0.9 }))
+  const speakerEntity = { qq: '1', canonicalName: null, aliases: [], facts }
+  const p = buildContextualPrompt({ speakerEntity, config: { promptMaxEntityFacts: 3, promptMaxChars: 9999 } })
+  assert.ok(p.includes('事实0') && p.includes('事实1') && p.includes('事实2'))
+  assert.ok(!p.includes('事实3'))
+})

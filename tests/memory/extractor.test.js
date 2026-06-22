@@ -95,3 +95,35 @@ test('eventAt stays null when eventInDays absent or non-finite', () => {
   assert.equal(ops[0].fact.eventAt, null)
   assert.equal(ops[1].fact.eventAt, null)
 })
+
+test('refs filtered to pure-number strings on self_statement entity fact', () => {
+  const ops = parseAndRoute([
+    { route: 'self_statement', content: '我和他是同事', refs: ['123', 456], confidence: 0.9 }
+  ], ctx)
+  assert.equal(ops[0].stream, 'entityFact')
+  assert.deepEqual(ops[0].fact.refs, ['123', '456'])
+})
+
+test('refs drops non-numeric and hallucinated values, dedupes', () => {
+  const ops = parseAndRoute([
+    { route: 'self_statement', content: '提到一堆人', refs: ['123', 'abc', '@456', '12.3', '789', '789', '', null], confidence: 0.9 }
+  ], ctx)
+  assert.deepEqual(ops[0].fact.refs, ['123', '789'])
+})
+
+test('refs on group_consensus group fact filtered to pure numbers', () => {
+  const ops = parseAndRoute([
+    { route: 'group_consensus', content: '群里都说他俩闹掰了', refs: ['111', 'qq222', '333'], confidence: 0.8 }
+  ], ctx)
+  assert.equal(ops[0].stream, 'groupFact')
+  assert.deepEqual(ops[0].fact.refs, ['111', '333'])
+})
+
+test('refs absent or non-array yields empty refs', () => {
+  const ops = parseAndRoute([
+    { route: 'self_statement', content: '没提别人', confidence: 0.9 },
+    { route: 'user_preference', content: '喜欢安静', refs: 'not-an-array', confidence: 0.8 }
+  ], ctx)
+  assert.deepEqual(ops[0].fact.refs, [])
+  assert.deepEqual(ops[1].fact.refs, [])
+})

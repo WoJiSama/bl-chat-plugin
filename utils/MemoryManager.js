@@ -2,14 +2,15 @@
 import { RedisStore } from './memory/redisStore.js'
 import { MemoryExtractor } from './memory/extractor.js'
 import { upsertAlias, resolveAlias, listAliasesForQQ } from './memory/aliasRegistry.js'
-import { makeEntity, makeFact, slimGroupFacts } from './memory/entityModel.js'
+import { makeEntity, makeFact, slimGroupFacts, factShortId } from './memory/entityModel.js'
 import { resolveClaim } from './memory/conflictResolver.js'
 import { classifyBoundary } from './memory/boundary.js'
 import { buildAliasPrompt, buildEntityPrompt, buildGroupFactsPrompt, buildContextualPrompt } from './memory/retriever.js'
 import { resolveMentions } from './memory/mentionResolver.js'
 import { Embeddings, cosineSimilarity } from './memory/embeddings.js'
 import { Reflector } from './memory/reflector.js'
-import { clamp, compactText } from './memory/constants.js'
+import { clamp, compactText, AUTHORITY_RANK } from './memory/constants.js'
+import { memStats } from './memory/stats.js'
 
 const DAY_MS = 86400000
 
@@ -24,6 +25,7 @@ const DEFAULT_CONFIG = {
   groupExtractMinIntervalMinutes: 10,
   groupExtractMaxBatchMessages: 12,
   promptMaxGroupFacts: 6,
+  promptMaxEntityFacts: 6,
   promptMaxChars: 1200,
   memoryAiConfig: null,
   embeddingAiConfig: null,
@@ -51,6 +53,10 @@ export class MemoryManager {
     this.groupBuffers = new Map()
     this.lastGroupExtractAt = new Map()
     this.scopeQueues = new Map()
+    // §0.2 opt-out 进程内缓存：groupId -> Set<QQ>。写入侧热路径需同步判断，
+    // 故用缓存避免每条消息都 await 读 meta。adminSetUserMemoryEnabled 写 meta 时同步刷新；
+    // 首次遇到未知群时惰性后台预热。
+    this.optedOutCache = new Map()
   }
 
   setAiConfig(aiConfig) {
@@ -208,7 +214,11 @@ export class MemoryManager {
   _maybeReflect(groupId, targets) {
     if (!targets || !this.reflector.canUse()) return
     this.enqueueGroup(groupId, () => this._runReflection(groupId, targets))
-      .catch(err => globalThis.logger?.error?.(`[Memory] 反思失败 group=${groupId}: ${err?.message || err}`))
+      .catch(err => {
+        globalThis.logger?.warn?.(`[Memory] 反思失败 group=${groupId}: ${err?.message || err}`)
+        // 反思任务已释放锁，可安全另起 enqueue 记失败计数。
+        this._recordExtractOutcome(groupId, false)
+      })
   }
 
   // 锁内只做 read → consolidate/reflect → store.save*，绝不再调 applyOps。
@@ -241,6 +251,10 @@ export class MemoryManager {
         await this.store.saveFacts(groupId, this._trimFacts(merged))
       }
     }
+
+    // §P0-3 反思成功（锁内同步写 meta，避免另起 enqueue）：刷新 lastExtractAt、清零 failureCount。
+    const fresh = await this.store.getMeta(groupId)
+    await this.store.saveMeta(groupId, { ...fresh, lastExtractAt: nowMs(), failureCount: 0 })
   }
 
   _trimEntities(entities) {
@@ -290,13 +304,23 @@ export class MemoryManager {
       max: this.config.recallMaxMentionedEntities
     })
 
-    const speakerEntity = entities[speaker] || null
-    const mentionedEntities = mentionedQQs.map(qq => entities[qq]).filter(Boolean)
+    // §0.2 读取侧 opt-out：speaker 在 optedOut → 不注入其自身记忆（speakerEntity 视为 null）。
+    // 被提及人不受影响（opt-out 只关"对我的记忆"）。
+    const optedOut = new Set((meta.optedOut || []).map(String))
+    const rawSpeakerEntity = optedOut.has(speaker) ? null : (entities[speaker] || null)
+    const rawMentionedEntities = mentionedQQs.map(qq => entities[qq]).filter(Boolean)
+
+    // §0.4 query embedding 只算一次，实体排序与群事实排序共用，避免重复 embed。
+    const queryEmb = await this._queryEmbedding(query)
+
+    const speakerEntity = this._rankEntityForPrompt(rawSpeakerEntity, query, queryEmb)
+    const mentionedEntities = rawMentionedEntities.map(e => this._rankEntityForPrompt(e, query, queryEmb))
 
     const relevantQQs = new Set([speaker, ...mentionedQQs])
     const refsFacts = this._collectRefsFacts(entities, relevantQQs)
-    const groupFacts = await this._rankGroupFacts(facts, query)
-    const pendingFacts = this._collectPendingFacts([speakerEntity, ...mentionedEntities], now)
+    const groupFacts = this._rankGroupFacts(facts, queryEmb)
+    // pending 用未截断的原始实体 facts（回扣窗口与排序无关），避免被实体排序截断漏掉。
+    const pendingFacts = this._collectPendingFacts([rawSpeakerEntity, ...rawMentionedEntities], now)
 
     return buildContextualPrompt({
       speakerEntity,
@@ -308,6 +332,77 @@ export class MemoryManager {
       query,
       config: this.config
     })
+  }
+
+  // §0.4 query 向量：embeddings 可用且 query 非空时算一次，否则 null。失败/未启用 → null。
+  async _queryEmbedding(query) {
+    if (!this.embeddings.canUse() || !String(query || '').trim()) return null
+    const emb = await this.embeddings.embed(query)
+    return Array.isArray(emb) ? emb : null
+  }
+
+  // 把某实体的 active facts 用 _rankEntityFacts 预排序+截断后，返回带新 facts 的浅拷贝实体。
+  // 实体为空则原样返回（保持 null）。retriever 只消费这份已排序好的 facts。
+  _rankEntityForPrompt(entity, query, queryEmb) {
+    if (!entity) return entity
+    const ranked = this._rankEntityFacts(entity.facts, query, queryEmb)
+    return { ...entity, facts: ranked }
+  }
+
+  // §0.4 实体事实排序：
+  // - queryEmb 且 facts 有 embedding → 按 cosine 降序；否则按 confidence desc, at desc。
+  // - 身份锚点保护：当存在"严格高于其余所有事实"的最高 authority 事实时，强制把它提到最前
+  //   （避免语义排序把身份/config 事实挤掉）。authority 全相同时不锚定，保留纯语义/置信度顺序。
+  // - 取前 config.promptMaxEntityFacts（默认 6）。
+  _rankEntityFacts(facts, query, queryEmb) {
+    const active = (facts || []).filter(f => f && !f.superseded && f.text)
+    if (!active.length) return []
+
+    const useEmbedding = Array.isArray(queryEmb) && active.some(f => Array.isArray(f.embedding))
+    let sorted
+    if (useEmbedding) {
+      sorted = [...active]
+        .map(f => ({ f, score: Array.isArray(f.embedding) ? cosineSimilarity(queryEmb, f.embedding) : -1 }))
+        .sort((a, b) => b.score - a.score)
+        .map(({ f }) => f)
+    } else {
+      sorted = [...active].sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0) || (b.at ?? 0) - (a.at ?? 0))
+    }
+
+    // 身份锚点：仅在最高 authority 严格高于其余所有事实时置顶。
+    const anchor = this._identityAnchorFact(active)
+    if (anchor) {
+      sorted = [anchor, ...sorted.filter(f => f !== anchor)]
+    }
+
+    const limit = Number.isFinite(this.config.promptMaxEntityFacts) ? this.config.promptMaxEntityFacts : 6
+    return sorted.slice(0, Math.max(0, limit))
+  }
+
+  // 身份锚点：当且仅当存在唯一最高 authority 层级（严格高于次高层级）时，返回该层级中最强的一条；
+  // 否则返回 null（authority 全相同 → 不锚定，纯语义/置信度排序）。
+  _identityAnchorFact(facts) {
+    const top = this._highestAuthorityFact(facts)
+    if (!top) return null
+    const topRank = AUTHORITY_RANK[top.authority] ?? 0
+    const hasLower = facts.some(f => (AUTHORITY_RANK[f.authority] ?? 0) < topRank)
+    return hasLower ? top : null
+  }
+
+  // 取一组 facts 中 authority 最高的一条（并列时取 confidence 更高、其次 at 更新者）。
+  _highestAuthorityFact(facts) {
+    let best = null
+    let bestRank = -1
+    for (const f of facts) {
+      const rank = AUTHORITY_RANK[f.authority] ?? 0
+      if (rank > bestRank) { best = f; bestRank = rank; continue }
+      if (rank === bestRank && best) {
+        if ((f.confidence ?? 0) > (best.confidence ?? 0) || ((f.confidence ?? 0) === (best.confidence ?? 0) && (f.at ?? 0) > (best.at ?? 0))) {
+          best = f
+        }
+      }
+    }
+    return best
   }
 
   // 遍历所有实体的 facts，收集 refs 命中说话人/被提及人的活跃 fact（排除目标实体自身的 fact）。
@@ -323,11 +418,10 @@ export class MemoryManager {
     return out
   }
 
-  // 群事实排序：embeddings 可用且有 query → cosine(queryEmb, fact.embedding) 排序取前 N；否则交给 retriever 现有排序。
-  async _rankGroupFacts(facts, query) {
+  // 群事实排序：queryEmb 存在（§0.4 复用同一 query 向量）→ cosine(queryEmb, fact.embedding) 排序取前 N；
+  // 否则原样返回活跃 facts，交给 retriever 现有排序。
+  _rankGroupFacts(facts, queryEmb) {
     const active = (facts || []).filter(f => f && !f.superseded && f.text)
-    if (!this.embeddings.canUse() || !query.trim()) return active
-    const queryEmb = await this.embeddings.embed(query)
     if (!Array.isArray(queryEmb)) return active
     const limit = Number.isFinite(this.config.promptMaxGroupFacts) ? this.config.promptMaxGroupFacts : 6
     return [...active]
@@ -404,7 +498,17 @@ export class MemoryManager {
   // 避免每条消息都打一次 LLM。
   extractAndSaveMemories(groupId, userId, userMessage, _botReply = '', meta = {}) {
     if (!this.config.enabled) return { queued: false }
-    if (classifyBoundary(userMessage).verdict === 'drop') return { queued: false, reason: 'boundary' }
+
+    // §0.2 写入侧 opt-out：用户在 optedOut → 不缓冲不抽取（隐私）。同步查缓存，惰性预热。
+    if (this._isOptedOut(groupId, userId)) {
+      memStats.inc('extract.user.optedOut')
+      return { queued: false, reason: 'opted-out' }
+    }
+
+    if (classifyBoundary(userMessage).verdict === 'drop') {
+      memStats.inc('extract.boundary.drop')
+      return { queued: false, reason: 'boundary' }
+    }
 
     const key = `${groupId}:${userId}`
     const buf = this.userBuffers.get(key) || { groupId, userId, messages: [], timer: null }
@@ -427,7 +531,27 @@ export class MemoryManager {
       // 防抖关闭 → 退化为即时抽取
       return this._flushUserBuffer(key)
     }
+    memStats.inc('extract.user.buffered')
     return { queued: true, buffered: buf.messages.length }
+  }
+
+  // §0.2 同步判断用户是否 opt-out（读进程内缓存）。未知群 → 视为未 opt-out，并惰性后台预热缓存。
+  _isOptedOut(groupId, userId) {
+    const cached = this.optedOutCache.get(String(groupId))
+    if (cached) return cached.has(String(userId))
+    this._warmOptedOutCache(groupId)
+    return false
+  }
+
+  // 后台读 meta.optedOut 填充缓存（fire-and-forget；失败静默）。
+  _warmOptedOutCache(groupId) {
+    if (this.optedOutCache.has(String(groupId))) return
+    // 先占位空集合，避免并发重复预热。
+    this.optedOutCache.set(String(groupId), new Set())
+    Promise.resolve()
+      .then(() => this.store.getMeta(groupId))
+      .then(meta => this.optedOutCache.set(String(groupId), new Set((meta.optedOut || []).map(String))))
+      .catch(() => {})
   }
 
   async _flushUserBuffer(key) {
@@ -435,14 +559,36 @@ export class MemoryManager {
     if (!buf || !buf.messages.length) return { written: 0 }
     this.userBuffers.delete(key)
     if (buf.timer) clearTimeout(buf.timer)
+    memStats.inc('extract.user.flushed')
     // 抽取在锁外,applyOps 自行加锁(避免同 key 嵌套 enqueue 死锁)。
-    const ops = await this.extractor.extract({
-      groupId: buf.groupId,
-      speakerQQ: String(buf.userId),
-      messages: buf.messages.map(content => ({ content })),
-      at: nowMs()
-    })
-    return this.applyOps(buf.groupId, ops)
+    let ops
+    try {
+      ops = await this.extractor.extract({
+        groupId: buf.groupId,
+        speakerQQ: String(buf.userId),
+        messages: buf.messages.map(content => ({ content })),
+        at: nowMs()
+      })
+    } catch (e) {
+      globalThis.logger?.warn?.(`[Memory] 用户记忆抽取失败 group=${buf.groupId}: ${e?.message || e}`)
+      this._recordExtractOutcome(buf.groupId, false)
+      return { written: 0, error: true }
+    }
+    const result = await this.applyOps(buf.groupId, ops)
+    this._recordExtractOutcome(buf.groupId, true)
+    return result
+  }
+
+  // §P0-3 在抽取/反思成功或失败后更新 meta.lastExtractAt/failureCount（经 enqueueGroup 串行）。
+  // 成功 → lastExtractAt=now, failureCount=0；失败 → failureCount++。fire-and-forget，失败静默。
+  _recordExtractOutcome(groupId, ok) {
+    this.enqueueGroup(groupId, async () => {
+      const meta = await this.store.getMeta(groupId)
+      const next = ok
+        ? { ...meta, lastExtractAt: nowMs(), failureCount: 0 }
+        : { ...meta, failureCount: (Number(meta.failureCount) || 0) + 1 }
+      await this.store.saveMeta(groupId, next)
+    }).catch(() => {})
   }
 
   // 群记忆抽取:最小间隔节流。距上次该群抽取不足 groupExtractMinIntervalMinutes 则跳过,
@@ -452,7 +598,10 @@ export class MemoryManager {
 
     const intervalMs = Math.max(0, Number(this.config.groupExtractMinIntervalMinutes) || 0) * 60000
     const last = this.lastGroupExtractAt.get(groupId) || 0
-    if (intervalMs > 0 && nowMs() - last < intervalMs) return { queued: false, reason: 'throttled' }
+    if (intervalMs > 0 && nowMs() - last < intervalMs) {
+      memStats.inc('extract.group.throttled')
+      return { queued: false, reason: 'throttled' }
+    }
 
     const messages = chatHistory
       .filter(m => classifyBoundary(m.content).verdict === 'candidate')
@@ -460,44 +609,99 @@ export class MemoryManager {
     if (!messages.length) return { queued: false, reason: 'no-candidate' }
 
     this.lastGroupExtractAt.set(groupId, nowMs())
+    memStats.inc('extract.group.run')
     // 抽取在锁外,applyOps 自行加锁。
-    const ops = await this.extractor.extract({ groupId, speakerQQ: '', messages, at: nowMs() })
+    let ops
+    try {
+      ops = await this.extractor.extract({ groupId, speakerQQ: '', messages, at: nowMs() })
+    } catch (e) {
+      globalThis.logger?.warn?.(`[Memory] 群记忆抽取失败 group=${groupId}: ${e?.message || e}`)
+      this._recordExtractOutcome(groupId, false)
+      return { written: 0, error: true }
+    }
     // 群抽取只接受 groupFact / alias（teaching），过滤掉需要 speaker 的 self/preference
     const safe = ops.filter(op => op.stream === 'groupFact' || (op.stream === 'alias' && op.authority === 'teaching'))
-    return this.applyOps(groupId, safe)
+    const result = await this.applyOps(groupId, safe)
+    this._recordExtractOutcome(groupId, true)
+    return result
   }
 
   // ---- admin 命令（保留返回契约）----
+  // §P0-3 返回真实字段（去掉不存在的 importanceThreshold/lastAttemptAt 等）。
   async adminStatus({ groupId, userId } = {}) {
     const meta = await this.store.getMeta(groupId)
     const entities = await this.store.getEntities(groupId)
     const facts = await this.store.getFacts(groupId)
     const aliasDoc = await this.store.getAlias(groupId)
     const userEntity = userId ? entities[String(userId)] : null
+    const optedOut = userId ? (meta.optedOut || []).map(String).includes(String(userId)) : false
+    const activeUserFacts = userEntity ? (userEntity.facts || []).filter(f => !f.superseded) : []
+    const activeUserAliases = userEntity ? (userEntity.aliases || []).filter(a => !a.superseded) : []
+    const activeGroupFacts = facts.filter(f => !f.superseded)
     return {
       enabled: this.config.enabled,
-      user: userEntity ? { disabled: meta.disabled, factCount: (userEntity.facts || []).length, aliasCount: (userEntity.aliases || []).length } : null,
-      group: { disabled: meta.disabled, entityCount: Object.keys(entities).length, factCount: facts.length, aliasCount: Object.keys(aliasDoc).length },
-      config: { maxEntitiesPerGroup: this.config.maxEntitiesPerGroup, maxFactsPerGroup: this.config.maxFactsPerGroup, saveStrictness: this.config.saveStrictness }
+      user: userEntity
+        ? { factCount: activeUserFacts.length, aliasCount: activeUserAliases.length, optedOut }
+        : { factCount: 0, aliasCount: 0, optedOut },
+      group: {
+        entityCount: Object.keys(entities).length,
+        factCount: activeGroupFacts.length,
+        aliasCount: Object.keys(aliasDoc).length,
+        disabled: meta.disabled,
+        lastExtractAt: Number(meta.lastExtractAt) || 0,
+        failureCount: Number(meta.failureCount) || 0
+      },
+      config: {
+        saveStrictness: this.config.saveStrictness,
+        semanticRecallEnabled: this.config.semanticRecallEnabled,
+        proactiveCallback: this.config.proactiveCallback,
+        maxEntitiesPerGroup: this.config.maxEntitiesPerGroup,
+        maxFactsPerGroup: this.config.maxFactsPerGroup
+      }
     }
   }
 
+  // §P0-3 query 真过滤：text 含 query 或任一 tag 含 query；空 query → 不过滤。过滤后再截断。
   async adminListMemories({ scope = 'user', groupId, userId = null, query = '', limit = 30 } = {}) {
     const entities = await this.store.getEntities(groupId)
     if (scope === 'user') {
       const e = entities[String(userId)]
-      const facts = e ? (e.facts || []).filter(f => !f.superseded) : []
+      const all = e ? (e.facts || []).filter(f => !f.superseded) : []
+      const facts = this._filterFactsByQuery(all, query)
       return { facts: facts.slice(0, limit), total: facts.length, entity: e || null }
     }
-    const facts = (await this.store.getFacts(groupId)).filter(f => !f.superseded)
+    const all = (await this.store.getFacts(groupId)).filter(f => !f.superseded)
+    const facts = this._filterFactsByQuery(all, query)
     const aliasDoc = await this.store.getAlias(groupId)
     return { facts: facts.slice(0, limit), total: facts.length, aliases: Object.entries(aliasDoc).map(([k, v]) => ({ alias: v.display || k, qq: v.qq })) }
   }
 
+  // text.includes(query) || (tags||[]).some(t=>t.includes(query))；query 空白 → 原样返回。
+  _filterFactsByQuery(facts, query) {
+    const q = String(query || '').trim()
+    if (!q) return facts
+    return facts.filter(f => String(f.text || '').includes(q) || (f.tags || []).some(t => String(t).includes(q)))
+  }
+
   async adminDeleteMemory({ scope = null, groupId, userId = null, id } = {}) {
-    // id 形如 "alias:<别名>" 或 "fact:<群事实文本前缀>" 或 "<QQ>#<别名>"
+    // id 形如 "my:<shortid>"（软删自己事实）/ "alias:<别名>" / "fact:<群事实文本前缀>"
     if (!id) return { deleted: false, reason: 'missing-id' }
     return this.enqueueGroup(groupId, async () => {
+      // §P0-3 my:<shortid> —— 在当前 userId 的 entity.facts 里软删 factShortId 命中的活跃事实。
+      if (id.startsWith('my:')) {
+        const shortId = id.slice('my:'.length).trim()
+        if (!userId) return { deleted: false, reason: 'missing-user' }
+        const entities = await this.store.getEntities(groupId)
+        const entity = entities[String(userId)]
+        if (!entity) return { deleted: false, reason: 'not-found' }
+        const idx = (entity.facts || []).findIndex(f => !f.superseded && factShortId(f.text) === shortId)
+        if (idx < 0) return { deleted: false, reason: 'not-found' }
+        const nextFacts = entity.facts.map((f, i) => (i === idx ? { ...f, superseded: true } : f))
+        entities[String(userId)] = { ...entity, facts: nextFacts, updatedAt: nowMs() }
+        await this.store.saveEntities(groupId, entities)
+        return { deleted: true, scope: 'my', id: shortId }
+      }
+
       const aliasDoc = await this.store.getAlias(groupId)
       if (id.startsWith('alias:')) {
         const key = id.slice('alias:'.length).trim()
@@ -516,7 +720,22 @@ export class MemoryManager {
     return { cleared: n, groupId }
   }
 
-  async adminSetUserMemoryEnabled() { return { enabled: true } } // 用户级开关在实体模型下退化为群级
+  // §0.2 per-user opt-out：enabled=false → 把 userId 加入 meta.optedOut；enabled=true → 移除。
+  // 经 enqueueGroup 串行写 meta，并同步刷新进程内 optedOut 缓存（写入侧热路径用）。
+  // 返回 { enabled: <是否在记> }（enabled=true 表示仍在记忆该用户）。
+  async adminSetUserMemoryEnabled({ groupId, userId, enabled } = {}) {
+    const uid = String(userId)
+    return this.enqueueGroup(groupId, async () => {
+      const meta = await this.store.getMeta(groupId)
+      const current = new Set((meta.optedOut || []).map(String))
+      if (enabled) current.delete(uid)
+      else current.add(uid)
+      const optedOut = [...current]
+      await this.store.saveMeta(groupId, { ...meta, optedOut })
+      this.optedOutCache.set(String(groupId), new Set(optedOut))
+      return { enabled: !current.has(uid) }
+    })
+  }
   async adminSetGroupMemoryEnabled({ groupId, enabled }) {
     const meta = await this.store.getMeta(groupId)
     meta.disabled = !enabled

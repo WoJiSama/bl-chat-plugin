@@ -1,6 +1,7 @@
 // utils/memory/reflector.js
 import { authorityRank, clamp, compactText } from './constants.js'
 import { makeFact } from './entityModel.js'
+import { memStats } from './stats.js'
 
 // 反思巩固器：把实体的零散 facts 交给 LLM 合并去冗余解矛盾（consolidateEntity），
 // 并基于群 facts + 最近文本产出高层洞察（reflectGroup）。
@@ -9,6 +10,7 @@ import { makeFact } from './entityModel.js'
 
 const MAX_GROUP_INSIGHTS = 3
 const GROUP_INSIGHT_CONFIDENCE = 0.6
+const CHAT_TIMEOUT_MS = 8000
 
 function extractJsonArray(text) {
   const raw = String(text || '')
@@ -83,16 +85,28 @@ export class Reflector {
   }
 
   // 可被测试覆写。与 extractor 同款 OpenAI 兼容调用。
+  // 加 AbortSignal.timeout（§0.5）+ 调用计数/耗时打点（§0.3/P1-4）；
+  // 失败只 inc fail + logger.warn 状态码，绝不记 prompt/fact 全文（隐私）。
   async _callChat(messages, maxTokens = 800) {
     const c = this.config.memoryAiConfig || {}
-    const res = await fetch(c.memoryAiUrl, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${c.memoryAiApikey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: c.memoryAiModel || 'gpt-4o-mini', messages, temperature: 0.2, max_tokens: maxTokens })
-    })
-    if (!res.ok) throw new Error(`记忆 AI 请求失败：${res.status}`)
-    const data = await res.json()
-    return data?.choices?.[0]?.message?.content?.trim() || '[]'
+    const startedAt = Date.now()
+    try {
+      const res = await fetch(c.memoryAiUrl, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${c.memoryAiApikey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: c.memoryAiModel || 'gpt-4o-mini', messages, temperature: 0.2, max_tokens: maxTokens }),
+        signal: AbortSignal.timeout(CHAT_TIMEOUT_MS)
+      })
+      if (!res.ok) throw new Error(`记忆 AI 请求失败：${res.status}`)
+      const data = await res.json()
+      memStats.inc('llm.reflect.call')
+      memStats.observe('llm.reflect.ms', Date.now() - startedAt)
+      return data?.choices?.[0]?.message?.content?.trim() || '[]'
+    } catch (e) {
+      memStats.inc('llm.reflect.fail')
+      globalThis.logger?.warn?.(`[memory] reflect LLM 调用失败：${e?.message || e}`)
+      throw e
+    }
   }
 
   // entity.facts（排除 origin:'config'）交 LLM 合并去冗余，产出标 origin:'reflection' 的紧凑列表。

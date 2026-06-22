@@ -243,6 +243,7 @@ pluginSettings:
     groupExtractMinIntervalMinutes: 10
     groupExtractMaxBatchMessages: 12
     promptMaxGroupFacts: 6
+    promptMaxEntityFacts: 6
     promptMaxChars: 1200
     semanticRecallEnabled: false
     reflectEntityThreshold: 15

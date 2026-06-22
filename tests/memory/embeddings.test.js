@@ -2,6 +2,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { Embeddings, cosineSimilarity } from '../../utils/memory/embeddings.js'
+import { memStats } from '../../utils/memory/stats.js'
 
 const enabledConfig = {
   semanticRecallEnabled: true,
@@ -99,4 +100,55 @@ test('cosineSimilarity guards bad input', () => {
   assert.equal(cosineSimilarity([], []), 0)
   assert.equal(cosineSimilarity(null, [1]), 0)
   assert.equal(cosineSimilarity([0, 0], [0, 0]), 0)
+})
+
+test('stats: real embed counts embed.miss + embed.ms, cache hit counts embed.hit', async () => {
+  memStats.reset()
+  const e = new Embeddings(enabledConfig)
+  e._callEmbed = async () => [0.1, 0.2]
+
+  await e.embed('北京') // 实调 → miss
+  await e.embed('北京') // 缓存 → hit
+
+  const { counters, timings } = memStats.snapshot()
+  assert.equal(counters['embed.miss'], 1)
+  assert.equal(counters['embed.hit'], 1)
+  assert.equal(counters['embed.fail'], undefined)
+  assert.equal(timings['embed.ms'].count, 1)
+})
+
+test('stats: _callEmbed throw counts embed.fail and logs only status/textLen', async () => {
+  memStats.reset()
+  const secret = '机密内容不应入日志'
+  const warnings = []
+  const prevLogger = globalThis.logger
+  globalThis.logger = { warn: msg => warnings.push(String(msg)) }
+  try {
+    const e = new Embeddings(enabledConfig)
+    e._callEmbed = async () => { throw new Error('embedding API 请求失败：503') }
+    assert.equal(await e.embed(secret), null)
+  } finally {
+    globalThis.logger = prevLogger
+  }
+
+  const { counters } = memStats.snapshot()
+  assert.equal(counters['embed.fail'], 1)
+  assert.equal(counters['embed.miss'], undefined)
+  assert.equal(warnings.length, 1)
+  // 隐私：只记 status/textLen，绝不记文本全文。
+  assert.ok(warnings[0].includes('503'))
+  assert.ok(warnings[0].includes(`textLen=${secret.length}`))
+  assert.ok(!warnings[0].includes(secret))
+})
+
+test('stats: empty/non-array vector counts neither miss nor hit', async () => {
+  memStats.reset()
+  const e = new Embeddings(enabledConfig)
+  e._callEmbed = async () => []
+  assert.equal(await e.embed('a'), null)
+
+  const { counters } = memStats.snapshot()
+  assert.equal(counters['embed.miss'], undefined)
+  assert.equal(counters['embed.hit'], undefined)
+  assert.equal(counters['embed.fail'], undefined)
 })

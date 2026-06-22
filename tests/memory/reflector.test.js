@@ -3,6 +3,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { Reflector } from '../../utils/memory/reflector.js'
 import { makeEntity, makeFact } from '../../utils/memory/entityModel.js'
+import { memStats } from '../../utils/memory/stats.js'
 
 const AI = { memoryAiConfig: { memoryAiUrl: 'u', memoryAiApikey: 'k' } }
 
@@ -155,4 +156,95 @@ test('reflectGroup returns [] when LLM yields no usable items', async () => {
   trackCalls(r, 'no json here')
   const { insights } = await r.reflectGroup({ groupId: 'g1', facts: [], recentTexts: [] })
   assert.deepEqual(insights, [])
+})
+
+// --- _callChat: fetch 超时 + 统计打点（§0.5 / §0.3 / P1-4）---
+
+function stubFetch(impl) {
+  const original = globalThis.fetch
+  globalThis.fetch = impl
+  return () => { globalThis.fetch = original }
+}
+
+function stubLogger() {
+  const original = globalThis.logger
+  const warnings = []
+  globalThis.logger = { warn: msg => warnings.push(msg) }
+  return { warnings, restore: () => { globalThis.logger = original } }
+}
+
+test('_callChat passes AbortSignal.timeout and returns content on success', async () => {
+  memStats.reset()
+  let seenSignal
+  const restore = stubFetch(async (_url, init) => {
+    seenSignal = init.signal
+    return { ok: true, json: async () => ({ choices: [{ message: { content: ' [{"text":"x"}] ' } }] }) }
+  })
+  try {
+    const r = new Reflector(AI)
+    const out = await r._callChat([{ role: 'user', content: 'hi' }])
+    assert.equal(out, '[{"text":"x"}]')
+    assert.ok(seenSignal instanceof AbortSignal, 'fetch must receive an AbortSignal')
+    const snap = memStats.snapshot()
+    assert.equal(snap.counters['llm.reflect.call'], 1)
+    assert.ok(snap.timings['llm.reflect.ms']?.count === 1)
+    assert.equal(snap.counters['llm.reflect.fail'], undefined)
+  } finally {
+    restore()
+  }
+})
+
+test('_callChat counts fail and warns (no fact text) on non-ok response', async () => {
+  memStats.reset()
+  const restore = stubFetch(async () => ({ ok: false, status: 503, json: async () => ({}) }))
+  const log = stubLogger()
+  try {
+    const r = new Reflector(AI)
+    await assert.rejects(() => r._callChat([{ role: 'user', content: 'secret fact text' }]))
+    const snap = memStats.snapshot()
+    assert.equal(snap.counters['llm.reflect.fail'], 1)
+    assert.equal(snap.counters['llm.reflect.call'], undefined)
+    assert.equal(log.warnings.length, 1)
+    assert.ok(!log.warnings[0].includes('secret fact text'), 'warning must not leak prompt/fact text')
+  } finally {
+    log.restore()
+    restore()
+  }
+})
+
+test('_callChat counts fail and warns when fetch aborts (timeout)', async () => {
+  memStats.reset()
+  const restore = stubFetch(async () => {
+    const err = new Error('The operation was aborted')
+    err.name = 'TimeoutError'
+    throw err
+  })
+  const log = stubLogger()
+  try {
+    const r = new Reflector(AI)
+    await assert.rejects(() => r._callChat([{ role: 'user', content: 'hi' }]))
+    const snap = memStats.snapshot()
+    assert.equal(snap.counters['llm.reflect.fail'], 1)
+    assert.equal(log.warnings.length, 1)
+  } finally {
+    log.restore()
+    restore()
+  }
+})
+
+test('consolidateEntity stays silent on _callChat failure but still counts the fail', async () => {
+  memStats.reset()
+  const restore = stubFetch(async () => { throw new Error('boom') })
+  const log = stubLogger()
+  try {
+    const r = new Reflector(AI)
+    const entity = makeEntity({ qq: '1', facts: [makeFact({ text: '在上海', authority: 'self' })] })
+    const out = await r.consolidateEntity(entity)
+    assert.equal(out.changed, false)
+    assert.equal(out.facts.length, 1)
+    assert.equal(memStats.snapshot().counters['llm.reflect.fail'], 1)
+  } finally {
+    log.restore()
+    restore()
+  }
 })

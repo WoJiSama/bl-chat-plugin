@@ -7,7 +7,7 @@ function safeParse(raw, fallback) {
   try { return JSON.parse(raw) } catch { return fallback }
 }
 
-const DEFAULT_META = { disabled: false, lastExtractAt: 0, nextRetryAt: 0, failureCount: 0 }
+const DEFAULT_META = { disabled: false, optedOut: [], lastExtractAt: 0, nextRetryAt: 0, failureCount: 0 }
 
 export class RedisStore {
   // 注入 redis 以便单测；生产默认用全局 redis
