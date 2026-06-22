@@ -15,6 +15,8 @@ import { localToolRegistry } from "../utils/LocalToolRegistry.js"
 import { getRedBagType, isExclusiveForUser } from "../utils/redBagUtils.js"
 import { pluginBridge } from "../utils/pluginBridge.js"
 import { personProfileInjector } from "../utils/PersonProfileInjector.js"
+import { memStats } from "../utils/memory/stats.js"
+import { factShortId } from "../utils/memory/entityModel.js"
 import fs from "fs"
 import YAML from "yaml"
 import path from "path"
@@ -36,8 +38,13 @@ const RED_BAG_CONFIG = {
 
 const redBagCooldowns = new Map() // 红包冷却记录: key: groupId, value: lastGrabTime
 
+// 清空群记忆二次确认（P0-1）：进程内 pending，key: `${groupId}_${userId}`, value: 过期时间戳。
+const clearGroupMemoryPending = new Map()
+const CLEAR_GROUP_MEMORY_CONFIRM_TTL_MS = 30000
+
 // 终态工具：本轮调用后不再请求 LLM 续话（工具的执行结果本身即为最终输出）
 const TERMINAL_TOOL_NAMES = new Set(['sendLocalEmojiTool', 'waitTool', 'bananaTool', 'googleImageEditTool'])
+const BACKGROUND_TERMINAL_TOOL_NAMES = new Set(['bananaTool', 'googleImageEditTool'])
 
 const activeDedupeToolRuns = new Map()
 const taskStatusCache = new Map()
@@ -134,6 +141,9 @@ const IMAGE_GENERATION_PATTERNS = [
   /(?:图片|图|画面|插画).{0,10}(?:告诉|回答|表达|表示|说明|形容|描述|展示|呈现)(?:我|一下|出来|吧|呀|嘛|呢)?/i,
   /(画|绘制|生成).{0,8}(一|1)?(只|个|位|张|幅)?.{0,32}(猫|猫咪|狗|狗狗|动物|角色|人物|少女|男孩|女孩|头像|立绘|风景|场景|照片|照)/i
 ]
+const CONTEXTUAL_DRAW_REFERENCE_PATTERN =
+  /(?:根据|按照|按|照着|参考|用|拿|以|把|将).{0,18}(?:这个|这段|这句|上面|前面|刚才|刚刚|引用|回复|对话|内容|描述|设定|场景|它)|(?:这个|这段|这句|上面|前面|刚才|刚刚|引用|回复|对话|内容).{0,24}(?:画|绘制|生成|出图|做成|画成|连环画|漫画|分镜|组图|小剧场)/i
+const COMIC_DRAW_PATTERN = /(连环画|漫画|四格|多格|分镜|组图|小剧场|一组)/i
 const IMAGE_ANALYSIS_PATTERNS = [
   /(图|图片|照片|截图|表情|头像).{0,16}(是什么|是啥|有啥|有什么|啥意思|什么意思|怎么看|看得出|看出来|识别|分析|描述|讲讲|说说)/i,
   /(看看|看下|看一下|帮我看|帮我看看|告诉我|识别一下|分析一下|描述一下).{0,18}(图|图片|照片|截图|表情|头像|里面|里边|上面|内容)/i,
@@ -939,6 +949,31 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+// 记忆上下文 prompt 热路径超时上限（P1-3）：记忆故障不拖垮回复，超时/异常退化为 ''。
+const CONTEXTUAL_MEMORY_PROMPT_TIMEOUT_MS = 1500
+
+/**
+ * 热路径超时隔离（P1-3）：把记忆 prompt 调用包进 Promise.race，
+ * 超时或异常都退化为 ''，让回复照常进行。
+ * @param {Promise<string>} promise 记忆 prompt 调用
+ * @returns {Promise<string>}
+ */
+async function withContextualMemoryTimeout(promise) {
+  let timer = null
+  const timeout = new Promise(resolve => {
+    timer = setTimeout(() => resolve(''), CONTEXTUAL_MEMORY_PROMPT_TIMEOUT_MS)
+  })
+  try {
+    const result = await Promise.race([promise, timeout])
+    return typeof result === 'string' ? result : ''
+  } catch (error) {
+    globalThis.logger?.warn?.(`[记忆] 上下文 prompt 获取失败，降级为空: ${error?.message || error}`)
+    return ''
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 function getOrCreateGroupLimiter(limitersMap, groupId, concurrency) {
   const entry = limitersMap.get(groupId)
   if (entry && entry.concurrency === concurrency) {
@@ -1020,6 +1055,26 @@ function isImageGenerationRequest(text = "") {
   return matchesAnyPattern(content, IMAGE_GENERATION_PATTERNS)
 }
 
+function hasContextualDrawReference(text = "") {
+  return CONTEXTUAL_DRAW_REFERENCE_PATTERN.test(normalizeIntentText(text))
+}
+
+function compactDrawPromptText(text = "", maxLength = 3800) {
+  return String(text || "")
+    .replace(/\[CQ:[^\]]+\]/g, " ")
+    .replace(/\s+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim()
+    .slice(0, maxLength)
+}
+
+function normalizeForContainment(text = "") {
+  return normalizeIntentText(text)
+    .replace(/[^\p{L}\p{N}\u4e00-\u9fa5]+/gu, "")
+    .toLowerCase()
+}
+
 function isImageAnalysisRequest(text = "") {
   const content = normalizeIntentText(text)
   if (isImageGenerationRequest(content)) return false
@@ -1071,12 +1126,12 @@ function containsInternalStatusLeak(text = "") {
 function buildInternalStatusSafeReply(toolName = "", session = {}) {
   const text = [session?.rawArgs, session?.userContent].filter(Boolean).join("\n")
   if (toolName === "bananaTool" || isImageGenerationRequest(text)) {
-    return "我刚刚试了一下，但这次画面没有弄好，就先不发出来啦…有点不好意思。你换个描述的话，我再认真帮你试一次。"
+    return "我刚刚画到一半就不对劲了，不拿出来丢人。你换个说法，我再认真画一次。"
   }
   if (toolName === "googleImageAnalysisTool" || isImageAnalysisRequest(text)) {
-    return "我刚刚认真看了一下，但这次没看清楚，怕乱说就先不硬讲了…你重新发一下图，我再帮你看好不好？"
+    return "我刚刚盯着看了半天还是没看明白，怕我乱说。你重新发一下图，我再好好看。"
   }
-  return "我刚刚试了一下，但这次没有处理好，怕乱说就先不硬答了。"
+  return "我刚刚试了一下，但这次没接住，硬装会更丢人。你再说一遍，我重新来。"
 }
 
 function shouldInjectGroupContext(text = "") {
@@ -1326,6 +1381,7 @@ export class ExamplePlugin extends plugin {
       rule: [
         { reg: "^#tool\\s*(.*)", fnc: "handleTool" },
         { reg: "^#记忆状态$", fnc: "memoryStatus" },
+        { reg: "^#记忆统计$", fnc: "memoryStats" },
         { reg: "^#我的记忆$", fnc: "listMyMemory" },
         { reg: "^#群记忆$", fnc: "listGroupMemory" },
         { reg: "^#搜索记忆\\s+[\\s\\S]+$", fnc: "searchMemory" },
@@ -2429,7 +2485,7 @@ export class ExamplePlugin extends plugin {
 
   shouldReleaseSmartLockForLongTask(e = {}) {
     const text = String(e?.msg || "")
-    return isImageGenerationRequest(text)
+    return isImageGenerationRequest(text) || isImageCompositionEditRequest(text)
   }
 
   releaseSmartInFlight(state, e) {
@@ -3013,6 +3069,15 @@ ${specialSignalsBlock}
 
   buildDrawTaskStatusReply(status) {
     const queued = status?.status === "queued"
+    const isEdit = status?.toolName === "googleImageEditTool"
+    if (isEdit) {
+      const replies = [
+        "在改在改，我没卡住。修图这东西出来得慢一点，我盯着呢，改完会直接发出来。",
+        "没有忘啦，我正在改那张图。它现在还没吐结果，我等它出来就发。",
+        "我在弄那张图呢，不是装死。等它改完我会直接丢出来给你看。"
+      ]
+      return replies[Math.floor(Math.random() * replies.length)]
+    }
     const replies = queued
       ? [
           "没有忘啦，我记着你的图呢。现在前面还有图在画，我这边排着队，轮到你的时候会继续画，画完会@你。",
@@ -3029,10 +3094,14 @@ ${specialSignalsBlock}
 
   async handleActiveDrawStatusQuestion(e, text = "") {
     if (!isDrawTaskStatusInquiry(text)) return false
-    const status = await this.getCurrentUserToolTaskStatus(e.group_id, e.user_id, "bananaTool")
+    const statuses = await Promise.all([
+      this.getCurrentUserToolTaskStatus(e.group_id, e.user_id, "bananaTool"),
+      this.getCurrentUserToolTaskStatus(e.group_id, e.user_id, "googleImageEditTool")
+    ])
+    const status = statuses.find(Boolean)
     if (!status) return false
 
-    logger.info(`[活跃任务] 命中画图进度追问 group=${e.group_id} user=${e.user_id} status=${status.status}`)
+    logger.info(`[活跃任务] 命中图片任务进度追问 group=${e.group_id} user=${e.user_id} tool=${status.toolName} status=${status.status}`)
     await e.reply(this.buildDrawTaskStatusReply(status))
     return true
   }
@@ -3409,6 +3478,7 @@ ${specialSignalsBlock}
         if (reply) {
           const quotedSender = reply.sender
           let quotedMsg = ""
+          let forwardPromptText = ""
           if (reply.message && Array.isArray(reply.message)) {
             quotedMsg = reply.message
               .filter(m => m.type === "text")
@@ -3456,7 +3526,8 @@ ${specialSignalsBlock}
                   if (text) lines.push(`${name}: ${text}`)
                 }
                 if (lines.length > 0) {
-                  forwardContent = `[转发记录内容:\n${lines.join("\n")}\n]`
+                  forwardPromptText = lines.join("\n")
+                  forwardContent = `[转发记录内容:\n${forwardPromptText}\n]`
                 }
               }
             } catch (err) {
@@ -3522,6 +3593,22 @@ ${specialSignalsBlock}
             const quotedDescription = parts.length > 0 ? parts.join("，以及") : "一条消息"
 
             quoteContent = `[回复 ${quotedNickname}${quotedMessageId}的消息: ${quotedDescription}] `
+            if (e) {
+              const promptParts = []
+              if (quotedMsg) promptParts.push(quotedMsg)
+              if (forwardPromptText) promptParts.push(forwardPromptText)
+              e._quotedPromptContext = {
+                senderName: quotedNickname,
+                messageId: reply.message_id ? String(reply.message_id) : "",
+                text: compactDrawPromptText(promptParts.join("\n"), 2600),
+                mediaSummary: [
+                  hasQuotedImage ? `${quotedImages.length}张图片` : "",
+                  hasQuotedVideo ? "一段视频" : "",
+                  hasQuotedRecord ? "一段语音" : "",
+                  hasQuotedFile ? `文件${fileNames.length ? `: ${fileNames.join(", ")}` : ""}` : ""
+                ].filter(Boolean).join("，")
+              }
+            }
           }
         }
       } catch (error) {
@@ -4057,7 +4144,9 @@ ${recentHistory || '(无)'}
           ? await this.emotionManager.getEmotionPromptForGroup(groupId)
           : ''
         const memoryPrompt = this.config.memorySystem?.enabled
-          ? await this.memoryManager.getContextualMemoryPrompt(groupId, userId, e.msg || "", Date.now())
+          ? await withContextualMemoryTimeout(
+              this.memoryManager.getContextualMemoryPrompt(groupId, userId, e.msg || "", Date.now())
+            )
           : ''
         const expressionPrompt = this.config.expressionLearning?.enabled
           ? await this.expressionLearner.getExpressionPromptForGroup(groupId)
@@ -4245,7 +4334,7 @@ ${mcpPrompts}
             })
           : null
         const semanticToolCall = semanticDecision?.toolName
-          ? this.buildToolCallFromDecision(semanticDecision, { images, args, msg, currentIntentText })
+          ? this.buildToolCallFromDecision(semanticDecision, { e, images, args, msg, currentIntentText, userContent })
           : null
         if (toolChoice === "auto" && semanticToolCall) {
           session.tools = semanticToolCall.tools
@@ -4283,7 +4372,7 @@ ${mcpPrompts}
           if (session.tools?.length) {
             toolChoice = { type: "function", function: { name: "bananaTool" } }
             forcedToolCall = this.buildForcedToolCall("bananaTool", {
-              prompt: args || msg || "",
+              prompt: this.buildImageGenerationPrompt({ e, args, msg, currentIntentText, userContent }),
               images
             })
             logger.info(`[工具选择] group=${groupId} 强制使用 bananaTool 处理生图请求`)
@@ -4347,10 +4436,12 @@ ${mcpPrompts}
           await this.processToolCalls(message, e, session, session.groupUserMessages, atQq, senderRole)
         } else if (message.content) {
           const missingToolCall = this.buildMissingToolCommitmentCall(message.content, {
+            e,
             args,
             msg,
             images,
-            currentIntentText
+            currentIntentText,
+            userContent
           })
           if (missingToolCall) {
             session.tools = missingToolCall.tools
@@ -4481,16 +4572,26 @@ ${mcpPrompts}
 
   getFriendlyFailureMessage(toolName = "", context = {}) {
     if (toolName === "bananaTool") {
-      return "我刚刚试了一下，感觉画得乱七八糟的，就先不发出来了…有点不好意思。你要不要换个描述，我再认真试一次？"
+      const kind = this.getToolFailureKind(context?.error || context?.failedResult || "")
+      const replies = {
+        timeout: "我等到都快趴桌上了，它还是没出来…先欠你这张。你再叫我一次，我重画。",
+        empty_image: "我刚刚画出来的像一张空气，我才不拿这个糊弄你。你再发一次，我重新画。",
+        safety: "唔，我已经把太直白的地方往含蓄里改了，但这版还是没过。你换成更软一点的小剧场说法，我再画。",
+        rate_limit: "现在抢画笔的人太多了，我挤不进去…你等一小会儿再叫我，我再冲。",
+        auth: "我这边画笔突然不听话了，怎么戳都没反应。你先别急，我得让主人看一眼。",
+        send: "我刚刚像是画出来了，但发出去的时候摔了一跤…你再叫我一次，我重新发。",
+        upstream: "我画到一半那边突然抽风了，没给我完整图。你再发一次，我重来。"
+      }
+      return replies[kind] || "我刚刚画崩了，不拿出来丢人…你换个说法，我再认真画一次。"
     }
     if (toolName === "googleImageAnalysisTool") {
-      return "我刚刚认真看了一下，但这次没看清楚，怕乱说就先不硬讲了…你重新发一下图，我再帮你看好不好？"
+      return "我刚刚认真看了，但这张我没看明白，硬讲就是瞎编。你重新发一下，我再好好看。"
     }
     if (toolName === "googleImageEditTool") {
-      return "我刚刚试着改了一下，但这版改出来不太对劲，就先不发出来了…你换个说法或者重新发图，我再认真帮你弄一次。"
+      return "我刚刚改了一下，越改越怪，就不拿出来吓你了。你换个说法或者重新发图，我再弄。"
     }
     if (toolName === "searchInformationTool" || toolName === "webParserTool" || toolName === "githubRepoTool") {
-      return "刚刚查的时候卡了一下，我不想拿不确定的东西糊弄你…你再问我一次，我重新看。"
+      return "我刚刚翻到一半卡住了，不想拿半吊子的东西糊弄你。你再问一次，我重新看。"
     }
 
     const userText = [
@@ -4502,6 +4603,73 @@ ${mcpPrompts}
       return "刚刚一下子没接住，像是卡了一下…我在的。你刚才是叫我吗？"
     }
     return "刚刚卡了一下，我没太接住你那句…你再说一遍嘛。"
+  }
+
+  getToolFailureKind(error = "") {
+    const text = typeof error === "string" ? error : JSON.stringify(error || "")
+    if (!text.trim()) return "unknown"
+    if (/超时|timeout|timed?\s*out|AbortError|超过\s*\d+\s*秒|没有返回/i.test(text)) return "timeout"
+    if (/未接收到有效图片|未接收到有效图像|no\s*(valid\s*)?image|empty|invalid image response|没有拿到.*图/i.test(text)) return "empty_image"
+    if (/safety|sensitive|policy|content.?filter|risk|blocked|敏感|审核|安全|违规|不合规|拦截/i.test(text)) return "safety"
+    if (/429|rate.?limit|quota|too many requests|insufficient|余额|限流|频率/i.test(text)) return "rate_limit"
+    if (/401|403|unauthorized|forbidden|permission|invalid.?key|api.?key|token|鉴权|权限|密钥/i.test(text)) return "auth"
+    if (/发送|send|reply|segment|download|链接已过期|无效的图片|无效的图片下载链接|图片下载/i.test(text)) return "send"
+    if (/\b5\d\d\b|bad gateway|gateway|service unavailable|temporar(?:y|ily)|上游|接口/i.test(text)) return "upstream"
+    return "unknown"
+  }
+
+  getQuotedPromptContextText(e = {}, userContent = "") {
+    const context = e?._quotedPromptContext
+    const lines = []
+    if (context?.text) {
+      if (context.senderName) lines.push(`引用自 ${context.senderName}:`)
+      lines.push(context.text)
+    }
+    if (context?.mediaSummary) lines.push(`引用消息还包含：${context.mediaSummary}`)
+    if (lines.length) return compactDrawPromptText(lines.join("\n"), 2800)
+
+    const content = String(userContent || "")
+    const match = content.match(/\[回复\s+(.{1,80}?)的消息[:：]\s*([\s\S]*?)\]\s*(?:@|在群里说[:：]|$)/)
+    if (!match) return ""
+    return compactDrawPromptText(`引用自 ${match[1]}:\n${match[2]}`, 2800)
+  }
+
+  buildImageGenerationPrompt(context = {}) {
+    const basePrompt = compactDrawPromptText(
+      context.prompt || context.args || context.msg || context.currentIntentText || "",
+      1800
+    )
+    const quotedContext = this.getQuotedPromptContextText(context.e, context.userContent)
+    const referenceText = [
+      context.prompt,
+      context.args,
+      context.msg,
+      context.currentIntentText,
+      context.userContent
+    ].filter(Boolean).join("\n")
+
+    if (!quotedContext || !hasContextualDrawReference(referenceText)) {
+      return basePrompt
+    }
+
+    const normalizedPrompt = normalizeForContainment(basePrompt)
+    const normalizedQuote = normalizeForContainment(quotedContext)
+    if (normalizedQuote && normalizedPrompt.includes(normalizedQuote.slice(0, 24))) {
+      return basePrompt
+    }
+
+    const lines = [
+      `用户当前绘图要求：${basePrompt || "根据引用内容生成图片"}`,
+      "必须根据下面被引用的原文内容作画，不能另起无关题材，不能把故事改成数学课堂、随机校园段子或和原文无关的剧情。",
+      "如果引用内容里有不适合直接入画的细节，要改成含蓄的脸红、靠近、躲闪、撒娇、牵手、拥抱、温柔安抚等全年龄画面；不要丢掉人物关系、对话顺序和主要台词含义。",
+      `被引用内容：\n${quotedContext}`
+    ]
+
+    if (COMIC_DRAW_PATTERN.test(referenceText)) {
+      lines.push("画面形式：一张图内做成多格连环画/漫画分镜；每格围绕引用对话推进，保留主要人物、关系、情绪转折和关键台词，只允许少量压缩台词，不要胡编新剧情。")
+    }
+
+    return compactDrawPromptText(lines.join("\n\n"), 3900)
   }
 
 	  buildForcedToolCall(toolName, params = {}) {
@@ -4537,7 +4705,14 @@ ${mcpPrompts}
     const query = String(decision.query || decision.prompt || context.args || context.msg || context.currentIntentText || "").trim()
 
     if (intent === "image_generate") {
-      return { intent, toolName: "bananaTool", params: { prompt, images } }
+      return {
+        intent,
+        toolName: "bananaTool",
+        params: {
+          prompt: this.buildImageGenerationPrompt({ ...context, prompt }),
+          images
+        }
+      }
     }
     if (intent === "image_edit") {
       return { intent, toolName: "googleImageEditTool", params: { images, prompt: prompt || "请按用户要求编辑这张图片。" } }
@@ -4717,7 +4892,13 @@ ${mcpPrompts}
         toolName: "bananaTool",
         reason: "commitment_image_generation",
         params: {
-          prompt: args || msg || currentIntentText,
+          prompt: this.buildImageGenerationPrompt({
+            e: context.e,
+            args,
+            msg,
+            currentIntentText,
+            userContent: context.userContent
+          }),
           images
         }
       })
@@ -4781,6 +4962,69 @@ ${mcpPrompts}
     return JSON.stringify(result ?? "")
   }
 
+  getToolCallName(toolCall = {}) {
+    return toolCall?.function?.name || ""
+  }
+
+  shouldRunTerminalToolsInBackground(toolCalls = []) {
+    return toolCalls.length > 0 &&
+      toolCalls.every(toolCall => BACKGROUND_TERMINAL_TOOL_NAMES.has(this.getToolCallName(toolCall)))
+  }
+
+  startBackgroundTerminalToolCalls(toolCalls = [], e, session, senderRole, currentMessages = []) {
+    e._longRunningToolTask = true
+    session.taskDedupeToolTouched = true
+    session.backgroundTerminalToolTouched = true
+
+    for (const toolCall of toolCalls) {
+      const toolName = this.getToolCallName(toolCall)
+      const taskPromise = this.runToolCall(toolCall, e, session, senderRole)
+      taskPromise
+        .then(async result => {
+          if (!result) return
+          session.toolName = result.toolName
+          session.toolResults = [result]
+          if (!this.isToolResultError(result.result)) {
+            logger.info(`[工具调用] 后台终态工具 ${result.toolName} 执行完成`)
+            return
+          }
+
+          logger.warn(`[工具调用] 后台终态工具 ${result.toolName} 执行失败，发送拟人化失败提示 result=${String(result.result || "").slice(0, 240)}`)
+          await this.handleTextResponse(
+            this.getFriendlyFailureMessage(result.toolName, {
+              e,
+              session,
+              stage: "background_terminal_tool_failed",
+              error: result.result
+            }),
+            e,
+            session,
+            currentMessages,
+            result.toolName
+          )
+        })
+        .catch(async error => {
+          logger.error(`[工具调用] 后台终态工具 ${toolName || "unknown"} 异常:`, error)
+          try {
+            await this.handleTextResponse(
+              this.getFriendlyFailureMessage(toolName, {
+                e,
+                session,
+                stage: "background_terminal_tool_exception",
+                error: error.message
+              }),
+              e,
+              session,
+              currentMessages,
+              toolName
+            )
+          } catch (replyError) {
+            logger.error(`[工具调用] 后台终态工具失败提示发送异常:`, replyError)
+          }
+        })
+    }
+  }
+
   async runToolCall(toolCall, e, session, senderRole) {
     const { type, function: funcData } = toolCall
     if (type !== "function" || !funcData?.name) return null
@@ -4817,6 +5061,14 @@ ${mcpPrompts}
     }
     if (toolName === "bananaTool") {
       if (!params.prompt && session.rawArgs) params.prompt = session.rawArgs
+      params.prompt = this.buildImageGenerationPrompt({
+        e,
+        prompt: params.prompt,
+        args: session.rawArgs,
+        msg: e?.msg,
+        currentIntentText: [session.rawArgs, e?.msg].filter(Boolean).join("\n"),
+        userContent: session.userContent
+      }) || params.prompt
       if ((!Array.isArray(params.images) || !params.images.length) && session.images?.length) {
         params.images = session.images
       }
@@ -4934,6 +5186,13 @@ ${mcpPrompts}
         ...currentMessage,
         tool_calls: toolCalls
       }))
+
+      if (this.shouldRunTerminalToolsInBackground(toolCalls)) {
+        session.toolName = this.getToolCallName(toolCalls[toolCalls.length - 1])
+        this.startBackgroundTerminalToolCalls(toolCalls, e, session, senderRole, currentMessages)
+        logger.info(`[工具调用] 后台启动终态工具(${toolCalls.map(toolCall => this.getToolCallName(toolCall)).join(',')})，主流程立即释放`)
+        return
+      }
 
       const validResults = (await Promise.all(
         toolCalls.map(toolCall => this.runToolCall(toolCall, e, session, senderRole))
@@ -5623,18 +5882,29 @@ ${mcpPrompts}
     return new Date(timestamp).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })
   }
 
+  // authority → 中文来源（新模型权威分级 config>self>teaching>mention）
+  memoryAuthoritySource(authority) {
+    const map = { config: "配置", self: "本人说", teaching: "群里教", mention: "提及推断" }
+    return map[authority] || "提及推断"
+  }
+
+  // 对齐新 fact 模型（entityModel.makeFact）：factShortId(text) 作 id、tags[0] 作分类、
+  // text、confidence、authority 中文来源；eventAt 存在附"(待回扣)"。
   formatMemoryFactLines(facts = []) {
-    return facts.map(fact => {
-      const shortId = String(fact.id).slice(0, 8)
-      const score = Number(fact.score ?? fact.importance ?? 0).toFixed(2)
-      return `ID:${shortId} [${fact.category}] ${fact.content} (${score})`
+    return (Array.isArray(facts) ? facts : []).map(fact => {
+      const shortId = factShortId(fact.text)
+      const category = (Array.isArray(fact.tags) && fact.tags[0]) || "未分类"
+      const confidence = Number(fact.confidence ?? 0).toFixed(2)
+      const source = this.memoryAuthoritySource(fact.authority)
+      const pending = fact.eventAt ? " (待回扣)" : ""
+      return `ID:${shortId} [${category}] ${fact.text}（来源:${source}，置信度:${confidence}）${pending}`
     })
   }
 
   formatMemoryFacts(title, facts = []) {
     if (!facts.length) return `${title}\n暂无记忆`
     const lines = this.formatMemoryFactLines(facts)
-    return `${title}\n${lines.join("\n")}\n\n删除单条记忆可发送：#删除记忆 alias:<别名> 或 #删除记忆 fact:<群事实前缀>`.slice(0, 4500)
+    return `${title}\n${lines.join("\n")}\n\n删除单条记忆可发送：#删除记忆 my:<id>（删自己事实）或 #删除记忆 alias:<别名> / #删除记忆 fact:<群事实前缀>`.slice(0, 4500)
   }
 
   async replyMemoryForward(e, title, sections = []) {
@@ -5655,7 +5925,7 @@ ${mcpPrompts}
       }
     }
 
-    msgs.push("删除单条记忆可发送：#删除记忆 alias:<别名> 或 #删除记忆 fact:<群事实前缀>")
+    msgs.push("删除单条记忆可发送：#删除记忆 my:<id>（删自己事实）或 #删除记忆 alias:<别名> / #删除记忆 fact:<群事实前缀>")
 
     try {
       const forwardMsg = await common.makeForwardMsg(e, msgs, title)
@@ -5689,18 +5959,57 @@ ${mcpPrompts}
         groupId: e.group_id,
         userId: e.user_id
       })
+      const user = status.user || {}
+      const group = status.group || {}
+      const config = status.config || {}
       const lines = [
         `记忆系统：${status.enabled ? "开启" : "关闭"}`,
-        `用户记忆：${status.user?.disabled ? "已禁用" : "启用"}，${status.user?.factCount || 0} 条`,
-        `群记忆：${status.group?.disabled ? "已禁用" : "启用"}，${status.group?.factCount || 0} 条`,
-        `用户上次抽取：${this.formatMemoryTime(status.user?.lastAttemptAt)}`,
-        `群上次抽取：${this.formatMemoryTime(status.group?.lastAttemptAt)}`,
-        `阈值：${status.config.importanceThreshold}，语义召回：${status.config.semanticRecallEnabled ? "开启" : "关闭"}`
+        `我的记忆：${user.optedOut ? "已禁用" : "启用"}，事实 ${user.factCount || 0} 条，别名 ${user.aliasCount || 0} 条`,
+        `群记忆：${group.disabled ? "已禁用" : "启用"}，实体 ${group.entityCount || 0} 个，群事实 ${group.factCount || 0} 条，别名 ${group.aliasCount || 0} 条`,
+        `群上次抽取：${this.formatMemoryTime(group.lastExtractAt)}，连续失败 ${group.failureCount || 0} 次`,
+        `保存严格度：${config.saveStrictness ?? "默认"}，语义召回：${config.semanticRecallEnabled ? "开启" : "关闭"}，主动回扣：${config.proactiveCallback ? "开启" : "关闭"}`,
+        `上限：实体/群 ${config.maxEntitiesPerGroup ?? "-"}，事实/群 ${config.maxFactsPerGroup ?? "-"}`
       ]
       await e.reply(lines.join("\n"))
     } catch (error) {
       logger.error("[记忆管理] 读取记忆状态失败:", error)
       await e.reply("记忆状态读取失败，请看日志")
+    }
+    return true
+  }
+
+  // P1-4：进程内调用计数/耗时统计（主人或群管理员可见）。重启归零。
+  async memoryStats(e) {
+    if (!this.isGroupMemoryAdmin(e)) {
+      await e.reply("只有群主、管理员或主人可以查看记忆统计")
+      return true
+    }
+    try {
+      const { counters, timings } = memStats.snapshot()
+      const num = key => Number(counters[key] || 0)
+
+      const embedTotal = num("embed.hit") + num("embed.miss")
+      const embedHitRate = embedTotal ? ((num("embed.hit") / embedTotal) * 100).toFixed(1) : "0.0"
+      const extractFailRate = num("llm.extract.call")
+        ? ((num("llm.extract.fail") / num("llm.extract.call")) * 100).toFixed(1)
+        : "0.0"
+      const reflectFailRate = num("llm.reflect.call")
+        ? ((num("llm.reflect.fail") / num("llm.reflect.call")) * 100).toFixed(1)
+        : "0.0"
+      const avgMs = key => (timings[key]?.avgMs ? timings[key].avgMs.toFixed(0) : "0")
+
+      const lines = [
+        "记忆系统调用统计（进程内，重启归零）",
+        `抽取(用户)：flush ${num("extract.user.flushed")} / buffer ${num("extract.user.buffered")} / opt-out ${num("extract.user.optedOut")}`,
+        `抽取(群)：run ${num("extract.group.run")} / 节流 ${num("extract.group.throttled")} / 边界丢弃 ${num("extract.boundary.drop")}`,
+        `LLM 抽取：调用 ${num("llm.extract.call")}，失败 ${num("llm.extract.fail")}（${extractFailRate}%），平均 ${avgMs("llm.extract.ms")}ms`,
+        `LLM 反思：调用 ${num("llm.reflect.call")}，失败 ${num("llm.reflect.fail")}（${reflectFailRate}%），平均 ${avgMs("llm.reflect.ms")}ms`,
+        `Embedding：命中 ${num("embed.hit")} / 未命中 ${num("embed.miss")}（命中率 ${embedHitRate}%），失败 ${num("embed.fail")}，平均 ${avgMs("embed.ms")}ms`
+      ]
+      await e.reply(lines.join("\n"))
+    } catch (error) {
+      logger.error("[记忆管理] 读取记忆统计失败:", error)
+      await e.reply("记忆统计读取失败，请看日志")
     }
     return true
   }
@@ -5798,13 +6107,14 @@ ${mcpPrompts}
   }
 
   async clearMyMemory(e) {
+    if (!e.group_id) {
+      await e.reply("请在群聊中使用这个命令")
+      return true
+    }
     try {
-      const result = await this.memoryManager.adminClearMemories({
-        scope: "user",
-        groupId: e.group_id,
-        userId: e.user_id
-      })
-      await e.reply(`已清空我的记忆，共 ${result.cleared} 条`)
+      // P0-1：只删该用户自己的 entity（旧实现误调 adminClearMemories 会清整群）。
+      const result = await this.memoryManager.clearUserMemory(e.group_id, e.user_id)
+      await e.reply(result?.cleared ? "已清空你在本群的记忆" : "你在本群没有可清空的记忆")
     } catch (error) {
       logger.error("[记忆管理] 清空我的记忆失败:", error)
       await e.reply("清空我的记忆失败，请看日志")
@@ -5822,12 +6132,22 @@ ${mcpPrompts}
       return true
     }
 
+    // P0-1 二次确认：首次仅登记 pending（30s 过期），需再发一次同命令才真正清空。
+    const pendingKey = `${e.group_id}_${e.user_id}`
+    const now = Date.now()
+    const expireAt = clearGroupMemoryPending.get(pendingKey)
+    if (!expireAt || expireAt < now) {
+      clearGroupMemoryPending.set(pendingKey, now + CLEAR_GROUP_MEMORY_CONFIRM_TTL_MS)
+      await e.reply("这会清空整群的记忆且不可恢复。请在 30 秒内再发一次 #清空群记忆 确认。")
+      return true
+    }
+    clearGroupMemoryPending.delete(pendingKey)
+
     try {
       const result = await this.memoryManager.adminClearMemories({
-        scope: "group",
         groupId: e.group_id
       })
-      await e.reply(`已清空本群群记忆，共 ${result.cleared} 条`)
+      await e.reply(`已清空本群群记忆，共 ${result.cleared} 项存储键。`)
     } catch (error) {
       logger.error("[记忆管理] 清空群记忆失败:", error)
       await e.reply("清空群记忆失败，请看日志")
@@ -5836,13 +6156,20 @@ ${mcpPrompts}
   }
 
   async disableMyMemory(e) {
+    if (!e.group_id) {
+      await e.reply("请在群聊中使用这个命令")
+      return true
+    }
     try {
-      await this.memoryManager.adminSetUserMemoryEnabled({
+      // P0-2：按真实返回写文案。返回 {enabled:<是否仍在记>}，false 表示已退出记忆。
+      const result = await this.memoryManager.adminSetUserMemoryEnabled({
         groupId: e.group_id,
         userId: e.user_id,
         enabled: false
       })
-      await e.reply("已禁用你的长期记忆")
+      await e.reply(result?.enabled === false
+        ? "已禁用你在本群的长期记忆，之后不再记录你的发言"
+        : "操作未生效，你的记忆仍处于启用状态")
     } catch (error) {
       logger.error("[记忆管理] 禁用我的记忆失败:", error)
       await e.reply("禁用失败，请看日志")
@@ -5851,13 +6178,20 @@ ${mcpPrompts}
   }
 
   async enableMyMemory(e) {
+    if (!e.group_id) {
+      await e.reply("请在群聊中使用这个命令")
+      return true
+    }
     try {
-      await this.memoryManager.adminSetUserMemoryEnabled({
+      // P0-2：返回 {enabled:<是否仍在记>}，true 表示已重新启用记忆。
+      const result = await this.memoryManager.adminSetUserMemoryEnabled({
         groupId: e.group_id,
         userId: e.user_id,
         enabled: true
       })
-      await e.reply("已启用你的长期记忆")
+      await e.reply(result?.enabled
+        ? "已启用你在本群的长期记忆"
+        : "操作未生效，你的记忆仍处于禁用状态")
     } catch (error) {
       logger.error("[记忆管理] 启用我的记忆失败:", error)
       await e.reply("启用失败，请看日志")
