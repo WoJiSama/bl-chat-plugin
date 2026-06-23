@@ -1,18 +1,23 @@
-# 希洛用 bl-chat-plugin 改造版
+# bl-chat-plugin 个人改造版
 
 > 本项目借鉴并基于 [Cat-bl/bl-chat-plugin](https://github.com/Cat-bl/bl-chat-plugin) 做二次改造。
 >
-> 这里不是上游项目的官方文档，也不是通用发行版说明；这个仓库主要记录我在原项目基础上为自己的 TRSS Yunzai + NapCat 环境做了哪些增强、重构和定制。
+> 这里不是上游项目的官方文档，也不是通用发行版说明。这个仓库主要记录我在原项目基础上，为自己的 TRSS Yunzai + NapCat 环境做了哪些重构、增强和定制。
 
 ## 项目定位
 
-这个仓库的目标不是只做一个“能接 AI 的 QQ 机器人插件”，而是把它改造成一个更像群里长期存在的角色：
+上游项目已经提供了 Yunzai 插件结构、OneAPI/工具调用框架、触发模式、本地工具、表情包等基础能力。本仓库的 README 不再重复说明这些原有能力，而是重点说明这个分支实际改动过的部分。
 
-- 能持续跟踪会话，而不是每句话都像新对话。
-- 能记住用户、群共识和称呼关系，但尽量不把工具输出、系统提示、临时噪声写进长期记忆。
-- 能保持“希洛”的说话方式，少一些机器人报错和流程话。
-- 能处理生图、修图、识图、长文本转图、表情包和工具调用，并且在耗时任务期间不把群聊堵住。
-- 配置尽量能在锅巴里调，不要求每次都手改 yaml。
+当前改造重点：
+
+- 重构 Redis 长期记忆存储，不再把聊天内容混在一个大文本里。
+- 用实体、别名、用户事实、群事实、元信息拆分记忆结构。
+- 优化 embedding 语义召回和去重，让相关记忆更容易被取出来。
+- 把记忆抽取、保存、召回、prompt 注入拆成更清晰的管线。
+- 减少工具输出、系统消息、机器人回复、低价值闲聊污染长期记忆。
+- 优化长任务期间的回复体验，避免用户不知道任务是否开始或是否卡住。
+- 整理锅巴配置入口，让记忆相关参数更容易调。
+- 清理仓库中的硬编码敏感信息，改成通过配置或环境变量注入。
 
 当前只按我的环境维护：
 
@@ -25,186 +30,255 @@
 
 ## 和上游的关系
 
-上游 [Cat-bl/bl-chat-plugin](https://github.com/Cat-bl/bl-chat-plugin) 提供了这个插件的主要基础，包括 Yunzai 插件结构、OneAPI/工具调用框架、基础配置和一批本地工具。
-
-本仓库在此基础上继续做了大量个人化改造。README 下面的重点不是复述上游原本已有能力，而是说明这个仓库主要新增、重构或强化了什么。
+上游 [Cat-bl/bl-chat-plugin](https://github.com/Cat-bl/bl-chat-plugin) 是本仓库的基础来源。上游已有能力仍然以原项目为准，本仓库主要是在其基础上继续维护个人化改造。
 
 如果你想找更通用的原版说明，请优先看上游项目。
 
 ## 我主要做了什么
 
-以下内容根据本仓库 git 记录整理，包括 `memory`、`smart`、`TextImageTool`、表情包、锅巴配置、图像工具和提示词相关提交。
+以下内容根据本仓库 git 记录整理，重点覆盖 `memory`、Redis 存储、embedding 召回、上下文注入、记忆配置、图像任务体验和敏感信息清理相关提交。
 
-### 1. 长期记忆系统重构
+### 1. Redis 记忆结构重构
 
-把早期“把聊天内容塞进记忆”的思路，重构成更可控的记忆管线。
+原来的长期记忆更接近“把聊天内容抽取后塞进一段记忆”。现在改成以群为作用域、以实体为中心的结构化 Redis 存储。
 
-主要改造：
+核心 Redis key：
 
-- 新增实体中心的记忆模型，把用户、别名、事实、群共识拆开存。
-- 支持用户记忆和群记忆分层注入 prompt。
-- 支持别名解析、@ 提及解析、同一用户多称呼合并。
-- 支持语义召回，接入 `embeddingAiConfig` 后可以按相似度召回相关记忆。
-- 支持记忆反思和压缩，把重复、过期、冲突信息整理成更稳定的事实。
-- 支持时间信息提取，比如“几天后”“上周”“某天”这类内容可以进入记忆字段。
-- 加入提取防抖、批处理、群记忆最小整理间隔，避免群里刷屏时频繁调用记忆模型。
-- 加入低信号过滤，普通语气词、工具结果、系统提示、机器人输出不进入长期记忆。
-- 管理指令支持查看、搜索、删除、清空、禁用自己的记忆。
-- 增加 fakeRedis 单测和记忆模块测试，避免重构时把记忆写坏。
-
-相关配置块：
-
-- `memorySystem`
-- `memoryAiConfig`
-- `embeddingAiConfig`
-- `personProfileInjection`
-
-### 2. smart 模式和会话追踪
-
-我把触发逻辑拆成 strict / smart 两类，让机器人不只依赖关键词硬触发。
+```text
+ytbot:mem:g:<groupId>:entities
+ytbot:mem:g:<groupId>:alias
+ytbot:mem:g:<groupId>:facts
+ytbot:mem:g:<groupId>:meta
+```
 
 主要改造：
 
-- `strict` 模式：通过 @ 或触发词开启会话追踪，在追踪窗口内继续理解用户是不是还在跟 bot 说话。
-- `smart` 模式：引入 Gate 子代理，按概率和上下文判断是否应该主动接话。
-- 支持 `talkValue` 频率控制，降低每条消息都跑 Gate 的 token 消耗。
-- 支持 FOCUS / FADING / COLD 这类会话焦点状态，避免刚聊完立刻断线，也避免冷群乱插话。
-- 支持 waitTool，让 bot 在 smart 模式下可以“稍后再补一句”，更像真实聊天节奏。
-- 加入 bot 速率硬上限、防刷屏、Deferred Timer、本地预筛。
-- 优化复读、接话、追问、普通闲聊之间的判断。
-- 给工具中的长任务加入状态感知，用户问“好了没”“是不是卡了”时能按任务状态回答。
-
-相关配置块：
-
-- `chatTriggerMode`
-- `smartTrigger`
-- `trackAiConfig`
-- `conversationTracking`
-
-### 3. 希洛人设和最终回复清理
-
-这个仓库重点维护的是“希洛”的群聊表现，不是一个通用助手口吻。
-
-主要改造：
-
-- 系统提示词强化角色边界，避免“我是 AI”“作为助手”这类出戏表达。
-- 对最终回复做清理，去掉伪工具调用、内部状态、CQ 码、流程说明和机器报错。
-- 失败回复改成角色化表达，例如画图失败、审核拦截、上游超时、发送失败时不直接甩 API 错误。
-- 保持“有一点话痨但是又害羞”的风格，不把拟人化简单压缩成短句。
-- 图片生成、修图、识图开始前会先在群里说一句自然的话，避免用户不知道是不是卡住。
-- 长任务放到后台跑，避免生图/修图期间整段会话被阻塞。
+- `entities` 存用户实体、别名、用户事实和事实来源。
+- `alias` 单独存别名到 QQ 的映射，支持同一个人多个称呼。
+- `facts` 单独存群事实、群共识和群内长期状态。
+- `meta` 存群记忆开关、用户 opt-out、抽取失败次数等运行状态。
+- 写入前会做 slim 化，避免旧字段、临时字段、过大的运行时对象继续膨胀 Redis。
+- 旧记忆和新结构隔离，降低历史脏数据污染新召回链路的概率。
 
 相关文件：
 
+- `utils/MemoryManager.js`
+- `utils/memory/redisStore.js`
+- `utils/memory/entityModel.js`
+- `utils/memory/constants.js`
+
+### 2. 记忆分类和写入边界
+
+这次重构的重点不是“代码决定一切”，而是让 AI 负责判断内容类型，代码只负责边界、归一化和安全落库。
+
+抽取结果会被路由成几类：
+
+- `explicit_teaching`：用户明确教机器人记住某个称呼、关系或事实。
+- `self_statement`：用户对自己的稳定描述。
+- `user_preference`：用户偏好、习惯、长期倾向。
+- `group_consensus`：群内共识、长期约定、共同背景。
+- `ordinary_chat`：普通闲聊，不写长期记忆。
+
+代码侧主要做这些事：
+
+- 只接受结构化 JSON 结果，解析失败就放弃写入。
+- 过滤工具结果、系统提示、机器人输出、空消息和低信号文本。
+- refs 只保留纯数字 QQ，避免模型幻觉出无效引用。
+- 群记忆抽取只允许写入群事实或教学型别名，避免把无主语用户事实乱写给别人。
+- 支持用户关闭自己的记忆写入。
+- 支持按群禁用长期记忆。
+
+相关文件：
+
+- `utils/memory/extractor.js`
+- `utils/memory/boundary.js`
+- `utils/memory/conflictResolver.js`
+
+### 3. Embedding 语义召回和去重
+
+`embeddingAiConfig` 现在不仅服务知识库，也可以用于长期记忆的语义召回和近重复合并。
+
+主要改造：
+
+- 用户事实和群事实可以补 embedding。
+- 召回时如果有 query embedding，会优先按语义相似度排序。
+- 没有 embedding 或模型失败时，自动降级为置信度、权限和时间排序。
+- 通过 `semanticDupCosine` 合并语义上高度相近的事实，减少“同一件事写很多遍”。
+- 对 embedding 失败保持静默降级，不影响正常聊天。
+- 增加 embedding 单测，覆盖向量归一化、相似度排序和去重阈值。
+
+相关配置：
+
+```yaml
+memorySystem:
+  semanticRecallEnabled: false
+  semanticDupCosine: 0.92
+
+embeddingAiConfig:
+  embeddingApiUrl: ""
+  embeddingApiKey: ""
+  embeddingModel: ""
+```
+
+相关文件：
+
+- `utils/memory/embeddings.js`
+- `utils/memory/retriever.js`
+- `utils/MemoryManager.js`
+- `tests/memory/embeddings.test.js`
+
+### 4. 上下文记忆注入
+
+记忆不是只负责“存”，还要在回复前把真正相关的内容注入 prompt。
+
+主要改造：
+
+- 回复前读取 speaker 自己的记忆。
+- 解析消息里提到的人，召回被提及对象的相关记忆。
+- 注入群事实和别名提示。
+- 支持 pending/time-sensitive 信息，让“几天后”“上周”“某天”等时间信息能参与上下文。
+- 用 `promptMaxChars`、`promptMaxGroupFacts`、`promptMaxEntityFacts` 控制注入长度。
+- 空记忆不注入，避免污染主 prompt。
+
+相关配置：
+
+```yaml
+memorySystem:
+  promptMaxGroupFacts: 6
+  promptMaxEntityFacts: 6
+  promptMaxChars: 1200
+  recallMaxMentionedEntities: 3
+```
+
+相关文件：
+
+- `utils/memory/mentionResolver.js`
+- `utils/memory/retriever.js`
+- `utils/MemoryManager.js`
 - `apps/test.js`
+
+### 5. 记忆反思和压缩
+
+为了避免 Redis 里长期积累重复、冲突、过期事实，新增了反思整理链路。
+
+主要改造：
+
+- 用户实体事实达到阈值后，可以触发实体级反思。
+- 群事实达到阈值后，可以触发群级反思。
+- 反思产物标记为 `origin: reflection`，和直接抽取的事实区分。
+- `origin: config` 的事实不会被反思覆盖，避免配置锚点被模型改写。
+- 反思失败静默降级，不影响原始记忆写入。
+
+相关配置：
+
+```yaml
+memorySystem:
+  reflectEntityThreshold: 12
+  reflectGroupThreshold: 30
+```
+
+相关文件：
+
+- `utils/memory/reflector.js`
+- `utils/MemoryManager.js`
+- `tests/memory/reflector.test.js`
+
+### 6. 抽取节流、批处理和刷屏保护
+
+群里有人连续刷消息时，记忆系统不能每条都跑一次模型。
+
+主要改造：
+
+- 用户记忆支持 debounce。
+- 用户消息支持攒批后统一抽取。
+- 群记忆支持最小抽取间隔。
+- 群记忆支持最大批处理条数。
+- 抽取失败会记录 failureCount，方便状态诊断。
+- 增加内存队列，避免同一个群的记忆读写并发互相覆盖。
+
+相关配置：
+
+```yaml
+memorySystem:
+  userExtractDebounceSeconds: 8
+  userExtractMaxBatchMessages: 5
+  groupExtractMinIntervalMinutes: 10
+  groupExtractMaxBatchMessages: 12
+```
+
+相关文件：
+
+- `utils/MemoryManager.js`
+- `utils/memory/stats.js`
+- `tests/memory/manager.test.js`
+
+### 7. 记忆管理指令
+
+为了能在群里直接检查和纠错，补齐了记忆管理入口。
+
+常用指令：
+
+```text
+#记忆状态
+#我的记忆
+#群记忆
+#搜索记忆 <关键词>
+#删除记忆 <记忆ID>
+#清空我的记忆
+#清空群记忆
+#禁用我的记忆
+#启用我的记忆
+```
+
+这些指令主要用于：
+
+- 查看当前群记忆是否开启。
+- 看自己的事实和别名。
+- 搜索群事实。
+- 删除错误记忆。
+- 清空当前群的记忆 Redis key。
+- 关闭或恢复自己的记忆写入。
+
+### 8. 图像任务和长文本体验修正
+
+这部分不是上游能力本身的说明，而是围绕实际群聊体验做的修正。
+
+主要改造：
+
+- 生图、修图、识图等长任务开始前先发一条自然确认，避免用户以为没响应。
+- 长任务放到后台执行，减少生成图片时阻塞后续聊天。
+- 图像需求会尽量补足引用消息、近期上下文和指代内容。
+- 对敏感图像需求先做含蓄化、全年龄化表达，再决定是否继续调用工具。
+- 工具失败、审核拦截、上游超时等情况不直接暴露原始 API 报错。
+- 长文本转图支持更适合阅读的羊皮纸样式和正文/口头补充分离。
+
+相关文件：
+
 - `functions/functions_tools/BananaTool.js`
 - `functions/functions_tools/GoogleImageEditTool.js`
 - `functions/functions_tools/GoogleAnalysisTool.js`
-
-### 4. 生图、修图和识图链路
-
-围绕群聊里的真实用法，重点修了“上下文不进图”“承诺画图但没调用工具”“图片任务卡住不说话”等问题。
-
-主要改造：
-
-- 文生图走 `bananaTool`。
-- 图生图 / 修图走 `googleImageEditTool`。
-- 识图 / 截图分析走 `googleImageAnalysisTool`。
-- 生图和修图都支持从引用消息、回复内容、近期相关对话里补上下文。
-- 用户说“把这个画出来”“根据上面的内容画”“把这张改成...”时，会尽量把“这个/上面/刚才”的指代展开。
-- 修图时明确要求保留参考图主体、构图关系和可识别特征，减少跑题。
-- 对敏感或过直白的绘图需求，不是简单拒绝，而是尽量改写成含蓄、全年龄、能过审的表达。
-- 图片生成任务支持队列、去重、后台执行、进度提示和状态查询。
-- 支持火山 Ark / Seedream 这类 OpenAI 兼容或 images endpoint 形式的接入。
-- 图像编辑接口兼容 chat completions 返回图片，也兼容 `/images/edits` form-data 风格。
-
-相关配置块：
-
-- `imageEditAiConfig`
-- `analysisAiConfig`
-- `toolsAiConfig`
-- `oneapi_tools`
-
-### 5. 长文本转图片和羊皮纸样式
-
-为了避免 QQ 长文本刷屏，也为了让截图分析、代码解释这类回复更好看，我强化了 `textImageTool`。
-
-主要改造：
-
-- 普通聊天气泡样式：适合短代码、Markdown、普通长回复。
-- 羊皮纸样式：适合截图分析、学习讲解、代码原因说明、长结构化解答。
-- 羊皮纸支持短、中、长三种尺寸。
-- 中长内容自动生成“先看结论”总览区，首屏更完整。
-- 支持 Markdown 标题、列表、引用、代码块。
-- 代码块支持基础高亮。
-- 能把“正文解答”和“最后一句口头补充”拆开：主体进图，类似“交作业来得及呀”这种聊天味补充留在外面发文字。
-
-相关文件：
-
 - `functions/functions_tools/TextImageTool.js`
 - `apps/test.js`
 
-### 6. 本地表情包系统
-
-我把表情包能力做成了比较完整的本地系统，而不是简单随机发图。
+### 9. 配置整理和敏感信息清理
 
 主要改造：
 
-- 引用图片导入表情包。
-- 支持列表、预览、删除、封禁、解封、重新打标、统计、重载、巡检。
-- 图片本体和元数据分离存储。
-- 支持 VLM 自动打标。
-- 支持 embedding 召回，让文字语境能匹配合适表情。
-- 支持最近发送过滤，减少重复刷同一张图。
-- 支持软限流和发送节奏控制。
-- 支持文件一致性巡检，标记缺文件或补登记孤立文件。
+- 记忆配置集中到 `memorySystem` 和锅巴记忆页。
+- 模型配置继续使用 `memoryAiConfig`、`embeddingAiConfig` 等独立块。
+- 移除仓库里的硬编码第三方 API key、cookie 和 session。
+- 视频分析、ModelScope、小红书等运行时凭据改为配置或环境变量读取。
+- README 只保留配置入口，不写任何真实密钥。
 
-相关配置块：
+相关文件：
 
-- `emojiSystem`
-- `analysisAiConfig`
-- `embeddingAiConfig`
-
-### 7. 知识库和工具体系
-
-在原有工具体系上，我继续补了工具管理、知识库、MCP 和一批本地工具的稳定性。
-
-主要改造：
-
-- 本地知识库支持 embedding 语义检索。
-- 支持批量导入知识文本。
-- 支持 MCP 服务重载、状态查看、工具列表和手动测试。
-- 支持自定义本地工具目录，避免更新时覆盖自己写的工具。
-- 工具调用结果会被清理成自然回复，不直接暴露函数名和内部结构。
-- 工具结果不会进入长期记忆，避免污染画像。
-- 长任务工具支持 `(dedupe)` 防重复调用。
-
-常见工具：
-
-- `bananaTool`：文生图
-- `googleImageEditTool`：修图 / 图生图
-- `googleImageAnalysisTool`：识图 / 截图分析
-- `textImageTool`：文字 / Markdown / 代码转图
-- `searchInformationTool`：联网搜索
-- `webParserTool`：网页解析
-- `reminderTool`：定时提醒
-- `sendLocalEmojiTool`：本地表情包
-- `reactionTool`：贴表情
-- `recallTool`：撤回消息
-- `memberInfoTool`：群成员信息
-- `sendGiftTool`：送礼物
-
-### 8. 锅巴配置和热更新
-
-配置项很多，所以我把大部分配置整理到了锅巴面板里。
-
-主要改造：
-
-- 适配 [Guoba-Plugin](https://github.com/guoba-yunzai/guoba-plugin)。
-- 配置按模块分组：基础设置、权限、触发、会话追踪、AI 核心、记忆、表达学习、知识库、表情包、模型配置、工具等。
-- 保存时尽量保留 yaml 注释。
-- 配置写回后触发热更新，很多设置不用重启。
-- 对 Guoba schema 做过精简，避免无效字段和过时字段干扰。
+- `config_default/message.yaml`
+- `models/Guoba/schemas/memory.js`
+- `models/Guoba/schemas/aiModels.js`
+- `functions/functions_tools/VoiceTool.js`
+- `functions/functions_tools/VideoAnalysisTool.js`
+- `functions/functions_tools/xiaohongshu/config/config.js`
+- `utils/apiClient.js`
 
 ## 快速安装
 
@@ -235,9 +309,9 @@ git clone --depth=1 https://github.com/Cat-bl/bl-chat-plugin plugins/bl-chat-plu
 - `config/message.yaml`
 - `config/mcp-servers.yaml`
 
-## 推荐安装锅巴
+## 推荐使用锅巴配置
 
-本仓库配置项很多，强烈建议用锅巴改配置。
+本仓库配置项较多，建议用锅巴改配置。
 
 在 Yunzai 根目录执行：
 
@@ -304,6 +378,8 @@ pnpm install --filter=guoba-plugin
 
 ### 表情包管理
 
+表情包能力主要来自原有系统，这里只保留常用入口，具体能力以代码和上游文档为准。
+
 ```text
 #表情包导入
 #表情包列表 [页码]
@@ -328,7 +404,7 @@ pluginSettings:
   allowedGroups: []
   chatTriggerMode: strict
   triggerPrefixes:
-    - 希洛
+    - 你的触发词
 ```
 
 ### 模型配置
@@ -336,59 +412,25 @@ pluginSettings:
 常用模型配置块：
 
 ```yaml
-trackAiConfig:        # 会话跟踪 / smart Gate
+trackAiConfig:        # 会话跟踪 / Gate 判断
 toolsAiConfig:        # 工具调用模型
 chatAiConfig:         # 普通聊天模型
 imageEditAiConfig:    # 修图 / 图生图
 analysisAiConfig:     # 识图 / 截图分析
 searchAiConfig:       # 联网搜索总结
-memoryAiConfig:       # 记忆提取
+memoryAiConfig:       # 记忆抽取和反思
 embeddingAiConfig:    # 知识库和语义记忆召回
 ```
-
-### 工具列表
-
-`oneapi_tools` 控制暴露给模型的工具。
-
-执行时间长的工具可以加 `(dedupe)`：
-
-```yaml
-oneapi_tools:
-  - bananaTool(dedupe)
-  - googleImageEditTool(dedupe)
-  - videoAnalysisTool(dedupe)
-  - textImageTool
-  - googleImageAnalysisTool
-  - searchInformationTool
-  - webParserTool
-```
-
-`(dedupe)` 只用于防止同一用户重复触发同一个长任务，模型看到的工具名仍然是不带后缀的原名。
-
-### smart 模式
-
-```yaml
-chatTriggerMode: smart
-smartTrigger:
-  enabled: true
-  talkValue: 0.15
-  waitToolEnabled: true
-```
-
-`talkValue` 控制 Gate 子代理触发频率：
-
-- `1`：每条消息都判断，最敏感，也最耗 token。
-- `0.15`：大约每 7 条消息判断一次，比较折中。
-- `0.1`：大约每 10 条消息判断一次。
-
-smart 模式依赖 `trackAiConfig`。如果没有配置 Gate 模型，bot 基本不会主动接话。
 
 ### 长期记忆
 
 ```yaml
 memorySystem:
   enabled: true
+  saveStrictness: normal
   semanticRecallEnabled: true
+  promptMaxGroupFacts: 6
+  promptMaxEntityFacts: 6
   promptMaxChars: 1200
 ```
 
@@ -420,6 +462,25 @@ analysisAiConfig:
 - 修图 / 图生图：`googleImageEditTool`
 - 看图 / 分析截图：`googleImageAnalysisTool`
 
+### 工具列表
+
+`oneapi_tools` 控制暴露给模型的工具。
+
+执行时间长的工具可以加 `(dedupe)`：
+
+```yaml
+oneapi_tools:
+  - bananaTool(dedupe)
+  - googleImageEditTool(dedupe)
+  - videoAnalysisTool(dedupe)
+  - textImageTool
+  - googleImageAnalysisTool
+  - searchInformationTool
+  - webParserTool
+```
+
+`(dedupe)` 只用于防止同一用户重复触发同一个长任务，模型看到的工具名仍然是不带后缀的原名。
+
 ## 自定义本地工具
 
 不要直接改 `functions/functions_tools` 里的自带工具。自定义工具放这里：
@@ -446,10 +507,10 @@ functions/functions_tools/
   本地工具目录。生图、修图、识图、文字转图、搜索、提醒等都在这里。
 
 utils/MemoryManager.js
-  记忆系统门面，负责提取、保存、召回和 prompt 组装。
+  记忆系统门面，负责提取、保存、召回、反思和 prompt 组装。
 
 utils/memory/
-  记忆重构后的核心模块。
+  记忆重构后的核心模块，包括 Redis 存储、抽取路由、embedding、召回和反思。
 
 models/Guoba/schemas/
   锅巴配置 schema。
@@ -464,8 +525,9 @@ config_default/mcp-servers.yaml
 ## 使用建议
 
 - 先把 `chatAiConfig` 和 `toolsAiConfig` 配好，再开工具。
-- smart 模式一定要配 `trackAiConfig`，否则主动接话会很弱。
-- 记忆系统先用小模型跑稳定，再考虑打开 embedding 语义召回。
+- 长期记忆先配 `memoryAiConfig`，确认抽取稳定后再打开 `semanticRecallEnabled`。
+- `embeddingAiConfig` 优先选稳定、便宜、延迟低的模型；只要召回质量够用，不必一开始就上最贵模型。
+- 群聊量大的群建议调大 `userExtractDebounceSeconds` 和 `groupExtractMinIntervalMinutes`，避免频繁抽取。
 - 生图、修图、识图建议分别配适合的模型，不要所有任务共用一个慢模型。
 - 长任务工具建议加 `(dedupe)`，防止群里连续刷同一个请求。
 - 如果你只想要原版插件，建议直接使用上游 [Cat-bl/bl-chat-plugin](https://github.com/Cat-bl/bl-chat-plugin)。
