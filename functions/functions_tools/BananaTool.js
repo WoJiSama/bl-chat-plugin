@@ -4,6 +4,7 @@ import { dependencies } from "../../dependence/dependencies.js";
 import fs from "fs";
 import YAML from "yaml";
 import path from "path";
+import { pluginBridge } from "../../utils/pluginBridge.js";
 
 const { mimeTypes } = dependencies;
 const DEFAULT_CHAT_IMAGE_URL = 'https://api.openai.com/v1/chat/completions';
@@ -11,15 +12,34 @@ const DEFAULT_IMAGE_GENERATION_URL = 'https://api.openai.com/v1/images/generatio
 const IMAGE_GENERATION_TIMEOUT_MS = 240000;
 const PROMPT_OPTIMIZATION_TIMEOUT_MS = 30000;
 const PROGRESS_MESSAGE_TIMEOUT_MS = 8000;
+const SHORT_PROMPT_OPTIMIZATION_MAX_CHARS = 80;
+const LOCAL_PROMPT_QUALITY_SUFFIX = "画面主体清晰，构图完整，细节丰富，高质量，光影自然";
+const SENSITIVE_IMAGE_PROMPT_PATTERN = /(?:露骨|情色|色情|成人内容|性描写|性暗示|身体部位|敏感内容|少儿不宜|性器官|生殖器|阴茎|阴道|鸡巴|几把|jb|勃起|射精|口交|口了|手淫|自慰|做爱|性交|性爱|性行为|上床|脱下裤子|脱裤子|脱衣服|裸露|裸体|强奸|迷奸|未成年|还小|不满18|18岁以下|养肥了再吃|帮我爽爽|用手帮你解决|伸进上衣|拍向屁股)/i;
+const SAFE_REWRITE_MARKER = "安全改写后的绘图需求";
+const SENSITIVE_PROMPT_REPLACEMENTS = [
+  [/(?:露骨的?)?(?:情色|色情|成人内容|性描写|性暗示|敏感内容|少儿不宜)(?:描写|内容)?/gi, "含蓄的情绪互动"],
+  [/(?:具体)?身体部位|性器官|生殖器|阴茎|阴道|鸡巴|几把|\bjb\b/gi, "亲密距离和害羞反应"],
+  [/勃起|射精|口交|口了|手淫|自慰|做爱|性交|性爱|性行为|上床/gi, "含蓄的亲近氛围"],
+  [/脱下裤子|脱裤子|脱衣服|裸露|裸体/gi, "害羞地整理衣角"],
+  [/强奸|迷奸/gi, "误会解除后的保持距离互动"],
+  [/未成年|还小|不满\s*18|18\s*岁以下/gi, "成年角色的害羞玩笑"],
+  [/养肥了再吃/gi, "以后再慢慢陪你"],
+  [/帮我爽爽/gi, "陪我撒会儿娇"],
+  [/用手帮你解决/gi, "笨拙地安慰你"],
+  [/伸进上衣/gi, "轻轻靠近"],
+  [/拍向屁股/gi, "轻轻拍了拍肩"],
+  [/露骨|敏感/gi, "含蓄"]
+];
 const IMAGE_GENERATION_PROGRESS_MESSAGES = [
-  "嗯嗯，我先把描述整理得清楚一点再画。想把它画得软一点、可爱一点，所以可能会慢一点。",
-  "收到，我会先把你的想法整理好再开始画。等我一下下，我不想随便糊弄你。",
-  "我先琢磨一下怎么描述会更好看…然后就开始画哦，有点怕画歪，但我会认真一点。"
+  "这个画面有点怪可爱的，我先试着画画看…别笑我画歪啊。",
+  "唔，我大概有画面了，先让我折腾一下，画坏了不许立刻笑我。",
+  "这个点子还挺有意思的，我试试能不能画出那种感觉。",
+  "我先画画看，感觉会有点难，但应该能整出个像样的。"
 ];
 const IMAGE_GENERATION_DONE_MESSAGES = [
-  "画好啦，你看看这张顺不顺眼？我尽量把氛围和细节都照顾到了，要是哪里不对我再帮你改。",
-  "这张出来啦。我觉得整体氛围还可以，不过有点紧张…你先看看这版行不行。",
-  "我画好啦，先给你看这一版。要是风格、脸或者细节有哪里跑偏了，你直接跟我说，我再认真改。"
+  "画出来啦，你先看看这版像不像你想的那种感觉。",
+  "这张先给你看，我感觉还行，但细节可能有点跑。",
+  "出来了出来了，我有点紧张，你先看看。"
 ];
 const imageGenerationScopes = new Map();
 
@@ -58,6 +78,7 @@ export class BananaTool extends AbstractTool {
       scopeKey: this.getDrawScopeKey(e),
       requesterName: this.getRequesterDisplayName(e),
       requesterId: e?.user_id || e?.sender?.user_id || "",
+      messageId: e?.message_id || "",
       queuedAt: Date.now(),
       notifyFailure: false,
       skipProgressNotice: false
@@ -69,6 +90,7 @@ export class BananaTool extends AbstractTool {
       job.skipProgressNotice = true;
       queueState.queue.push(job);
       this.logInfo(`[图片队列] 已排队 scope=${job.scopeKey} requester=${job.requesterName} queue=${queueState.queue.length} active=${queueState.activeTask.requesterName}`);
+      await this.updateDrawTaskStatus(job, "queued", `前面正在帮 ${queueState.activeTask.requesterName || "别人"} 画图`);
       await this.replyQueuedDraw(e, queueState);
       return `图片生成已排队，前面还有 ${queueState.queue.length} 个任务`;
     }
@@ -82,8 +104,10 @@ export class BananaTool extends AbstractTool {
       requesterName: job.requesterName,
       requesterId: job.requesterId,
       groupId: job.e?.group_id || "",
+      messageId: job.messageId || "",
       startedAt: Date.now()
     };
+    await this.updateDrawTaskStatus(job, "running", "图片正在生成中");
 
     try {
       const result = await this.performDraw(job.opts, job.e, {
@@ -95,7 +119,41 @@ export class BananaTool extends AbstractTool {
       return result;
     } finally {
       queueState.activeTask = null;
+      await this.clearDrawTaskStatus(job);
       this.runNextQueuedDraw(job.scopeKey);
+    }
+  }
+
+  async updateDrawTaskStatus(job, status, detail = "") {
+    const instance = pluginBridge.instance;
+    if (!instance?.updateUserToolTaskStatus) return;
+    try {
+      await instance.updateUserToolTaskStatus({
+        groupId: job.e?.group_id || "",
+        userId: job.requesterId || job.e?.user_id || job.e?.sender?.user_id || "",
+        messageId: job.messageId || job.e?.message_id || "",
+        toolName: this.name,
+        status,
+        requesterName: job.requesterName || "",
+        detail,
+        scopeKey: job.scopeKey || ""
+      });
+    } catch (error) {
+      this.logWarn(`[图片队列] 同步任务状态失败: ${error.message}`);
+    }
+  }
+
+  async clearDrawTaskStatus(job) {
+    const instance = pluginBridge.instance;
+    if (!instance?.clearUserToolTaskStatus) return;
+    try {
+      await instance.clearUserToolTaskStatus({
+        groupId: job.e?.group_id || "",
+        userId: job.requesterId || job.e?.user_id || job.e?.sender?.user_id || "",
+        toolName: this.name
+      });
+    } catch (error) {
+      this.logWarn(`[图片队列] 清理任务状态失败: ${error.message}`);
     }
   }
 
@@ -121,16 +179,18 @@ export class BananaTool extends AbstractTool {
     // 处理图片
     const images = await normalizeImageUrls(this.normalizeArray(rawImages));
     const imageGenerationConfig = this.resolveImageGenerationConfig(config);
+    const safeInputPrompt = this.sanitizePromptForImageGeneration(prompt);
     if (!options.skipProgressNotice && !images.length && imageGenerationConfig) {
-      const progressMessage = await this.generateProgressMessage(config, prompt, e);
+      const progressMessage = await this.generateProgressMessage(config, safeInputPrompt, e);
       await this.sendProgress(e, progressMessage);
     }
-    const optimizedPrompt = await this.optimizePrompt(config, prompt, { hasReferenceImages: images.length > 0 });
-    const imgurls = await this.buildImageMessages(optimizedPrompt, images);
+    const optimizedPrompt = await this.optimizePrompt(config, safeInputPrompt, { hasReferenceImages: images.length > 0 });
+    const finalPrompt = this.sanitizePromptForImageGeneration(optimizedPrompt);
+    const imgurls = await this.buildImageMessages(finalPrompt, images);
 
     try {
       if (!images.length && imageGenerationConfig) {
-        const generatedImage = await this.generateImage(imageGenerationConfig, optimizedPrompt);
+        const generatedImage = await this.generateImage(imageGenerationConfig, finalPrompt);
         await this.replyImageToRequester(e, generatedImage);
         return '图片生成成功';
       }
@@ -215,7 +275,7 @@ export class BananaTool extends AbstractTool {
   }
 
   getQueuedFailureMessage() {
-    return "我刚刚轮到这张试了一下，但画出来感觉乱糟糟的，就先不发出来了…有点不好意思。你换个说法再叫我一次，我会再认真试试。";
+    return "刚刚轮到这张的时候我画崩了，不拿出来丢人…你换个说法再叫我一次，我重新画。";
   }
 
   isErrorResult(result) {
@@ -227,6 +287,11 @@ export class BananaTool extends AbstractTool {
   logInfo(...args) {
     if (typeof logger !== "undefined" && logger?.info) logger.info(...args);
     else console.info(...args);
+  }
+
+  logWarn(...args) {
+    if (typeof logger !== "undefined" && logger?.warn) logger.warn(...args);
+    else console.warn(...args);
   }
 
   logError(...args) {
@@ -308,6 +373,9 @@ export class BananaTool extends AbstractTool {
   }
 
   async optimizePrompt(config, prompt, options = {}) {
+    const localPrompt = this.buildLocalOptimizedPrompt(prompt, options);
+    if (localPrompt) return localPrompt;
+
     const optimizer = this.resolvePromptOptimizerConfig(config);
     if (!optimizer) return prompt;
 
@@ -330,6 +398,10 @@ export class BananaTool extends AbstractTool {
                 "任务：把用户的口语化绘图需求改写成更适合图像生成模型的完整提示词。",
                 "只输出优化后的提示词，不要解释，不要 Markdown，不要标题。",
                 "必须保留用户明确提出的主体、数量、颜色、动作、关系和风格；不要擅自增加文字、水印、Logo、额外人物或违背用户意图的元素。",
+                "如果原始需求包含“被引用内容”“引用自”“对话原文”等上下文，必须围绕这些原文作画，保留主要人物关系、情绪转折和关键台词，不要改成无关故事。",
+                "如果用户要求连环画、漫画、四格、多格、分镜或组图，要输出每格画面/剧情节点的提示词，剧情必须来自用户给出的对话。",
+                "如果原始需求已经标注为“安全改写后的绘图需求”，必须只基于安全改写后的内容继续扩写，不要还原被改写的细节。",
+                "涉及亲近互动时，统一表达为全年龄的脸红、靠近、躲闪、撒娇、牵手、拥抱、互相吐槽、温柔安抚、道晚安等含蓄情绪互动。",
                 "可以补充构图、镜头、光线、材质、背景、氛围、细节和质量要求。",
                 options.hasReferenceImages
                   ? "如果有参考图片，要写明基于参考图片进行创作，并尽量保留参考图主体/构图/身份特征。"
@@ -360,6 +432,59 @@ export class BananaTool extends AbstractTool {
     }
 
     return prompt;
+  }
+
+  sanitizePromptForImageGeneration(prompt) {
+    const text = String(prompt || "").trim();
+    if (!text) return text;
+    if (text.includes(SAFE_REWRITE_MARKER)) return text;
+    if (!SENSITIVE_IMAGE_PROMPT_PATTERN.test(text)) return text;
+
+    const rewrittenText = this.rewriteSensitivePromptText(text);
+    const safePrompt = [
+      `${SAFE_REWRITE_MARKER}：`,
+      rewrittenText,
+      "",
+      "改编方式：把上面的内容画成全年龄向多格恋爱喜剧漫画，必须沿用原文的人物、称呼、关系、顺序、情绪转折和主要台词含义。",
+      "画面表达：不直接还原被改写的细节，统一转成脸红、靠近、躲闪、撒娇、牵手、拥抱、互相吐槽、温柔安抚、并肩休息等含蓄动作。",
+      "连环画要求：如果用户要求连环画/漫画/分镜，就做成一张图内4到8格；每格围绕原文推进，可以放简短气泡，但台词要保持含蓄自然。",
+      "风格：二次元漫画风，角色外观前后一致，表情丰富，构图清楚，光影自然，画面干净。"
+    ].join(" ");
+
+    this.logWarn(`[图片提示词安全改写] 检测到需模糊处理的绘图内容，已生成安全版 prompt 原始=${text.slice(0, 160)} 改写后=${safePrompt.slice(0, 220)}`);
+    return safePrompt;
+  }
+
+  rewriteSensitivePromptText(text) {
+    let rewritten = String(text || "");
+    for (const [pattern, replacement] of SENSITIVE_PROMPT_REPLACEMENTS) {
+      rewritten = rewritten.replace(pattern, replacement);
+    }
+    return rewritten
+      .replace(/([。！？!?])\s*/g, "$1\n")
+      .replace(/[ \t]{2,}/g, " ")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim()
+      .slice(0, 3200);
+  }
+
+  buildLocalOptimizedPrompt(prompt, options = {}) {
+    if (options.hasReferenceImages) return "";
+
+    const normalizedPrompt = String(prompt || "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!normalizedPrompt) return "";
+    if (Array.from(normalizedPrompt).length > SHORT_PROMPT_OPTIMIZATION_MAX_CHARS) return "";
+
+    const suffixParts = LOCAL_PROMPT_QUALITY_SUFFIX.split("，")
+      .filter(part => part && !normalizedPrompt.includes(part));
+    const optimized = suffixParts.length
+      ? `${normalizedPrompt}，${suffixParts.join("，")}`
+      : normalizedPrompt;
+
+    this.logInfo(`[图片提示词优化] 短prompt跳过AI优化 chars=${Array.from(normalizedPrompt).length} 原始=${normalizedPrompt.slice(0, 120)} 优化后=${optimized.slice(0, 180)}`);
+    return optimized;
   }
 
   cleanOptimizedPrompt(content = "") {
@@ -463,10 +588,11 @@ export class BananaTool extends AbstractTool {
             {
               role: "system",
               content: [
-                "你是QQ群里的少女希洛，正在准备帮群友画图。",
-                "任务：根据用户的绘图需求，生成一句自然、动态、不重复的开场回复，告诉对方你准备开始整理提示词并画图。",
-                "风格：温柔、积极、有点害羞，但不要茶里茶气，不要客服腔。",
-                "要求：只输出一句中文，20到70字；不要 Markdown；不要解释；不要说工具、模型、API、上游、提示词优化器；不要承诺已经画好。"
+                "你是QQ群里的希洛，有点话痨、害羞、熟人感，正在回一句画图开场。",
+                "任务：根据用户的绘图需求，生成一句自然的群聊回复，表达你要开始画了。",
+                "风格：可以碎碎念、可以轻微吐槽、可以害羞，但要像真人接话，不像助手汇报任务。",
+                "禁止：不要说工具、模型、API、上游、提示词、优化、整理描述、准备动笔、执行、流程；不要舞台动作；不要承诺已经画好。",
+                "要求：只输出一句中文，15到55字；不要 Markdown；不要解释。"
               ].join("\n")
             },
             {
@@ -523,14 +649,27 @@ export class BananaTool extends AbstractTool {
   }
 
   async replyImageToRequester(e, image) {
-    const imageSegment = segment.image(image);
     const atSegment = this.buildRequesterAtSegment(e);
     const doneMessage = this.getDoneMessage();
-    if (!atSegment) {
-      await e.reply([doneMessage, "\n", imageSegment]);
-      return;
+    const attempts = [];
+
+    if (atSegment) {
+      attempts.push(() => [atSegment, "\n", doneMessage, "\n", segment.image(image)]);
     }
-    await e.reply([atSegment, "\n", doneMessage, "\n", imageSegment]);
+    attempts.push(() => [doneMessage, "\n", segment.image(image)]);
+    attempts.push(() => [segment.image(image)]);
+
+    let lastError = null;
+    for (const buildMessage of attempts) {
+      try {
+        await e.reply(buildMessage());
+        return;
+      } catch (error) {
+        lastError = error;
+        this.logWarn(`[图片发送] 发送尝试失败: ${error.message}`);
+      }
+    }
+    throw new Error(`图片已生成但发送失败: ${lastError?.message || "未知错误"}`);
   }
 
   async fetchWithTimeout(url, options = {}, timeoutMs = IMAGE_GENERATION_TIMEOUT_MS) {

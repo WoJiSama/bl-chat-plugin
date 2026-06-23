@@ -24,6 +24,39 @@ function makeAiBlock(displayName, prefix, urlField, modelField, keyField, urlPla
   ]
 }
 
+function makeImageGenerationBlock() {
+  return [
+    {
+      field: "imageGenerationAiConfig.imageGenerationApiUrl",
+      label: "文生图 imageGenerationAiConfig · URL",
+      component: "Input",
+      bottomHelpMessage: "用于 bananaTool 纯文字生成图片。填写完整图片生成 endpoint URL，例如 /v1/images/generations 或火山 Ark /api/v3/images/generations",
+      componentProps: { placeholder: "https://ark.cn-beijing.volces.com/api/v3/images/generations" }
+    },
+    {
+      field: "imageGenerationAiConfig.imageGenerationApiModel",
+      label: "┗ 模型名",
+      component: "Input",
+      bottomHelpMessage: "文生图模型名称，按服务商路由表填写",
+      componentProps: { placeholder: "doubao-seedream-5-0-260128" }
+    },
+    {
+      field: "imageGenerationAiConfig.imageGenerationApiKey",
+      label: "┗ API Key",
+      component: "InputPassword",
+      bottomHelpMessage: "文生图接口的 Bearer Token。与图像编辑 imageEditAiConfig 分开配置，避免接口冲突",
+      componentProps: { placeholder: "sk-xxxxx" }
+    },
+    {
+      field: "imageGenerationAiConfig.imageGenerationSize",
+      label: "┗ 图片尺寸",
+      component: "Input",
+      bottomHelpMessage: "服务商支持的尺寸值。火山 Seedream 可填 2K；OpenAI 兼容接口常见为 1024x1024",
+      componentProps: { placeholder: "2K" }
+    }
+  ]
+}
+
 export default [
   {
     component: "SOFT_GROUP_BEGIN",
@@ -59,8 +92,9 @@ export default [
     "imageEditApiUrl", "imageEditApiModel", "imageEditApiKey",
     "https://api.openai.com/v1/chat/completions",
     "gemini-3-pro-image-preview",
-    "用于 googleImageEditTool（图生图）、bananaTool（文生图）等图片生成工具"
+    "用于 googleImageEditTool 图生图/图片编辑。文生图请使用下面的 imageGenerationAiConfig，避免接口冲突"
   ),
+  ...makeImageGenerationBlock(),
   ...makeAiBlock(
     "图像识别/VLM analysisAiConfig",
     "analysisAiConfig",

@@ -6,6 +6,15 @@ import YAML from "yaml";
 import path from "path";
 
 const { mimeTypes } = dependencies;
+const DEFAULT_CHAT_IMAGE_EDIT_URL = 'https://api.openai.com/v1/chat/completions';
+const DEFAULT_IMAGE_EDIT_URL = 'https://api.openai.com/v1/images/edits';
+const IMAGE_EDIT_TIMEOUT_MS = 240000;
+const IMAGE_EDIT_PROGRESS_MESSAGES = [
+    "好的，我会画。我会照着这张图和你说的方向来，出来就发你看。",
+    "好呀，我会画的。你前面说的我也会一起看，不会只盯着这一句。",
+    "嗯嗯，我会画。我先按你的要求来，画出来直接发你。",
+    "好，我来画这版。参考图我会保留住，再按你说的感觉改。"
+];
 
 export class GoogleImageEditTool extends AbstractTool {
     constructor() {
@@ -36,37 +45,30 @@ export class GoogleImageEditTool extends AbstractTool {
         try {
             const config = this.loadConfig();
             const { prompt } = opts;
+            const rawImages = this.normalizeArray(opts.images);
+
+            if (!rawImages.length) {
+                return { error: '未检测到有效的图片链接' };
+            }
+
+            await this.sendProgress(e, prompt);
 
             // 处理图片URL
-            const images = await normalizeImageUrls(this.normalizeArray(opts.images));
+            const images = await normalizeImageUrls(rawImages);
 
             if (!images.length) {
                 return { error: '未检测到有效的图片链接' };
             }
 
-            // 构建消息内容
-            const content = await this.buildImageMessages(prompt, images);
-
             // 调用API
             const { imageEditApiUrl, imageEditApiKey, imageEditApiModel } = config.imageEditAiConfig || {};
+            const apiUrl = imageEditApiUrl || DEFAULT_CHAT_IMAGE_EDIT_URL;
+            const apiKey = imageEditApiKey || 'sk-xxxxxx';
+            const model = imageEditApiModel || "gemini-3-pro-image-preview";
 
-            const response = await fetch(imageEditApiUrl || 'https://api.openai.com/v1/chat/completions', {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${imageEditApiKey || 'sk-xxxxxx'}`,
-                },
-                body: JSON.stringify({
-                    model: imageEditApiModel || "gemini-3-pro-image-preview",
-                    messages: [{ role: "user", content }],
-                    stream: STREAM,
-                }),
-            });
-
-            // 处理响应
-            const imageUrl = STREAM
-                ? await this.handleStreamResponse(response)
-                : await this.handleNormalResponse(response);
+            const imageUrl = this.shouldUseImageEditEndpoint(apiUrl)
+                ? await this.generateImageEdit({ apiUrl, apiKey, model, prompt, images })
+                : await this.generateChatImageEdit({ apiUrl, apiKey, model, prompt, images, stream: STREAM });
 
             const processedUrl = this.extractImageUrl(imageUrl);
 
@@ -83,6 +85,206 @@ export class GoogleImageEditTool extends AbstractTool {
     }
 
     // ========== 工具方法 ==========
+
+    shouldUseImageEditEndpoint(apiUrl = "") {
+        return /\/images\/edits\/?$/i.test(String(apiUrl || ""));
+    }
+
+    toImageEditUrl(apiUrl = DEFAULT_IMAGE_EDIT_URL) {
+        const url = String(apiUrl || "").trim();
+        if (!url) return DEFAULT_IMAGE_EDIT_URL;
+        if (/\/images\/edits\/?$/i.test(url)) return url;
+        if (/\/chat\/completions\/?$/i.test(url)) return url.replace(/\/chat\/completions\/?$/i, "/images/edits");
+        if (/\/v1\/?$/i.test(url)) return url.replace(/\/?$/i, "/images/edits");
+        return url;
+    }
+
+    async generateChatImageEdit({ apiUrl, apiKey, model, prompt, images, stream = false }) {
+        const content = await this.buildImageMessages(prompt, images);
+        const response = await this.fetchWithTimeout(apiUrl || DEFAULT_CHAT_IMAGE_EDIT_URL, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify({
+                model,
+                messages: [{ role: "user", content }],
+                stream,
+            }),
+        });
+
+        return stream
+            ? await this.handleStreamResponse(response)
+            : await this.handleChatResponse(response);
+    }
+
+    async generateImageEdit({ apiUrl, apiKey, model, prompt, images }) {
+        let result = await this.parseImageEditResponse(
+            await this.requestImageEdit({ apiUrl, apiKey, model, prompt, images }, "url")
+        );
+
+        if (!result.ok && this.shouldRetryWithoutUrlResponseFormat(result.errorMessage)) {
+            this.logInfo("[图片编辑] 上游不支持 response_format=url，退回默认返回格式");
+            result = await this.parseImageEditResponse(
+                await this.requestImageEdit({ apiUrl, apiKey, model, prompt, images })
+            );
+        }
+
+        if (result.ok) return result.image;
+        throw new Error(result.errorMessage);
+    }
+
+    async requestImageEdit({ apiUrl, apiKey, model, prompt, images }, responseFormat = "") {
+        const formData = await this.buildImageEditFormData({ model, prompt, images, responseFormat });
+        return await this.fetchWithTimeout(this.toImageEditUrl(apiUrl), {
+            method: "POST",
+            headers: {
+                Authorization: `Bearer ${apiKey}`,
+            },
+            body: formData,
+        });
+    }
+
+    async buildImageEditFormData({ model, prompt, images, responseFormat = "" }) {
+        const formData = new FormData();
+        formData.append("model", model);
+        formData.append("prompt", prompt);
+        if (responseFormat) formData.append("response_format", responseFormat);
+
+        for (let index = 0; index < images.length; index++) {
+            const image = await this.buildImageFile(images[index], index);
+            formData.append("image", image.blob, image.filename);
+        }
+
+        return formData;
+    }
+
+    async buildImageFile(url, index = 0) {
+        const imgData = await getBase64Image(url, `image_${index}.png`);
+
+        if (imgData.includes("该图片链接已过期")) {
+            throw new Error("该图片下载链接已过期，请重新上传");
+        }
+        if (imgData.includes("无效的图片下载链接")) {
+            throw new Error("无效的图片下载链接，请确保适配器支持且图片未过期");
+        }
+        if (imgData.includes("无效的图片格式")) {
+            throw new Error("无效的图片格式，请重新上传图片");
+        }
+
+        const parsed = this.parseDataImage(imgData);
+        if (!parsed) throw new Error("图片转换失败，请重新上传图片");
+
+        const ext = mimeTypes.extension(parsed.mimeType) || "png";
+        return {
+            blob: new Blob([parsed.buffer], { type: parsed.mimeType }),
+            filename: `image_${index}.${ext}`,
+        };
+    }
+
+    parseDataImage(dataUrl = "") {
+        const match = String(dataUrl).match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/);
+        if (!match) return null;
+        return {
+            mimeType: match[1],
+            buffer: Buffer.from(match[2], "base64"),
+        };
+    }
+
+    async fetchWithTimeout(url, options = {}, timeoutMs = IMAGE_EDIT_TIMEOUT_MS) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+            return await fetch(url, {
+                ...options,
+                signal: controller.signal
+            });
+        } catch (error) {
+            if (error?.name === "AbortError") {
+                throw new Error(`图片编辑接口超过 ${Math.round(timeoutMs / 1000)} 秒没有返回`);
+            }
+            throw error;
+        } finally {
+            clearTimeout(timer);
+        }
+    }
+
+    shouldRetryWithoutUrlResponseFormat(errorMessage = "") {
+        return /response_format|unsupported|not support|unknown parameter|invalid parameter|不支持|未知参数/i.test(String(errorMessage));
+    }
+
+    async readJsonResponse(response) {
+        const text = await response.text();
+        try {
+            return JSON.parse(text);
+        } catch {
+            return { raw: text };
+        }
+    }
+
+    formatApiError(response, data) {
+        const message = data?.error?.message || data?.detail || data?.raw || response.statusText || "未知错误";
+        return `API请求失败: ${response.status} ${message}`;
+    }
+
+    async parseImageEditResponse(response) {
+        const data = await this.readJsonResponse(response);
+        if (!response.ok) {
+            return { ok: false, errorMessage: this.formatApiError(response, data), data };
+        }
+
+        const item = data?.data?.[0];
+        if (item?.url) {
+            this.logInfo("[图片编辑] 上游返回 url");
+            return { ok: true, image: item.url, format: "url" };
+        }
+        if (item?.b64_json) {
+            this.logInfo("[图片编辑] 上游返回 b64_json");
+            return { ok: true, image: `base64://${item.b64_json}`, format: "b64_json" };
+        }
+
+        const chatImage = this.extractChatImageResult(data);
+        if (chatImage) return { ok: true, image: chatImage, format: "chat" };
+
+        return { ok: false, errorMessage: "未接收到有效图片", data };
+    }
+
+    extractChatImageResult(data) {
+        return data?.choices?.[0]?.message?.images?.[0]?.image_url?.url ||
+            data?.choices?.[0]?.message?.images?.[0]?.url ||
+            data?.choices?.[0]?.message?.content ||
+            "";
+    }
+
+    logInfo(...args) {
+        if (typeof logger !== "undefined" && logger?.info) logger.info(...args);
+        else console.info(...args);
+    }
+
+    logWarn(...args) {
+        if (typeof logger !== "undefined" && logger?.warn) logger.warn(...args);
+        else console.warn(...args);
+    }
+
+    getProgressMessage(prompt = "") {
+        const content = String(prompt || "");
+        if (/(引用|回复|上下文|前面|刚才|近期相关对话|被引用内容|用户前面说)/.test(content)) {
+            return Math.random() < 0.5
+                ? "好呀，我会画的。你前面说的我也会一起看，不会只盯着这一句。"
+                : "好的，我会画。我会把这张图和前面那些话一起对上，出来就发你看。";
+        }
+        return IMAGE_EDIT_PROGRESS_MESSAGES[Math.floor(Math.random() * IMAGE_EDIT_PROGRESS_MESSAGES.length)];
+    }
+
+    async sendProgress(e, prompt = "") {
+        if (!e?.reply) return;
+        try {
+            await e.reply(this.getProgressMessage(prompt));
+        } catch (error) {
+            this.logWarn(`[图片编辑] 发送进度提示失败: ${error.message}`);
+        }
+    }
 
     loadConfig() {
         const configPath = path.join(process.cwd(), 'plugins/bl-chat-plugin/config/message.yaml');
@@ -120,7 +322,8 @@ export class GoogleImageEditTool extends AbstractTool {
 
     async handleStreamResponse(response) {
         if (!response.ok || !response.body) {
-            throw new Error(`API请求失败: ${response.statusText}`);
+            const data = await this.readJsonResponse(response);
+            throw new Error(this.formatApiError(response, data));
         }
 
         const reader = response.body.getReader();
@@ -148,14 +351,13 @@ export class GoogleImageEditTool extends AbstractTool {
         return content;
     }
 
-    async handleNormalResponse(response) {
-        const data = await response.json();
-        // logger.error(JSON.stringify(data));
+    async handleChatResponse(response) {
+        const data = await this.readJsonResponse(response);
+        if (!response.ok) {
+            throw new Error(this.formatApiError(response, data));
+        }
 
-        const imageUrl = data?.choices?.[0]?.message?.images?.[0]?.image_url?.url ||
-            data?.choices?.[0]?.message?.images?.[0]?.url ||
-            data?.choices?.[0]?.message?.content;
-
+        const imageUrl = this.extractChatImageResult(data);
         if (!imageUrl) throw new Error("未接收到有效内容");
         return imageUrl;
     }

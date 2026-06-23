@@ -69,6 +69,10 @@ class GroupNoticeManager {
     if (!rule) return config
 
     const resolved = { ...config }
+    const hasOwnWelcomeMessage = typeof rule.welcomeMessage === "string" && rule.welcomeMessage.trim()
+    const hasOwnLeaveMessage = typeof rule.leaveMessage === "string" && rule.leaveMessage.trim()
+    if (hasOwnWelcomeMessage) resolved.welcomeEnabled = true
+    if (hasOwnLeaveMessage) resolved.leaveEnabled = true
     for (const key of ["welcomeMessage", "leaveMessage"]) {
       if (typeof rule[key] === "string" && rule[key].trim()) {
         resolved[key] = rule[key]

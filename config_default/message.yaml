@@ -209,6 +209,12 @@ pluginSettings:
     imageEditApiModel: gemini-3-pro-image-preview,
     imageEditApiKey: sk-xxxxx
   }
+  imageGenerationAiConfig: {
+    imageGenerationApiUrl: https://api.openai.com/v1/images/generations,
+    imageGenerationApiModel: gpt-image-1,
+    imageGenerationApiKey: sk-xxxxx,
+    imageGenerationSize: 1024x1024
+  }
   analysisAiConfig: {
     analysisApiUrl: https://api.openai.com/v1/chat/completions,
     analysisApiModel: gemini-3-pro-preview,

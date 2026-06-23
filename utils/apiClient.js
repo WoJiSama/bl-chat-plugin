@@ -120,7 +120,7 @@ export async function YTapi(requestData, config, toolContent, toolName) {
             };
             finalRequestData = {
                 model: config.chatAiConfig.chatApiModel,
-                messages: requestData.messages,
+                messages: convertToolMessagesForChat(requestData.messages, toolName),
                 stream: false
             };
         }
@@ -299,14 +299,4 @@ function processResponse(responseData) {
 
     // 其他类型直接返回
     return { error: `Invalid response format: ${JSON.stringify(responseData)}` };
-}
-
-function getNextApiKey() {
-    const apiKeys = [
-        "a1eef00f6bce4a10a7de83936fce6492.0wDYtwPnWukoPxWj"
-    ]
-    const randomIndex = Math.floor(Math.random() * apiKeys.length)
-    const apiKey = apiKeys[randomIndex]
-    console.log("负载均衡-散列-使用API key:", apiKey)
-    return apiKey
 }

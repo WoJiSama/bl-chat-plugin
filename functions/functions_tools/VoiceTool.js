@@ -48,23 +48,25 @@ export class VoiceTool extends AbstractTool {
       let file_url
       let voice
       const file = 'https://www.modelscope.cn/api/v1/studio/Xzkong/AI-jiaran/gradio/file='
-      const cookie = 'session=MTc1MjY0NzczOXxEWDhFQVFMX2dBQUJFQUVRQUFEX3hmLUFBQVlHYzNSeWFXNW5EQVFBQW1sa0EybHVkQVFFQVA0S0ZnWnpkSEpwYm1jTUNnQUlkWE5sY201aGJXVUdjM1J5YVc1bkRCRUFELVdHc09XSGllV0lzT21BbXVtQWp3WnpkSEpwYm1jTUJnQUVjbTlzWlFOcGJuUUVBZ0FDQm5OMGNtbHVad3dJQUFaemRHRjBkWE1EYVc1MEJBSUFBZ1p6ZEhKcGJtY01Cd0FGYkdWMlpXd0djM1J5YVc1bkRBZ0FCbFJwWlhJZ01RWnpkSEpwYm1jTUVRQVBjMlZ6YzJsdmJsOTJaWEp6YVc5dUJXbHVkRFkwQkFvQS1EQ2xUNnFCMzJHb3y5H0YUVdJyT50SZGYpSgHz20sqNKQPWKoeTmOYl7AOvA=='
+      const cookie = process.env.MODELSCOPE_COOKIE || ''
       const other_params = [0.2, 0.6, 0.8, 1];
       const data = {
         "data": [text, 'jiaran', ...other_params],
         "fn_index": 0,
         "session_hash": Math.random().toString(36).substring(2, 13)
       };
+      const headers = {
+        'Content-Type': 'application/json'
+      }
+      if (cookie) headers.Cookie = cookie
+
       const response = await fetch('https://www.modelscope.cn/api/v1/studio/Xzkong/AI-jiaran/gradio/run/predict', {
         method: 'POST',
         body: JSON.stringify(data),
-        headers: {
-          'Content-Type': 'application/json',
-          'Cookie': cookie
-        }
+        headers
       });
       const result = await response.json();
-      logger.error(result, 789)
+      logger.debug?.('[VoiceTool] ModelScope response received')
       if (result && result.data[0] == 'Success') {
         file_url = result.data[1].name;
       }

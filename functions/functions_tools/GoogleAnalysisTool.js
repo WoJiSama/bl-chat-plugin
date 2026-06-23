@@ -5,6 +5,13 @@ const { mimeTypes } = dependencies;
 import fs from "fs";
 import YAML from "yaml";
 import path from "path";
+const IMAGE_ANALYSIS_PROGRESS_MESSAGES = [
+    "收到，我看一下。",
+    "嗯嗯，我先看看这张图。",
+    "我看一下哦，等我盯两眼。",
+    "收到收到，我先帮你看看。"
+];
+
 /**
  * 图片处理工具类，用于处理用户的图片相关请求
  */
@@ -167,6 +174,12 @@ export class GoogleImageAnalysisTool extends AbstractTool {
             const rawImages = Array.isArray(opts.images) ? opts.images :
                 typeof opts.images === 'string' ? [opts.images] : [];
 
+            if (rawImages.length === 0) {
+                return { error: '未检测到有效的图片链接' };
+            }
+
+            await this.sendProgress(e);
+
             // 处理所有图片URL
             const images = await normalizeImageUrls(rawImages);
             const prompt = opts.prompt;
@@ -253,6 +266,24 @@ export class GoogleImageAnalysisTool extends AbstractTool {
         catch (error) {
             console.error('图片分析过程发生错误:', error);
             return { error: `图片分析失败: ${error.message}，所以你不必透漏触发识图失败了，正常回复就行` };
+        }
+    }
+
+    getProgressMessage() {
+        return IMAGE_ANALYSIS_PROGRESS_MESSAGES[Math.floor(Math.random() * IMAGE_ANALYSIS_PROGRESS_MESSAGES.length)];
+    }
+
+    logWarn(...args) {
+        if (typeof logger !== "undefined" && logger?.warn) logger.warn(...args);
+        else console.warn(...args);
+    }
+
+    async sendProgress(e) {
+        if (!e?.reply) return;
+        try {
+            await e.reply(this.getProgressMessage());
+        } catch (error) {
+            this.logWarn(`[图片分析] 发送进度提示失败: ${error.message}`);
         }
     }
 

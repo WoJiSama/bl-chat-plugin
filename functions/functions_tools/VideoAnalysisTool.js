@@ -1,6 +1,9 @@
 import { AbstractTool } from "./AbstractTool.js"
 import { getBase64Image } from "../../utils/fileUtils.js"
 import { dependencies } from "../../dependence/dependencies.js"
+import fs from "fs"
+import YAML from "yaml"
+import path from "path"
 const { mimeTypes } = dependencies
 
 /**
@@ -27,24 +30,21 @@ export class VideoAnalysisTool extends AbstractTool {
 
     this.video = null
 
-    //this.apiKey = ""
-    this.apiKeys = [
-      "a1eef00f6bce4a10a7de83936fce6492.0wDYtwPnWukoPxWj",
-      "eb6e78fe1a7043feb275ab9b502fdabb.vWlqF16E7bngdKef",
-    ]
+    this.defaultApiUrl = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+    this.defaultModel = "glm-4.1v-thinking-flash"
   }
 
   async Video(prompt, video) {
     try {
+      const config = this.getVideoConfig()
+      if (!config.apiKey) return { error: "视频分析 API Key 未配置" }
+
       // 获取公共可访问的视频URL
-      const publicUrl = await this.getVideoUrl(video)
+      const publicUrl = await this.getVideoUrl(video, config.apiKey)
       logger.info("最终使用的视频URL:", publicUrl)
 
-      const apiUrl = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-      const apiKey = this.getNextApiKey()
-
       const requestData = {
-        model: "glm-4.1v-thinking-flash", // glm-4.5v
+        model: config.model,
         messages: [
           {
             role: "user",
@@ -59,11 +59,11 @@ export class VideoAnalysisTool extends AbstractTool {
         ],
       }
 
-      const response = await fetch(apiUrl, {
+      const response = await fetch(config.apiUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
+          Authorization: `Bearer ${config.apiKey}`,
         },
         body: JSON.stringify(requestData),
       })
@@ -74,11 +74,38 @@ export class VideoAnalysisTool extends AbstractTool {
       return { error: "视频处理失败: " + error.message }
     }
   }
-  getNextApiKey() {
-    const randomIndex = Math.floor(Math.random() * this.apiKeys.length)
-    const apiKey = this.apiKeys[randomIndex]
-    console.log("负载均衡-散列-使用API key:", apiKey)
-    return apiKey
+  getVideoConfig() {
+    const runtimeConfig = this.loadConfig()
+    const videoCfg = runtimeConfig.videoAnalysisAiConfig || {}
+    const analysisCfg = runtimeConfig.analysisAiConfig || {}
+    const apiKeys = this.normalizeArray(
+      videoCfg.videoAnalysisApiKey ||
+      videoCfg.videoAnalysisApiKeys ||
+      analysisCfg.analysisApiKey ||
+      process.env.VIDEO_ANALYSIS_API_KEY ||
+      process.env.BIGMODEL_API_KEY
+    ).map(key => String(key || "").trim()).filter(Boolean)
+
+    return {
+      apiUrl: videoCfg.videoAnalysisApiUrl || analysisCfg.analysisApiUrl || this.defaultApiUrl,
+      model: videoCfg.videoAnalysisApiModel || analysisCfg.analysisApiModel || this.defaultModel,
+      apiKey: apiKeys.length ? apiKeys[Math.floor(Math.random() * apiKeys.length)] : ""
+    }
+  }
+
+  loadConfig() {
+    try {
+      const configPath = path.join(process.cwd(), "plugins/bl-chat-plugin/config/message.yaml")
+      return YAML.parse(fs.readFileSync(configPath, "utf8")).pluginSettings || {}
+    } catch (error) {
+      logger.debug?.(`[VideoAnalysisTool] 读取配置失败: ${error.message}`)
+      return {}
+    }
+  }
+
+  normalizeArray(input) {
+    if (Array.isArray(input)) return input
+    return typeof input === "string" ? [input] : []
   }
 
   /**
@@ -133,8 +160,9 @@ export class VideoAnalysisTool extends AbstractTool {
    * @param {Buffer} buffer - 视频文件的Buffer数据
    * @returns {Promise<string>} - 返回公共可访问的视频URL
    */
-  async uploadToFreeService(buffer) {
+  async uploadToFreeService(buffer, apiKey) {
     try {
+      if (!apiKey) throw new Error("视频上传 API Key 未配置")
       const formData = new FormData()
       const blob = new Blob([buffer], { type: "video/mp4" })
       formData.append("file", blob, `video_${Date.now()}.mp4`)
@@ -143,7 +171,7 @@ export class VideoAnalysisTool extends AbstractTool {
         method: "POST",
         body: formData,
         headers: {
-          authorization: `Bearer ${this.getNextApiKey()}`,
+          authorization: `Bearer ${apiKey}`,
         },
       })
 
@@ -159,7 +187,7 @@ export class VideoAnalysisTool extends AbstractTool {
    * @param {string} video - 视频地址
    * @returns {Promise<string>} - 公共可访问的视频URL
    */
-  async getVideoUrl(video) {
+  async getVideoUrl(video, apiKey) {
     if (!video) throw new Error("视频地址不能为空")
 
     try {
@@ -180,7 +208,7 @@ export class VideoAnalysisTool extends AbstractTool {
       const arrayBuffer = await response.arrayBuffer()
       const buffer = Buffer.from(arrayBuffer)
 
-      return await this.uploadToFreeService(buffer)
+      return await this.uploadToFreeService(buffer, apiKey)
     } catch (error) {
       logger.error("获取视频URL失败:", error)
       throw new Error("视频处理失败，请稍后再试")

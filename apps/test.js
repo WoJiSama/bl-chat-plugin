@@ -1025,6 +1025,77 @@ function looksLikeEducationalExplanation(text = "") {
   return score >= 2
 }
 
+function looksLikeDiagnosticExplanation(text = "") {
+  const content = String(text || "").trim()
+  if (content.length < 120) return false
+  let score = 0
+  if (/(原因|主要是|问题在|因为|所以|报错|红了|红线|红一片|找不到|缺少|依赖|版本|配置|环境|解决|检查|确认|不用太慌|不是什么大问题)/i.test(content)) score++
+  if (/(IDEA|IntelliJ|Maven|Gradle|pom\.xml|Tomcat|Servlet|jakarta\.|javax\.|Spring|WebServlet|import|class|package|dependency|Cannot|Error|Exception)/i.test(content)) score++
+  if (/(?:^|\n)\s*(?:[-*+•]|\d+\.)\s+\S/.test(content)) score++
+  if (/[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+|<[^>\n]+>|@[A-Za-z_$][\w$]*/.test(content)) score++
+  return score >= 2
+}
+
+function scoreParchmentChatTail(text = "") {
+  const content = String(text || "").trim()
+  if (!content || content.length > 120) return 0
+  if (/```|(?:^|\n)\s*(?:[-*+•]|\d+\.)\s+\S/.test(content)) return 0
+
+  let score = 0
+  if (/(?:\d{1,2}\s*[号日]|今天|明天|后天|周[一二三四五六日天]|星期[一二三四五六日天])?.{0,16}(?:交作业|作业|ddl|deadline).{0,30}(?:来得及|不急|别慌|不用慌|没问题|稳|呀|啦|哦|嘛|呢|~|～)?/i.test(content)) score += 4
+  if (/(?:别慌|先别急|不用慌|不用太慌|放心|没事|问题不大|不难|来得及|稳的|还行|可以的)/.test(content)) score += 2
+  if (/(?:要是|如果|回头|之后).{0,28}(?:再|还).{0,28}(?:发我|给我|我帮你|我再|我看看|继续看|帮你看)/.test(content)) score += 2
+  if (/(?:我帮你|我再|我看看|我来|我盯着|给我看|发我)/.test(content)) score += 1
+  if (/[呀啦哦呢嘛呗吧]|[~～]$/.test(content)) score += 1
+
+  return score
+}
+
+function isParchmentChatTail(text = "") {
+  return scoreParchmentChatTail(text) >= 3
+}
+
+function normalizeParchmentMainText(text = "") {
+  const content = String(text || "").trim().replace(/[，,]\s*$/, "")
+  if (!content) return ""
+  if (/[。！？!?；;：:]$/.test(content) || /```$/.test(content)) return content
+  return `${content}。`
+}
+
+function splitParchmentReplyText(text = "") {
+  const content = String(text || "").trim()
+  if (content.length < 180) return { imageText: content, chatText: "" }
+
+  const blankMatches = [...content.matchAll(/\n\s*\n/g)]
+  const lastBlank = blankMatches.at(-1)
+  if (lastBlank) {
+    const candidate = content.slice(lastBlank.index + lastBlank[0].length).trim()
+    const main = content.slice(0, lastBlank.index).trim()
+    if (main.length >= 120 && isParchmentChatTail(candidate)) {
+      return {
+        imageText: normalizeParchmentMainText(main),
+        chatText: candidate
+      }
+    }
+  }
+
+  const boundaries = [...content.matchAll(/[。！？!?；;，,]\s*/g)]
+  for (let index = boundaries.length - 1; index >= 0; index--) {
+    const boundary = boundaries[index]
+    const candidate = content.slice(boundary.index + boundary[0].length).trim()
+    const main = content.slice(0, boundary.index).trim()
+    if (main.length < 120) break
+    if (isParchmentChatTail(candidate)) {
+      return {
+        imageText: normalizeParchmentMainText(main),
+        chatText: candidate
+      }
+    }
+  }
+
+  return { imageText: content, chatText: "" }
+}
+
 function normalizeIntentText(text = "") {
   return String(text || "")
     .replace(/\[CQ:[^\]]+\]/g, " ")
@@ -1646,8 +1717,16 @@ export class ExamplePlugin extends plugin {
     const replyLooksLikeCodeOrMarkdown = looksLikeCodeOrMarkdown(content) || looksLikeCodeOrMarkdown(output)
     const userAskedForEducation = isEducationalExplanationRequest(userText)
     const replyLooksLikeEducation = looksLikeEducationalExplanation(output)
+    const userAskedForDiagnosticImageAnalysis = toolName === "googleImageAnalysisTool" &&
+      /(截图|代码|IDEA|IntelliJ|Maven|Gradle|Tomcat|Servlet|依赖|报错|错误|红了|红线|为啥|为什么|怎么看|分析|解释)/i.test(userText) &&
+      String(output || "").trim().length > 120
+    const isAnalysisDiagnosticReply = toolName === "googleImageAnalysisTool" &&
+      (userAskedForDiagnosticImageAnalysis || looksLikeDiagnosticExplanation(output) || looksLikeDiagnosticExplanation(content))
 
     if (userAskedForEducation && (replyLooksLikeEducation || String(output || "").trim().length > 180)) {
+      return "parchment"
+    }
+    if (isAnalysisDiagnosticReply) {
       return "parchment"
     }
     if (replyLooksLikeCodeOrMarkdown || (userAskedForCodeOrMarkdown && String(output || "").trim().length > 30)) {
@@ -4330,11 +4409,12 @@ ${mcpPrompts}
               images,
               videos,
               currentIntentText,
-              userContent
+              userContent,
+              groupUserMessages: session.groupUserMessages
             })
           : null
         const semanticToolCall = semanticDecision?.toolName
-          ? this.buildToolCallFromDecision(semanticDecision, { e, images, args, msg, currentIntentText, userContent })
+          ? this.buildToolCallFromDecision(semanticDecision, { e, images, args, msg, currentIntentText, userContent, groupUserMessages: session.groupUserMessages })
           : null
         if (toolChoice === "auto" && semanticToolCall) {
           session.tools = semanticToolCall.tools
@@ -4349,7 +4429,7 @@ ${mcpPrompts}
             toolChoice = { type: "function", function: { name: "googleImageEditTool" } }
             forcedToolCall = this.buildForcedToolCall("googleImageEditTool", {
               images,
-              prompt: args || msg || "请按用户要求编辑这张图片。"
+              prompt: this.buildImageEditPrompt({ e, args, msg, currentIntentText, userContent, groupUserMessages: session.groupUserMessages })
             })
             logger.info(`[工具选择] group=${groupId} 强制使用 googleImageEditTool 处理图片编辑请求`)
           }
@@ -4441,7 +4521,8 @@ ${mcpPrompts}
             msg,
             images,
             currentIntentText,
-            userContent
+            userContent,
+            groupUserMessages: session.groupUserMessages
           })
           if (missingToolCall) {
             session.tools = missingToolCall.tools
@@ -4634,6 +4715,34 @@ ${mcpPrompts}
     return compactDrawPromptText(`引用自 ${match[1]}:\n${match[2]}`, 2800)
   }
 
+  getRecentPromptContextText(messages = [], currentUserContent = "", maxLength = 1200) {
+    if (!Array.isArray(messages) || !messages.length) return ""
+
+    const current = normalizeForContainment(currentUserContent)
+    const lines = []
+    for (const message of messages) {
+      if (!message || message.role === "system") continue
+      const content = String(message.content || "")
+      if (!content || content.startsWith("【系统提示】")) continue
+
+      for (const rawLine of content.split(/\r?\n/)) {
+        const line = rawLine
+          .replace(/\[CQ:[^\]]+\]/g, " ")
+          .replace(/https?:\/\/\S+/g, "[图片/链接]")
+          .replace(/\s+/g, " ")
+          .trim()
+        if (!line) continue
+        if (/此处为调用工具的结果|调用工具|当前QQ群.*群聊历史记录|系统提示/.test(line)) continue
+        if (/^\[图片\/链接\]$/.test(line)) continue
+        if (current && normalizeForContainment(line).includes(current.slice(0, 32))) continue
+        lines.push(line.slice(0, 180))
+      }
+    }
+
+    const recent = lines.slice(-8)
+    return recent.length ? compactDrawPromptText(recent.join("\n"), maxLength) : ""
+  }
+
   buildImageGenerationPrompt(context = {}) {
     const basePrompt = compactDrawPromptText(
       context.prompt || context.args || context.msg || context.currentIntentText || "",
@@ -4670,6 +4779,36 @@ ${mcpPrompts}
     }
 
     return compactDrawPromptText(lines.join("\n\n"), 3900)
+  }
+
+  buildImageEditPrompt(context = {}) {
+    const basePrompt = compactDrawPromptText(
+      context.prompt || context.args || context.msg || context.currentIntentText || "请按用户要求编辑这张图片。",
+      1600
+    )
+    const quotedContext = this.getQuotedPromptContextText(context.e, context.userContent)
+    const recentContext = this.getRecentPromptContextText(
+      context.groupUserMessages || context.messages || [],
+      context.userContent || context.currentIntentText || basePrompt,
+      1200
+    )
+
+    const lines = [
+      `用户当前修图/重绘要求：${basePrompt}`,
+      "必须以用户提供或引用的图片为主体来改，不要另起无关题材。",
+      "如果用户说“这个、这张、它、上面、前面、刚才”，要结合下面的引用内容和近期对话理解指代。",
+      "保留参考图里的主要人物身份、构图关系和可识别特征；除非用户明确要求替换，否则不要把主体改没。"
+    ]
+
+    if (quotedContext) {
+      lines.push(`用户引用/回复的上下文：\n${quotedContext}`)
+    }
+    if (recentContext) {
+      lines.push(`近期相关对话，只提取和本次修图有关的信息：\n${recentContext}`)
+    }
+
+    lines.push("输出目标：按用户要求完成图片编辑，画面自然、主体清楚、风格一致；不要把无关聊天内容画进图里。")
+    return compactDrawPromptText(lines.join("\n\n"), 4200)
   }
 
 	  buildForcedToolCall(toolName, params = {}) {
@@ -4715,7 +4854,14 @@ ${mcpPrompts}
       }
     }
     if (intent === "image_edit") {
-      return { intent, toolName: "googleImageEditTool", params: { images, prompt: prompt || "请按用户要求编辑这张图片。" } }
+      return {
+        intent,
+        toolName: "googleImageEditTool",
+        params: {
+          images,
+          prompt: this.buildImageEditPrompt({ ...context, prompt })
+        }
+      }
     }
     if (intent === "image_analysis") {
       return { intent, toolName: "googleImageAnalysisTool", params: { images, prompt: prompt || "请识别这张图片里有什么内容，并用中文简洁描述。" } }
@@ -4873,7 +5019,14 @@ ${mcpPrompts}
         reason: "commitment_image_edit",
         params: {
           images,
-          prompt: args || msg || "请按用户要求编辑这张图片。"
+          prompt: this.buildImageEditPrompt({
+            e: context.e,
+            args,
+            msg,
+            currentIntentText,
+            userContent: context.userContent,
+            groupUserMessages: context.groupUserMessages
+          })
         }
       })
     }
@@ -5058,6 +5211,17 @@ ${mcpPrompts}
     }
     if (toolName === "googleImageEditTool" && (!Array.isArray(params.images) || !params.images.length) && session.images?.length) {
       params.images = session.images
+    }
+    if (toolName === "googleImageEditTool") {
+      params.prompt = this.buildImageEditPrompt({
+        e,
+        prompt: params.prompt,
+        args: session.rawArgs,
+        msg: e?.msg,
+        currentIntentText: [session.rawArgs, e?.msg].filter(Boolean).join("\n"),
+        userContent: session.userContent,
+        groupUserMessages: session.groupUserMessages
+      }) || params.prompt
     }
     if (toolName === "bananaTool") {
       if (!params.prompt && session.rawArgs) params.prompt = session.rawArgs
@@ -5313,9 +5477,18 @@ ${mcpPrompts}
       toolName,
       e
     })
+    const parchmentSplit = textImageTemplate && String(textImageTemplate).startsWith("parchment")
+      ? splitParchmentReplyText(output)
+      : { imageText: output, chatText: "" }
+    const finalImageOutput = parchmentSplit.imageText || output
+    const finalChatFollowUp = parchmentSplit.chatText || ""
     const botMessageId = textImageTemplate
-      ? await this.sendFinalReplyAsTextImage(e, output, textImageTemplate)
+      ? await this.sendFinalReplyAsTextImage(e, finalImageOutput, textImageTemplate)
       : await this.sendSegmentedMessage(e, output)
+    if (finalChatFollowUp) {
+      logger.info(`[textImageTool] 羊皮纸回复已拆分，主体转图，口头补充单独发送 chars=${finalChatFollowUp.length}`)
+      await this.sendSegmentedMessage(e, finalChatFollowUp, 0)
+    }
 
     // 更新会话追踪中的对话历史
     if (this.config.conversationTrackingEnabled && e.group_id && e.user_id) {
