@@ -17,6 +17,7 @@ import expression from "./expression.js"
 import knowledge from "./knowledge.js"
 import emoji from "./emoji.js"
 import aiModels from "./aiModels.js"
+import voice from "./voice.js"
 import tools from "./tools.js"
 
 export const schemas = [
@@ -33,6 +34,7 @@ export const schemas = [
   expression,
   knowledge,
   emoji,
+  voice,
   tools
 ].flat()
 

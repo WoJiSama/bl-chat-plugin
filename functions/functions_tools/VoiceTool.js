@@ -1,166 +1,72 @@
-import { AbstractTool } from './AbstractTool.js';
-import ws from 'ws';
-// VoiceTool.js
+import { AbstractTool } from "./AbstractTool.js"
+import { pluginBridge } from "../../utils/pluginBridge.js"
+import { VolcengineVoiceProvider } from "../../utils/VolcengineVoiceProvider.js"
+import {
+  getVoiceStyleConfig,
+  sanitizeVoiceText,
+  scheduleVoiceFileCleanup,
+  selectVoiceStyle
+} from "../../utils/qqVoiceAudio.js"
+
 export class VoiceTool extends AbstractTool {
   constructor() {
-    super();
-    this.name = 'voiceTool';
-    this.description = '这是一个实现你发送语音功能的工具，平常正常对话时、当你想发送语音时，调用此工具。';
+    super()
+    this.name = "voiceTool"
+    this.description = [
+      "发送一条 QQ 语音消息。只有用户明确要求语音、念出来、用语音说，或非常适合用短语音表达时才调用。",
+      "语音内容必须短、自然、适合口播；不要读长篇科普、代码、列表或工具结果。"
+    ].join("")
     this.parameters = {
       type: "object",
       properties: {
         text: {
-          type: 'string',
-          description: '你想发送的语音文字(注意不要包含颜文字等内容，只要纯文字，颜文字等内容会使语音转文字出问题，如果有英文单词或字母尝试用中文谐音代替)'
+          type: "string",
+          description: "要用希洛声音说出来的短句，必须是纯口播文字，不要包含 Markdown、代码、表情符号或舞台动作。"
         },
-
+        style: {
+          type: "string",
+          description: "语气风格，可选 normal/shy/tease/serious/sleepy；不确定就省略。"
+        }
       },
-      required: ['text']
-    };
+      required: ["text"]
+    }
+  }
 
+  getVoiceSystemConfig() {
+    return pluginBridge.instance?.config?.voiceSystem || {}
+  }
+
+  buildProvider(config) {
+    const provider = String(config.provider || "volcengine").toLowerCase()
+    if (provider !== "volcengine") {
+      throw new Error(`暂不支持语音供应商: ${provider}`)
+    }
+    return new VolcengineVoiceProvider(config.volcengine || {})
   }
 
   async func(opts, e) {
-    const { text } = opts;
+    const config = this.getVoiceSystemConfig()
+    if (config.enabled !== true) {
+      return "语音系统还没开启，先用文字回复。"
+    }
 
-    const groupId = e.group_id;
+    const rawText = opts?.text || ""
+    const text = sanitizeVoiceText(rawText, config.maxTextLength || 80)
+    if (!text) return "语音内容为空，先不发语音。"
 
-    // try {
-    //   const resData = await Bot.sendApi('send_group_ai_record', {
-    //     "group_id": groupId,
-    //     "character": "lucy-voice-female1",
-    //     "text": text
-    //   });
-
-    //   if (resData.status == 'ok') {
-    //     return `发送语音内容(${text})成功，你已经发送语音了，所以不需要强调你已经发送语音，继续说之后的事情`;
-    //   } else {
-    //     return `发送语音失败`;
-    //   }
-
-    // } catch (error) {
-    //   console.error(`发送语音失败:`, error);
-    //   return `发送语音失败: ${error.message}`;
-    // }
-
-
+    const styleName = opts?.style || selectVoiceStyle(text, config.styles || {})
+    const style = getVoiceStyleConfig(config, styleName)
+    let filePath = ""
     try {
-      let file_url
-      let voice
-      const file = 'https://www.modelscope.cn/api/v1/studio/Xzkong/AI-jiaran/gradio/file='
-      const cookie = process.env.MODELSCOPE_COOKIE || ''
-      const other_params = [0.2, 0.6, 0.8, 1];
-      const data = {
-        "data": [text, 'jiaran', ...other_params],
-        "fn_index": 0,
-        "session_hash": Math.random().toString(36).substring(2, 13)
-      };
-      const headers = {
-        'Content-Type': 'application/json'
-      }
-      if (cookie) headers.Cookie = cookie
-
-      const response = await fetch('https://www.modelscope.cn/api/v1/studio/Xzkong/AI-jiaran/gradio/run/predict', {
-        method: 'POST',
-        body: JSON.stringify(data),
-        headers
-      });
-      const result = await response.json();
-      logger.debug?.('[VoiceTool] ModelScope response received')
-      if (result && result.data[0] == 'Success') {
-        file_url = result.data[1].name;
-      }
-      voice = file_url ? `${file}${file_url}` : null;
-      if (voice) {
-        await e.reply(segment.record(voice));
-        return `发送语音内容(${text})成功，你已经发送语音了，所以不需要强调你已经发送语音，继续说之后的事情，回复的文字内容不要和语音内容重合`;
-      } else {
-        return `发送语音失败`;
-      }
-
+      const provider = this.buildProvider(config)
+      const result = await provider.synthesizeToFile({ text, style })
+      filePath = result.filePath
+      await e.reply(segment.record(filePath))
+      scheduleVoiceFileCleanup(filePath, config.cleanupDelayMs || 5 * 60 * 1000)
+      return `语音已发送。语音内容是：${text}。后续不要再用文字重复这段语音。`
     } catch (error) {
-      return `发送语音失败: ${error.message}`;
+      if (filePath) scheduleVoiceFileCleanup(filePath, 1000)
+      return `发送语音失败: ${error.message}`
     }
-
-
-    const hugg = () => {
-      return new Promise((resolve, reject) => {
-        let hash = Math.random().toString(36).substring(2, 12);
-        let ws_client = new ws('wss://songdaooi-taffy-bert-vits2.hf.space/queue/join?__theme=system');
-        let voice = 'https://songdaooi-taffy-bert-vits2.hf.space/--replicas/2iodv/file='
-        const data = {
-          "data": [
-            text,
-            "taffy",
-            0.2,
-            0.6,
-            0.8,
-            1
-          ],
-          "fn_index": 0,
-          "session_hash": Math.random().toString(36).substring(2, 13)
-        };
-
-        ws_client.on("open", () => {
-        });
-
-        ws_client.on("message", async event => {
-          event = JSON.parse(event);
-          switch (event.msg) {
-            case "send_hash":
-              ws_client.send(JSON.stringify({
-                session_hash: hash,
-                fn_index: 0,
-              }));
-              break;
-            case "estimation":
-              {
-                break;
-              };
-            case "send_data":
-              ws_client.send(JSON.stringify({
-                "data": data.data,
-                "fn_index": 0,
-                "session_hash": hash,
-              }));
-              break;
-            case "process_starts":
-              {
-                break;
-              }
-            case "process_completed":
-              ws_client.close();
-              if (event.output.data[0] == 'Success') {
-                // let file_url = event.output.data[1];
-                // const base64 = file_url.split(",")[1];
-                // await e.reply(segment.record(`data:audio/wav;base64,${base64}`));
-
-                await e.reply(segment.record(`${voice}${event.output.data[1].name}`));
-                resolve(`发送语音内容(${text})成功，你已经发送语音了，所以不需要强调你已经发送语音，继续说之后的事情`)
-
-              } else {
-                reject(`发送语音失败`)
-              }
-              break;
-            case "process_failed":
-              ws_client.close();
-              reject(`发送语音失败`)
-              break;
-          }
-        });
-
-        ws_client.on("error", error => {
-          ws_client.close();
-          reject(`发送语音失败`)
-        });
-
-        ws_client.on("close", () => {
-
-        });
-      })
-    }
-
-    const result = await hugg()
-    return result
   }
 }

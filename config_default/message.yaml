@@ -310,6 +310,41 @@ pluginSettings:
     rateLimitWindowMinutes: 1
     rateLimitMaxPerWindow: 3
   openai_tool_choice: auto
+  # 语音系统：阶段一为 QQ 语音消息；阶段三会复用同一 provider 接实时通话/RTC。
+  voiceSystem:
+    enabled: false
+    provider: volcengine
+    maxTextLength: 80
+    autoVoiceProbability: 0.0             # 预留：后续可用于短句低概率自动语音；当前仅工具调用/明确要求时发
+    cleanupDelayMs: 300000
+    volcengine:
+      endpoint: "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
+      appId: ""
+      accessToken: ""
+      resourceId: ""                      # 火山 V3 资源 ID，例如你的声音复刻/豆包语音资源
+      voiceType: ""                       # 希洛复刻后的音色 ID
+      uid: "bl-chat-plugin"
+      format: "mp3"
+      sampleRate: 24000
+      speedRatio: 1.0
+      pitchRatio: 1.0
+      volumeRatio: 1.0
+      emotion: ""
+      stylePrompt: ""
+    styles:
+      normal: {}
+      shy:
+        speedRatio: 0.94
+        pitchRatio: 1.03
+        emotion: shy
+      tease:
+        speedRatio: 1.04
+        pitchRatio: 1.02
+      serious:
+        speedRatio: 0.98
+      sleepy:
+        speedRatio: 0.9
+        pitchRatio: 0.96
   oneapi_tools:
     - likeTool
     - pokeTool

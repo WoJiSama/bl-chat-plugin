@@ -20,6 +20,7 @@ import { factShortId } from "../utils/memory/entityModel.js"
 import { stripChatLogSpeakerPrefix, stripChatLogSpeakerPrefixes } from "../utils/replySanitizer.js"
 import { splitParchmentReplyText } from "../utils/parchmentReply.js"
 import { buildMissingImageAnalysisReply, looksLikeImageAuthenticityRequest, looksLikeImageVerificationRequest, looksLikeVisualInspectionRequest } from "../utils/imageRequestGuard.js"
+import { compileImagePrompt } from "../utils/promptCompiler.js"
 import fs from "fs"
 import YAML from "yaml"
 import path from "path"
@@ -46,7 +47,7 @@ const clearGroupMemoryPending = new Map()
 const CLEAR_GROUP_MEMORY_CONFIRM_TTL_MS = 30000
 
 // 终态工具：本轮调用后不再请求 LLM 续话（工具的执行结果本身即为最终输出）
-const TERMINAL_TOOL_NAMES = new Set(['sendLocalEmojiTool', 'waitTool', 'bananaTool', 'googleImageEditTool'])
+const TERMINAL_TOOL_NAMES = new Set(['sendLocalEmojiTool', 'waitTool', 'bananaTool', 'googleImageEditTool', 'voiceTool'])
 const BACKGROUND_TERMINAL_TOOL_NAMES = new Set(['bananaTool', 'googleImageEditTool'])
 
 const activeDedupeToolRuns = new Map()
@@ -4598,7 +4599,7 @@ ${mcpPrompts}
           if (session.tools?.length) {
             toolChoice = { type: "function", function: { name: "bananaTool" } }
             forcedToolCall = this.buildForcedToolCall("bananaTool", {
-              prompt: this.buildImageGenerationPrompt({ e, args, msg, currentIntentText, userContent }),
+              prompt: this.buildImageGenerationPrompt({ e, args, msg, currentIntentText, userContent, images }),
               images
             })
             logger.info(`[工具选择] group=${groupId} 强制使用 bananaTool 处理生图请求`)
@@ -4979,36 +4980,29 @@ ${mcpPrompts}
       1800
     )
     const quotedContext = this.getQuotedPromptContextText(context.e, context.userContent)
+    const recentContext = this.getRecentPromptContextText(
+      context.groupUserMessages || context.messages || [],
+      context.userContent || context.currentIntentText || basePrompt,
+      900
+    )
     const referenceText = [
       context.prompt,
       context.args,
       context.msg,
       context.currentIntentText,
-      context.userContent
+      context.userContent,
+      quotedContext
     ].filter(Boolean).join("\n")
 
-    if (!quotedContext || !hasContextualDrawReference(referenceText)) {
-      return basePrompt
-    }
-
-    const normalizedPrompt = normalizeForContainment(basePrompt)
-    const normalizedQuote = normalizeForContainment(quotedContext)
-    if (normalizedQuote && normalizedPrompt.includes(normalizedQuote.slice(0, 24))) {
-      return basePrompt
-    }
-
-    const lines = [
-      `用户当前绘图要求：${basePrompt || "根据引用内容生成图片"}`,
-      "必须根据下面被引用的原文内容作画，不能另起无关题材，不能把故事改成数学课堂、随机校园段子或和原文无关的剧情。",
-      "如果引用内容里有不适合直接入画的细节，要改成含蓄的脸红、靠近、躲闪、撒娇、牵手、拥抱、温柔安抚等全年龄画面；不要丢掉人物关系、对话顺序和主要台词含义。",
-      `被引用内容：\n${quotedContext}`
-    ]
-
-    if (COMIC_DRAW_PATTERN.test(referenceText)) {
-      lines.push("画面形式：一张图内做成多格连环画/漫画分镜；每格围绕引用对话推进，保留主要人物、关系、情绪转折和关键台词，只允许少量压缩台词，不要胡编新剧情。")
-    }
-
-    return compactDrawPromptText(lines.join("\n\n"), 3900)
+    return compileImagePrompt({
+      task: "image_generation",
+      userPrompt: basePrompt,
+      quotedContext,
+      recentContext,
+      hasReferenceImages: Array.isArray(context.images) && context.images.length > 0,
+      hasContextualReference: hasContextualDrawReference(referenceText),
+      isComic: COMIC_DRAW_PATTERN.test(referenceText)
+    })
   }
 
   buildImageEditPrompt(context = {}) {
@@ -5023,22 +5017,23 @@ ${mcpPrompts}
       1200
     )
 
-    const lines = [
-      `用户当前修图/重绘要求：${basePrompt}`,
-      "必须以用户提供或引用的图片为主体来改，不要另起无关题材。",
-      "如果用户说“这个、这张、它、上面、前面、刚才”，要结合下面的引用内容和近期对话理解指代。",
-      "保留参考图里的主要人物身份、构图关系和可识别特征；除非用户明确要求替换，否则不要把主体改没。"
-    ]
+    const referenceText = [
+      context.prompt,
+      context.args,
+      context.msg,
+      context.currentIntentText,
+      context.userContent,
+      quotedContext
+    ].filter(Boolean).join("\n")
 
-    if (quotedContext) {
-      lines.push(`用户引用/回复的上下文：\n${quotedContext}`)
-    }
-    if (recentContext) {
-      lines.push(`近期相关对话，只提取和本次修图有关的信息：\n${recentContext}`)
-    }
-
-    lines.push("输出目标：按用户要求完成图片编辑，画面自然、主体清楚、风格一致；不要把无关聊天内容画进图里。")
-    return compactDrawPromptText(lines.join("\n\n"), 4200)
+    return compileImagePrompt({
+      task: "image_edit",
+      userPrompt: basePrompt,
+      quotedContext,
+      recentContext,
+      hasReferenceImages: true,
+      hasContextualReference: hasContextualDrawReference(referenceText)
+    })
   }
 
 	  buildForcedToolCall(toolName, params = {}) {
@@ -5285,7 +5280,8 @@ ${mcpPrompts}
             args,
             msg,
             currentIntentText,
-            userContent: context.userContent
+            userContent: context.userContent,
+            images
           }),
           images
         }
@@ -5555,17 +5551,18 @@ ${mcpPrompts}
     }
     if (toolName === "bananaTool") {
       if (!params.prompt && session.rawArgs) params.prompt = session.rawArgs
+      if ((!Array.isArray(params.images) || !params.images.length) && session.images?.length) {
+        params.images = session.images
+      }
       params.prompt = this.buildImageGenerationPrompt({
         e,
         prompt: params.prompt,
         args: session.rawArgs,
         msg: e?.msg,
         currentIntentText: [session.rawArgs, e?.msg].filter(Boolean).join("\n"),
-        userContent: session.userContent
+        userContent: session.userContent,
+        images: params.images
       }) || params.prompt
-      if ((!Array.isArray(params.images) || !params.images.length) && session.images?.length) {
-        params.images = session.images
-      }
     }
 
     if (toolName === "jinyanTool" && senderRole) {
