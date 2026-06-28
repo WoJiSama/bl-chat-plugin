@@ -73,6 +73,7 @@ const FORWARD_CONTEXT_MAX_DEPTH = 4
 const FORWARD_CONTEXT_MAX_LINES = 120
 const FORWARD_CONTEXT_MAX_TEXT = 9000
 let activeChatLruTimer = null // 全局 24h LRU 扫描定时器，进程内单例
+let durableToolRecoveryStarted = false
 const roleMap = { owner: "owner", admin: "admin", member: "member" }
 const PSEUDO_TOOL_MARKERS = [
   "tool", "tools", "tool_call", "toolcall", "function", "function_call", "functioncall", "func", "call", "voice", "audio", "tts", "image", "img",
@@ -1575,6 +1576,31 @@ export class ExamplePlugin extends plugin {
     }
 
     pluginBridge.instance = this
+    this.startDurableToolRecovery()
+  }
+
+  startDurableToolRecovery() {
+    if (durableToolRecoveryStarted) return
+    durableToolRecoveryStarted = true
+
+    const recover = async () => {
+      const recoverableTools = Object.values(this.toolInstances || {})
+        .filter(tool => typeof tool?.recoverDurableJobs === "function")
+      for (const tool of recoverableTools) {
+        try {
+          await tool.recoverDurableJobs()
+        } catch (error) {
+          logger.error(`[持久任务] 恢复 ${tool.name || "unknown"} 失败:`, error)
+        }
+      }
+    }
+
+    const timer = setTimeout(() => {
+      recover().catch(error => logger.error("[持久任务] 启动恢复失败:", error))
+    }, 3000)
+    timer.unref?.()
+
+    this.localToolsReadyPromise?.then(() => recover()).catch(() => {})
   }
 
   /**

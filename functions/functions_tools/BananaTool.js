@@ -4,6 +4,7 @@ import { dependencies } from "../../dependence/dependencies.js";
 import fs from "fs";
 import YAML from "yaml";
 import path from "path";
+import { randomUUID } from "crypto";
 import { pluginBridge } from "../../utils/pluginBridge.js";
 import {
   DEFAULT_IMAGE_GENERATION_URL,
@@ -47,6 +48,9 @@ const IMAGE_GENERATION_DONE_MESSAGES = [
   "这张先给你看，我感觉还行，但细节可能有点跑。",
   "出来了出来了，我有点紧张，你先看看。"
 ];
+const DRAW_JOB_PREFIX = "ytbot:image_draw_job:";
+const DRAW_QUEUE_PREFIX = "ytbot:image_draw_queue:";
+const DRAW_JOB_TTL_SECONDS = 24 * 60 * 60;
 const imageGenerationScopes = new Map();
 
 export class BananaTool extends AbstractTool {
@@ -79,6 +83,7 @@ export class BananaTool extends AbstractTool {
     if (!prompt) return "错误：绘图提示词（prompt）不能为空。";
 
     const job = {
+      id: this.createDrawJobId(e),
       opts: this.cloneDrawOptions(opts),
       e,
       scopeKey: this.getDrawScopeKey(e),
@@ -90,6 +95,7 @@ export class BananaTool extends AbstractTool {
       skipProgressNotice: false
     };
     const queueState = this.getDrawQueueState(job.scopeKey);
+    await this.persistDrawJob(job);
 
     if (queueState.activeTask) {
       job.notifyFailure = true;
@@ -105,8 +111,11 @@ export class BananaTool extends AbstractTool {
   }
 
   async runDrawJob(job) {
+    if (!job.id) job.id = this.createDrawJobId(job.e);
+    await this.persistDrawJob(job);
     const queueState = this.getDrawQueueState(job.scopeKey);
     queueState.activeTask = {
+      jobId: job.id,
       requesterName: job.requesterName,
       requesterId: job.requesterId,
       groupId: job.e?.group_id || "",
@@ -122,11 +131,16 @@ export class BananaTool extends AbstractTool {
       if (job.notifyFailure && this.isErrorResult(result)) {
         await job.e.reply(this.getQueuedFailureMessage());
       }
+      await this.markDrawMessageStatus(job, result);
       return result;
     } finally {
       queueState.activeTask = null;
+      await this.removeDurableDrawJob(job);
       await this.clearDrawTaskStatus(job);
       this.runNextQueuedDraw(job.scopeKey);
+      setImmediate(() => this.processDurableDrawQueue(job.scopeKey).catch(error => {
+        this.logWarn(`[图片队列] 恢复后继续处理队列失败: ${error.message}`);
+      }));
     }
   }
 
@@ -175,6 +189,270 @@ export class BananaTool extends AbstractTool {
       this.logError("[图片队列] 后台绘图任务失败:", error);
       this.cleanupDrawQueueState(scopeKey, queueState);
     });
+  }
+
+  async markDrawMessageStatus(job, result) {
+    const instance = pluginBridge.instance;
+    if (!instance?.saveTaskStatus || !job?.messageId) return;
+    try {
+      const failed = this.isErrorResult(result);
+      await instance.saveTaskStatus({
+        groupId: job.e?.group_id || "",
+        userId: job.requesterId || job.e?.user_id || job.e?.sender?.user_id || "",
+        messageId: job.messageId,
+        status: failed ? "tool_failed" : "tool_success",
+        toolName: this.name,
+        error: failed ? this.serializeResultError(result) : ""
+      });
+    } catch (error) {
+      this.logWarn(`[图片队列] 同步消息任务状态失败: ${error.message}`);
+    }
+  }
+
+  serializeResultError(result) {
+    if (!result) return "";
+    if (typeof result === "string") return result;
+    return result.error ? String(result.error) : JSON.stringify(result).slice(0, 200);
+  }
+
+  createDrawJobId(e) {
+    const groupId = e?.group_id || "private";
+    const userId = e?.user_id || e?.sender?.user_id || "unknown";
+    const messageId = e?.message_id || randomUUID();
+    return `${groupId}:${userId}:${messageId}:${Date.now()}:${randomUUID().slice(0, 8)}`;
+  }
+
+  getRedis() {
+    return globalThis.redis || (typeof redis !== "undefined" ? redis : null);
+  }
+
+  getDurableJobKey(jobId) {
+    return `${DRAW_JOB_PREFIX}${jobId}`;
+  }
+
+  getDurableQueueKey(scopeKey) {
+    return `${DRAW_QUEUE_PREFIX}${scopeKey || "private:unknown"}`;
+  }
+
+  getDurableTtlSeconds() {
+    return Math.max(DRAW_JOB_TTL_SECONDS, Number(pluginBridge.instance?.getTaskStatusTtlSeconds?.()) || 0);
+  }
+
+  serializeDrawJob(job) {
+    const e = job.e || {};
+    const userId = job.requesterId || e.user_id || e.sender?.user_id || "";
+    const groupId = e.group_id || "";
+    return {
+      id: job.id,
+      opts: this.cloneDrawOptions(job.opts),
+      scopeKey: job.scopeKey || this.getDrawScopeKey(e),
+      requesterName: job.requesterName || this.getRequesterDisplayName(e),
+      requesterId: String(userId || ""),
+      userId: String(userId || ""),
+      groupId: groupId ? String(groupId) : "",
+      messageId: job.messageId || e.message_id || "",
+      messageType: e.message_type || (groupId ? "group" : "private"),
+      selfId: e.self_id || "",
+      sender: {
+        user_id: userId ? Number(userId) : undefined,
+        nickname: e.sender?.nickname || e.nickname || job.requesterName || "",
+        card: e.sender?.card || ""
+      },
+      queuedAt: job.queuedAt || Date.now(),
+      notifyFailure: Boolean(job.notifyFailure),
+      skipProgressNotice: Boolean(job.skipProgressNotice)
+    };
+  }
+
+  deserializeDrawJob(record) {
+    const e = this.buildRecoveredEvent(record);
+    return {
+      id: record.id,
+      opts: this.cloneDrawOptions(record.opts || {}),
+      e,
+      scopeKey: record.scopeKey || this.getDrawScopeKey(e),
+      requesterName: record.requesterName || this.getRequesterDisplayName(e),
+      requesterId: record.requesterId || record.userId || e.user_id || "",
+      messageId: record.messageId || "",
+      queuedAt: record.queuedAt || Date.now(),
+      notifyFailure: Boolean(record.notifyFailure),
+      skipProgressNotice: true,
+      recovered: true
+    };
+  }
+
+  buildRecoveredEvent(record = {}) {
+    const bot = globalThis.Bot || (typeof Bot !== "undefined" ? Bot : null);
+    const groupId = record.groupId ? Number(record.groupId) : null;
+    const userId = Number(record.userId || record.requesterId || 0) || 0;
+    const isGroup = Boolean(groupId);
+    const event = {
+      group_id: groupId,
+      user_id: userId,
+      sender: {
+        ...(record.sender || {}),
+        user_id: userId
+      },
+      message_id: record.messageId || "",
+      message_type: record.messageType || (isGroup ? "group" : "private"),
+      self_id: record.selfId || bot?.uin || "",
+      bot,
+      isGroup
+    };
+    event.reply = async message => {
+      if (isGroup) {
+        const group = bot?.pickGroup?.(groupId);
+        if (group?.sendMsg) return await group.sendMsg(message);
+        if (bot?.sendApi) return await bot.sendApi("send_group_msg", { group_id: groupId, message });
+      } else if (userId) {
+        const friend = bot?.pickFriend?.(userId);
+        if (friend?.sendMsg) return await friend.sendMsg(message);
+        if (bot?.sendApi) return await bot.sendApi("send_private_msg", { user_id: userId, message });
+      }
+      throw new Error("无法恢复发送上下文");
+    };
+    return event;
+  }
+
+  async persistDrawJob(job) {
+    const store = this.getRedis();
+    if (!store || !job?.id) return;
+    try {
+      const record = this.serializeDrawJob(job);
+      const ttl = this.getDurableTtlSeconds();
+      await store.set(this.getDurableJobKey(record.id), JSON.stringify(record), { EX: ttl });
+      await this.appendDurableQueue(record.scopeKey, record.id, ttl);
+    } catch (error) {
+      this.logWarn(`[图片队列] 持久化任务失败，重启后可能无法恢复: ${error.message}`);
+    }
+  }
+
+  async appendDurableQueue(scopeKey, jobId, ttl = DRAW_JOB_TTL_SECONDS) {
+    const list = await this.readDurableQueue(scopeKey);
+    if (!list.includes(jobId)) list.push(jobId);
+    await this.writeDurableQueue(scopeKey, list, ttl);
+  }
+
+  async readDurableQueue(scopeKey) {
+    const store = this.getRedis();
+    if (!store) return [];
+    const raw = await store.get(this.getDurableQueueKey(scopeKey));
+    if (!raw) return [];
+    try {
+      const list = JSON.parse(raw);
+      return Array.isArray(list) ? list.filter(Boolean) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  async writeDurableQueue(scopeKey, list, ttl = DRAW_JOB_TTL_SECONDS) {
+    const store = this.getRedis();
+    if (!store) return;
+    const key = this.getDurableQueueKey(scopeKey);
+    const normalized = [...new Set((list || []).filter(Boolean))];
+    if (!normalized.length) {
+      await store.del(key);
+      return;
+    }
+    await store.set(key, JSON.stringify(normalized), { EX: ttl });
+  }
+
+  async removeDurableDrawJob(job) {
+    const store = this.getRedis();
+    if (!store || !job?.id) return;
+    try {
+      await store.del(this.getDurableJobKey(job.id));
+      const list = await this.readDurableQueue(job.scopeKey);
+      await this.writeDurableQueue(job.scopeKey, list.filter(id => id !== job.id), this.getDurableTtlSeconds());
+    } catch (error) {
+      this.logWarn(`[图片队列] 清理持久任务失败: ${error.message}`);
+    }
+  }
+
+  async readDurableDrawJob(jobId) {
+    const store = this.getRedis();
+    if (!store || !jobId) return null;
+    const raw = await store.get(this.getDurableJobKey(jobId));
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      await store.del(this.getDurableJobKey(jobId));
+      return null;
+    }
+  }
+
+  async scanRedisKeys(pattern) {
+    const store = this.getRedis();
+    if (!store) return [];
+    if (typeof store.scanIterator === "function") {
+      const keys = [];
+      for await (const key of store.scanIterator({ MATCH: pattern, COUNT: 200 })) {
+        if (Array.isArray(key)) keys.push(...key);
+        else keys.push(key);
+      }
+      return keys;
+    }
+    if (typeof store.scan === "function") {
+      const keys = [];
+      let cursor = "0";
+      do {
+        const [nextCursor, batch = []] = await store.scan(cursor, "MATCH", pattern, "COUNT", 200);
+        cursor = String(nextCursor);
+        keys.push(...batch);
+      } while (cursor !== "0");
+      return keys;
+    }
+    return typeof store.keys === "function" ? await store.keys(pattern) : [];
+  }
+
+  async recoverDurableJobs() {
+    const keys = await this.scanRedisKeys(`${DRAW_QUEUE_PREFIX}*`);
+    if (!keys.length) return;
+    this.logInfo(`[图片队列] 发现 ${keys.length} 个持久队列，准备恢复未完成绘图任务`);
+    for (const key of keys) {
+      const scopeKey = key.slice(DRAW_QUEUE_PREFIX.length);
+      await this.processDurableDrawQueue(scopeKey);
+    }
+  }
+
+  async processDurableDrawQueue(scopeKey) {
+    const queueState = this.getDrawQueueState(scopeKey);
+    if (queueState.activeTask || queueState.recovering) return;
+    queueState.recovering = true;
+
+    try {
+      const ids = await this.readDurableQueue(scopeKey);
+      if (!ids.length) return;
+
+      for (const jobId of ids) {
+        const record = await this.readDurableDrawJob(jobId);
+        if (!record) {
+          await this.writeDurableQueue(scopeKey, ids.filter(id => id !== jobId), this.getDurableTtlSeconds());
+          continue;
+        }
+
+        const job = this.deserializeDrawJob(record);
+        this.logInfo(`[图片队列] 恢复未完成绘图任务 scope=${scopeKey} requester=${job.requesterName} message=${job.messageId}`);
+        await this.sendRecoveredNotice(job);
+        queueState.recovering = false;
+        this.runDrawJob(job).catch(error => {
+          this.logError("[图片队列] 恢复绘图任务失败:", error);
+        });
+        return;
+      }
+    } finally {
+      if (queueState.recovering) queueState.recovering = false;
+    }
+  }
+
+  async sendRecoveredNotice(job) {
+    try {
+      await job.e.reply("刚刚我这边重启了一下，不过这张图我还记着呢。我继续画，出来了会直接发给你。");
+    } catch (error) {
+      this.logWarn(`[图片队列] 发送恢复提示失败: ${error.message}`);
+    }
   }
 
   async performDraw(opts, e, options = {}) {
@@ -264,7 +542,7 @@ export class BananaTool extends AbstractTool {
   }
 
   cleanupDrawQueueState(scopeKey, queueState) {
-    if (!queueState.activeTask && queueState.queue.length === 0) {
+    if (!queueState.activeTask && !queueState.recovering && queueState.queue.length === 0) {
       imageGenerationScopes.delete(scopeKey);
     }
   }
