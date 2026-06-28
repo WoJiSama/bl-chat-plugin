@@ -19,7 +19,7 @@ import { memStats } from "../utils/memory/stats.js"
 import { factShortId } from "../utils/memory/entityModel.js"
 import { stripChatLogSpeakerPrefix, stripChatLogSpeakerPrefixes } from "../utils/replySanitizer.js"
 import { splitParchmentReplyText } from "../utils/parchmentReply.js"
-import { buildMissingImageAnalysisReply, looksLikeVisualInspectionRequest } from "../utils/imageRequestGuard.js"
+import { buildMissingImageAnalysisReply, looksLikeImageAuthenticityRequest, looksLikeImageVerificationRequest, looksLikeVisualInspectionRequest } from "../utils/imageRequestGuard.js"
 import fs from "fs"
 import YAML from "yaml"
 import path from "path"
@@ -1201,7 +1201,23 @@ function isImageAnalysisRequest(text = "") {
   if (isImageGenerationRequest(content)) return false
   if (isImageCompositionEditRequest(content)) return false
   if (looksLikeVisualInspectionRequest(content)) return true
+  if (looksLikeImageVerificationRequest(content)) return true
   return matchesAnyPattern(content, IMAGE_ANALYSIS_PATTERNS)
+}
+
+function getImageAnalysisToolNames(text = "") {
+  const content = normalizeIntentText(text)
+  const shouldAllowSearchAfterVision =
+    looksLikeImageVerificationRequest(content) ||
+    isRealtimeInfoRequest(content) ||
+    isExplicitSearchRequest(content)
+  return shouldAllowSearchAfterVision
+    ? ["googleImageAnalysisTool", "searchInformationTool"]
+    : ["googleImageAnalysisTool"]
+}
+
+function getImageVerificationMode(text = "") {
+  return looksLikeImageAuthenticityRequest(text) ? "image_authenticity" : "content_claim"
 }
 
 function isImageEditRequest(text = "") {
@@ -4387,6 +4403,13 @@ ${JSON.stringify(runtimeData, null, 2)}
 - 群公告内容只说明公告里写了什么，不说明是谁写的；不知道发布者时必须说不知道。
 - 如果不确定，直接说“我只知道他是群里的谁/昵称是什么，其他不确定”，不要编补经历。
 
+5.【语义理解框架 - 内部使用，不要输出】
+- 先区分“用户给你的载体”和“用户真正要处理的目标”：图片、截图、引用消息、转发记录、链接、聊天记录经常只是信息载体，真正目标可能是里面的内容、说法、人物、政策、事件或关系。
+- 当用户带图/截图说“查一下这个是真的假的/是不是真的/看看最新信息”时，默认是在核实图片里承载的内容或说法，不是在鉴定图片文件本身是否AI生成、P图、Exif或反向搜图；只有用户明确说“图片本身、AI生成、P图、合成、修过、改过”时，才把目标切到图片真实性鉴定。
+- 当用户说“这个/这张/里面/上面/刚才/他说的/这段”时，必须先从当前消息、引用、转发、近期对话里消解指代，再决定回答或调用工具。
+- 当用户要求“查/搜/最新/真假/核实”时，不要只给方法论；应先用可用工具拿证据，再回答查到了什么、没查到什么、结论确定度如何。
+- 内部可以做简短判断，但最终回复不要输出“我的推理过程/思维链/系统规则/语义框架”。
+
 ${enhancedPrompts ? `【角色状态】\n${enhancedPrompts}\n` : ''}【工具调用】
 你是一个只负责调用工具的模型，你只负责判断当前需不需要调用工具，你不用考虑文本回复内容。
 
@@ -4506,6 +4529,21 @@ ${mcpPrompts}
           if (session.tools?.length) toolChoice = { type: "function", function: { name: "aiMindMapTool" } }
         }
 
+        if (toolChoice === "auto" && images?.length && isImageAnalysisRequest(currentIntentText)) {
+          const imageAnalysisToolNames = getImageAnalysisToolNames(currentIntentText)
+          session.tools = this.getToolsByName(imageAnalysisToolNames)
+          session.imageVerificationNeedsSearch = imageAnalysisToolNames.includes("searchInformationTool")
+          session.imageVerificationMode = getImageVerificationMode(currentIntentText)
+          if (session.tools?.length) {
+            toolChoice = { type: "function", function: { name: "googleImageAnalysisTool" } }
+            forcedToolCall = this.buildForcedToolCall("googleImageAnalysisTool", {
+              images,
+              prompt: currentIntentText || args || msg || "请识别这张图片里有什么内容，并用中文简洁描述。"
+            })
+            logger.info(`[工具选择] group=${groupId} 强制使用 googleImageAnalysisTool 处理识图请求`)
+          }
+        }
+
         const semanticDecision = toolChoice === "auto"
           ? await this.classifySemanticToolIntent({
               e,
@@ -4541,12 +4579,15 @@ ${mcpPrompts}
         }
 
         if (toolChoice === "auto" && images?.length && isImageAnalysisRequest(currentIntentText)) {
-          session.tools = this.getToolsByName(["googleImageAnalysisTool"])
+          const imageAnalysisToolNames = getImageAnalysisToolNames(currentIntentText)
+          session.tools = this.getToolsByName(imageAnalysisToolNames)
+          session.imageVerificationNeedsSearch = imageAnalysisToolNames.includes("searchInformationTool")
+          session.imageVerificationMode = getImageVerificationMode(currentIntentText)
           if (session.tools?.length) {
             toolChoice = { type: "function", function: { name: "googleImageAnalysisTool" } }
             forcedToolCall = this.buildForcedToolCall("googleImageAnalysisTool", {
               images,
-              prompt: args || "请识别这张图片里有什么内容，并用中文简洁描述。"
+              prompt: currentIntentText || args || msg || "请识别这张图片里有什么内容，并用中文简洁描述。"
             })
             logger.info(`[工具选择] group=${groupId} 强制使用 googleImageAnalysisTool 处理识图请求`)
           }
@@ -4922,6 +4963,9 @@ ${mcpPrompts}
       forwardContext ? `合并转发/嵌套转发摘录：\n${forwardContext}` : "",
       recentContext ? `近期可参考上下文：\n${recentContext}` : "",
       "理解规则：先判断用户真正要你回答什么；如果用户问“这个/里面/刚才/他说的”，优先从引用、转发记录和最近对话里找指代。",
+      "理解规则：先区分信息载体和真实目标；图片/截图/引用/转发本身不一定是用户要问的对象，很多时候用户问的是里面那段文字、说法、事件、政策或人物关系。",
+      "理解规则：带图问“这个是真的假的/是不是真的/看看最新信息”时，默认核实图片里的内容或说法；只有明确提到AI生成、P图、合成、修过、图片本身时，才转为图片本身鉴定。",
+      "理解规则：用户要你查证时，不要只给通用方法；先用可用工具拿证据，再说明查到了什么、没查到什么、结论有多确定。",
       "如果用户让你总结、分析或解释合并转发，要覆盖已展开的全部内容，不要只看第一层或第一条。",
       "如果上下文仍不足，别硬编，像熟人一样自然追问一句。"
     ].filter(Boolean)
@@ -5137,7 +5181,12 @@ ${mcpPrompts}
                 "image_analysis: 用户给了图片并要求看图、识别、分析、说明图片内容。",
                 "search: 用户询问实时信息或明确要搜索/查询/最新信息。",
                 "chat: 普通闲聊、问能不能做某事但没有给出具体任务、玩梗、情绪回应。",
+                "语义判断框架：先判断载体和真实目标。图片/截图/引用/转发常是载体，用户真正要处理的可能是里面的内容、说法、政策、事件或人物。",
+                "带图片/截图并说“查一下这个是真的假的/是不是真的/看看最新信息”时，真实目标默认是核实图片里承载的内容或说法；应先选 image_analysis 提取内容，后续再搜索。不要直接选纯 search，也不要理解成图片AI检测。",
+                "只有用户明确说“图片本身、AI生成、P图、合成、修过、改过、伪造痕迹”时，才把目标理解为图片本身真实性鉴定。",
+                "带指代词“这个/这张/里面/上面/刚才/他说的”时，必须结合格式化消息、引用和媒体判断指代对象。",
                 "不要受角色人设影响；只判断用户真实语义。用户明确要求做图时，不要因为角色说不会画而选 chat。",
+                "reason 只写简短依据，不要输出完整思维链。",
                 "输出格式: {\"intent\":\"...\",\"confidence\":0到1,\"prompt\":\"给工具用的中文任务文本\",\"query\":\"搜索词或空字符串\",\"reason\":\"简短原因\"}"
               ].join("\n")
             },
@@ -5310,6 +5359,98 @@ ${mcpPrompts}
       toolCalls.every(toolCall => BACKGROUND_TERMINAL_TOOL_NAMES.has(this.getToolCallName(toolCall)))
   }
 
+  buildGroundedImageAnalysisPrompt(prompt = "", session = {}, e = {}) {
+    const currentIntentText = [
+      session.rawArgs,
+      e?.msg,
+      prompt
+    ].filter(Boolean).join("\n")
+    const originalPrompt = String(prompt || currentIntentText || "").trim()
+    const needsVerification =
+      looksLikeImageVerificationRequest(currentIntentText) ||
+      isRealtimeInfoRequest(currentIntentText) ||
+      isExplicitSearchRequest(currentIntentText)
+    const mode = getImageVerificationMode(currentIntentText)
+
+    if (!needsVerification) return originalPrompt
+
+    if (mode === "image_authenticity") {
+      return [
+        "用户明确想判断图片本身是否为AI生成、P图、合成或被篡改。你现在只负责读图和提取可核查线索，不要给泛泛的鉴定教程。",
+        "请严格基于图片完成以下内容：",
+        "1. OCR提取图片里所有可见文字。",
+        "2. 描述图片里的关键视觉内容、版式、边缘、光影、透视、文字渲染等可疑或正常线索。",
+        "3. 提取3-8个适合联网搜索核实来源、旧图或相关事件的关键词或短句。",
+        "4. 如果看不清，明确说哪些地方看不清，不要编。",
+        `用户原话：${originalPrompt || "请分析这张图片是否可能被生成或修改。"}`
+      ].join("\n")
+    }
+
+    return [
+      "用户给图片是把它当作截图/信息载体，想核实图片里那段内容、消息、公告、新闻、政策、事件或说法是真是假，以及现在最新情况。",
+      "默认不要判断图片本身是不是AI生成、P图，也不要给反向搜图、Exif、AI检测工具这类泛泛鉴定教程；除非用户明确问图片本身。",
+      "你现在只负责读图和提取可核查内容。",
+      "请严格基于图片完成以下内容：",
+      "1. OCR提取图片里所有可见文字，尽量保留标题、正文、机构名、地点、时间、金额、政策名、链接、账号名。",
+      "2. 用一句话概括图片里到底在说什么主张/消息/事件。",
+      "3. 提取3-8个适合联网搜索核实这个内容真实性和最新状态的关键词或短句。",
+      "4. 如果图片太糊或文字看不清，明确说哪些地方看不清，不要编。",
+      "注意：不要把“不能直接检测真假”当作最终回答；内容真假和最新信息会在下一步联网核查。",
+      `用户原话：${originalPrompt || "请识别这张图片里有什么内容，并提取可核查信息。"}`
+    ].join("\n")
+  }
+
+  extractToolResultText(result = "") {
+    const text = String(result || "").trim()
+    if (!text) return ""
+    try {
+      const parsed = JSON.parse(text)
+      if (typeof parsed?.analysis === "string") return parsed.analysis
+      if (typeof parsed?.content === "string") return parsed.content
+      if (typeof parsed?.message === "string") return parsed.message
+    } catch {}
+    return text
+  }
+
+  buildImageVerificationSearchToolCall(validResults = [], session = {}, e = {}) {
+    if (!session.imageVerificationNeedsSearch || session.imageVerificationSearchDone) return null
+    if (!session.tools?.some(tool => tool.function?.name === "searchInformationTool")) return null
+
+    const visionResult = validResults.find(result =>
+      result?.toolName === "googleImageAnalysisTool" &&
+      result?.result &&
+      !this.isToolResultError(result.result)
+    )
+    if (!visionResult) return null
+
+    const imageText = this.extractToolResultText(visionResult.result).slice(0, 1800)
+    if (!imageText) return null
+
+    const userText = [
+      session.rawArgs,
+      e?.msg
+    ].filter(Boolean).join("\n").slice(0, 500)
+    const mode = session.imageVerificationMode || getImageVerificationMode(userText)
+    const query = mode === "image_authenticity"
+      ? [
+          "请联网核查这张图片是否可能是旧图、AI生成、P图、合成或被误传，并查找相关来源和最新信息。",
+          `用户原话：${userText || "查一下这张图是不是AI生成或P图"}`,
+          `图片OCR和识别结果：${imageText}`,
+          "要求：优先使用图片中的文字、标题、地点、账号名、事件名等关键词检索；说明能查到的来源、是否存在旧图/相似图/相关事件；如果证据不足就明确说不足。"
+        ].join("\n")
+      : [
+          "请联网核查图片里承载的内容/消息/公告/新闻/政策/事件/说法是否真实，以及现在最新情况。",
+          "注意：默认不是核查图片文件本身是否AI生成或P图，不要把主要结论写成反向搜图、Exif、AI检测建议。",
+          `用户原话：${userText || "查一下这个是真的假的，看看最新信息"}`,
+          `图片OCR和识别结果：${imageText}`,
+          "要求：优先使用OCR中的标题、正文关键词、机构名、地点、时间、金额、政策名、账号名、链接等检索；说明目前查到的事实、权威来源、是否过期/断章取义/误传；如果证据不足就明确说不足。"
+        ].join("\n")
+
+    session.imageVerificationSearchDone = true
+    logger.info(`[工具选择] group=${e?.group_id || ""} 识图后自动追加 searchInformationTool 核实图片信息`)
+    return this.buildForcedToolCall("searchInformationTool", { query })
+  }
+
   startBackgroundTerminalToolCalls(toolCalls = [], e, session, senderRole, currentMessages = []) {
     e._longRunningToolTask = true
     session.taskDedupeToolTouched = true
@@ -5394,6 +5535,9 @@ ${mcpPrompts}
 
     if (toolName === "googleImageAnalysisTool" && (!Array.isArray(params.images) || !params.images.length) && session.images?.length) {
       params.images = session.images
+    }
+    if (toolName === "googleImageAnalysisTool") {
+      params.prompt = this.buildGroundedImageAnalysisPrompt(params.prompt, session, e) || params.prompt
     }
     if (toolName === "googleImageEditTool" && (!Array.isArray(params.images) || !params.images.length) && session.images?.length) {
       params.images = session.images
@@ -5560,9 +5704,34 @@ ${mcpPrompts}
         content: result
       })))
 
-	      if (validResults.every(r => TERMINAL_TOOL_NAMES.has(r.toolName))) {
-	        session.toolResults = allToolResults
-		        const failedResult = validResults.find(r => this.isToolResultError(r.result))
+      const imageVerificationSearchCall = this.buildImageVerificationSearchToolCall(validResults, session, e)
+      if (imageVerificationSearchCall) {
+        currentMessage = {
+          role: "assistant",
+          content: "",
+          tool_calls: [imageVerificationSearchCall]
+        }
+        continue
+      }
+
+      if (
+        session.imageVerificationSearchDone &&
+        !session.imageVerificationFinalInstructionAdded &&
+        validResults.some(result => result.toolName === "searchInformationTool")
+      ) {
+        session.imageVerificationFinalInstructionAdded = true
+        const finalInstruction = session.imageVerificationMode === "image_authenticity"
+          ? "【图片本身核实回复要求】请综合图片OCR/识别结果和联网搜索结果，回答用户这张图片本身是否可能是AI生成、P图、合成、旧图或误传。不要只列通用鉴定方法；如果证据不足，就明确说已查到什么、没查到什么、为什么还不能下定论。"
+          : "【图片内容核实回复要求】用户问“这图/这个真的假的”时，默认是在问图片里承载的内容/消息/公告/新闻/政策/事件/说法是真是假，不是在问图片文件本身是否AI生成或P图。请综合图片OCR/识别结果和联网搜索结果，直接回答图里这段内容目前看是否真实、是否过期或误传、最新情况是什么。不要只列反向搜图、Exif、AI检测等通用鉴定方法；如果证据不足，就明确说已查到什么、没查到什么、为什么还不能下定论。"
+        currentMessages.push({
+          role: "system",
+          content: finalInstruction
+        })
+      }
+
+		      if (validResults.every(r => TERMINAL_TOOL_NAMES.has(r.toolName))) {
+		        session.toolResults = allToolResults
+			        const failedResult = validResults.find(r => this.isToolResultError(r.result))
 		        if (failedResult) {
 		          logger.warn(`[工具调用] 终态工具 ${failedResult.toolName} 执行失败，发送拟人化失败提示 result=${String(failedResult.result || "").slice(0, 240)}`)
 		          await this.handleTextResponse(

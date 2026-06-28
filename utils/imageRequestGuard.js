@@ -1,6 +1,10 @@
 const VISUAL_INSPECTION_VERB_RE = /(?:看看|看下|看一下|看一眼|帮我看|帮我看看|瞅瞅|瞧瞧|评价一下|评一下|分析一下|识别一下)/
 const VISUAL_TARGET_RE = /(?:腿|手|手臂|胳膊|脸|眼睛|头发|发型|衣服|裙子|鞋|穿搭|姿势|表情|身材|比例|细节|画面|图|图片|照片|截图|头像|这个|这张|里面|上面)/
 const NON_VISUAL_ADVICE_RE = /(?:疼|痛|酸|麻|肿|伤|受伤|抽筋|治疗|医生|医院|怎么练|怎么锻炼|如何练|训练|锻炼|拉伸|运动|怎么办|咋办)/
+const IMAGE_REFERENCE_RE = /(?:这个|这张|这图|图|图片|照片|截图|画面|里面|上面|内容|消息|新闻|说法)/
+const VERIFICATION_RE = /(?:真假|真的假的|真假的|是不是真的|是不是假的|是不是真|是不是AI|是不是ai|AI生成|ai生成|P图|p图|伪造|造假|辟谣|核实|查证|验证|可信|靠谱吗|真实性|真不真|假不假)/
+const IMAGE_LOOKUP_RE = /(?:查一下|查查|帮我查|搜一下|搜索|网上查|联网查|看看|看下|看一下|帮我看|最新|现在最新)/
+const IMAGE_AUTHENTICITY_RE = /(?:是不是AI|是不是ai|AI生成|ai生成|P图|p图|P的|p的|修过|改过|合成|伪造痕迹|篡改|图片本身|图本身|这张图本身|这张图片本身)/
 
 function normalizeVisualRequestText(text = "") {
   return String(text || "")
@@ -16,6 +20,20 @@ export function looksLikeVisualInspectionRequest(text = "") {
   if (!VISUAL_INSPECTION_VERB_RE.test(content)) return false
   if (NON_VISUAL_ADVICE_RE.test(content)) return false
   return VISUAL_TARGET_RE.test(content)
+}
+
+export function looksLikeImageVerificationRequest(text = "") {
+  const content = normalizeVisualRequestText(text)
+  if (!content) return false
+  if (NON_VISUAL_ADVICE_RE.test(content)) return false
+  if (VERIFICATION_RE.test(content) && (IMAGE_REFERENCE_RE.test(content) || IMAGE_LOOKUP_RE.test(content))) return true
+  return IMAGE_REFERENCE_RE.test(content) && IMAGE_LOOKUP_RE.test(content) && /(?:真|假|最新|现在|信息|来源|出处)/.test(content)
+}
+
+export function looksLikeImageAuthenticityRequest(text = "") {
+  const content = normalizeVisualRequestText(text)
+  if (!content) return false
+  return IMAGE_AUTHENTICITY_RE.test(content)
 }
 
 export function buildMissingImageAnalysisReply() {
