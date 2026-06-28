@@ -17,6 +17,9 @@ import { pluginBridge } from "../utils/pluginBridge.js"
 import { personProfileInjector } from "../utils/PersonProfileInjector.js"
 import { memStats } from "../utils/memory/stats.js"
 import { factShortId } from "../utils/memory/entityModel.js"
+import { stripChatLogSpeakerPrefix, stripChatLogSpeakerPrefixes } from "../utils/replySanitizer.js"
+import { splitParchmentReplyText } from "../utils/parchmentReply.js"
+import { buildMissingImageAnalysisReply, looksLikeVisualInspectionRequest } from "../utils/imageRequestGuard.js"
 import fs from "fs"
 import YAML from "yaml"
 import path from "path"
@@ -65,6 +68,9 @@ const mutedStatusCache = new Map() // groupId -> { isMuted, at }
 const MUTED_CACHE_TTL_MS = 30000
 const groupContextCache = new Map()
 const GROUP_CONTEXT_CACHE_TTL_MS = 5 * 60 * 1000
+const FORWARD_CONTEXT_MAX_DEPTH = 4
+const FORWARD_CONTEXT_MAX_LINES = 120
+const FORWARD_CONTEXT_MAX_TEXT = 9000
 let activeChatLruTimer = null // 全局 24h LRU 扫描定时器，进程内单例
 const roleMap = { owner: "owner", admin: "admin", member: "member" }
 const PSEUDO_TOOL_MARKERS = [
@@ -800,6 +806,7 @@ function buildPersonaStyleOverride(persona = {}) {
     "- 可以先短后补一句，可以轻微自嘲、犹豫、嘴硬、碎碎念，但不要空话堆叠。",
     "- 禁止说 AI、模型、系统、提示词、上游、API、执行流程、准备执行、整理提示词。",
     "- 禁止客服腔：好的/收到/我来帮你/建议你/为你处理，除非是在转述别人说过的话。",
+    "- 禁止在回复结尾自我审稿或道歉式收尾，例如“我是不是说多了”“好像有点啰嗦”“扯远了”；话多就自然继续说，不要跳出来评价自己。",
     "- 用户明确要代码、Markdown、整理或认真解释时，允许清楚完整，但仍保持口语和希洛口吻。"
   ].join("\n")
 }
@@ -910,10 +917,12 @@ function sanitizeFinalReplyText(content) {
   output = output.replace(/^\s*```[a-zA-Z0-9_-]*\s*\n?([\s\S]*?)\n?```\s*$/g, "$1").trim()
   output = output.replace(/^\s*`([^`]+)`\s*$/g, "$1").trim()
   output = stripCqMarkup(output)
+  output = stripChatLogSpeakerPrefixes(output)
 
   const lines = output.split("\n")
   const sanitizedLines = lines
     .map(line => sanitizePseudoToolLine(line))
+    .map(line => line === null ? null : stripChatLogSpeakerPrefix(line))
     .filter(line => line !== null && String(line).trim() !== "")
 
   return sanitizedLines.join("\n").replace(/\n{3,}/g, "\n").trim()
@@ -934,6 +943,11 @@ function polishHumanReplyText(text = "") {
     .replace(/（\s*(小声|思考|认真|挠头|歪头|偷笑|眨眼|叹气|扶额|托腮|点头|摇头|沉思|笑)\s*）/g, "")
     .replace(/\(\s*(小声|思考|认真|挠头|歪头|偷笑|眨眼|叹气|扶额|托腮|点头|摇头|沉思|笑)\s*\)/gi, "")
     .replace(/(?:整理一下思绪|整理思绪|准备动笔|开始动笔|开始画|提示词优化|整理描述|我先琢磨一下|我先把.*整理好|我来把.*整理好)/g, "")
+    .trim()
+
+  output = output
+    .replace(/(?:^|[\n。！？!?；;])\s*(?:唔|呜|嗯|诶|欸|啊|呃|哎呀?|嘛|那个)?[，,、\s]*(?:我)?(?:是不是|好像|感觉)?(?:说(?:得|的)?有点多了|说多了|讲多了|说太多了|有点啰嗦|有点话多|扯远了|跑题了)[。！？!?~～…\s]*$/g, "")
+    .replace(/(?:唔|呜|嗯|诶|欸|啊|呃|哎呀?|嘛|那个)[，,、\s]*(?:我)?(?:是不是|好像|感觉)?(?:说(?:得|的)?有点多了|说多了|讲多了|说太多了|有点啰嗦|有点话多|扯远了|跑题了)[。！？!?~～…\s]*$/g, "")
     .trim()
 
   output = output.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim()
@@ -1036,66 +1050,6 @@ function looksLikeDiagnosticExplanation(text = "") {
   return score >= 2
 }
 
-function scoreParchmentChatTail(text = "") {
-  const content = String(text || "").trim()
-  if (!content || content.length > 120) return 0
-  if (/```|(?:^|\n)\s*(?:[-*+•]|\d+\.)\s+\S/.test(content)) return 0
-
-  let score = 0
-  if (/(?:\d{1,2}\s*[号日]|今天|明天|后天|周[一二三四五六日天]|星期[一二三四五六日天])?.{0,16}(?:交作业|作业|ddl|deadline).{0,30}(?:来得及|不急|别慌|不用慌|没问题|稳|呀|啦|哦|嘛|呢|~|～)?/i.test(content)) score += 4
-  if (/(?:别慌|先别急|不用慌|不用太慌|放心|没事|问题不大|不难|来得及|稳的|还行|可以的)/.test(content)) score += 2
-  if (/(?:要是|如果|回头|之后).{0,28}(?:再|还).{0,28}(?:发我|给我|我帮你|我再|我看看|继续看|帮你看)/.test(content)) score += 2
-  if (/(?:我帮你|我再|我看看|我来|我盯着|给我看|发我)/.test(content)) score += 1
-  if (/[呀啦哦呢嘛呗吧]|[~～]$/.test(content)) score += 1
-
-  return score
-}
-
-function isParchmentChatTail(text = "") {
-  return scoreParchmentChatTail(text) >= 3
-}
-
-function normalizeParchmentMainText(text = "") {
-  const content = String(text || "").trim().replace(/[，,]\s*$/, "")
-  if (!content) return ""
-  if (/[。！？!?；;：:]$/.test(content) || /```$/.test(content)) return content
-  return `${content}。`
-}
-
-function splitParchmentReplyText(text = "") {
-  const content = String(text || "").trim()
-  if (content.length < 180) return { imageText: content, chatText: "" }
-
-  const blankMatches = [...content.matchAll(/\n\s*\n/g)]
-  const lastBlank = blankMatches.at(-1)
-  if (lastBlank) {
-    const candidate = content.slice(lastBlank.index + lastBlank[0].length).trim()
-    const main = content.slice(0, lastBlank.index).trim()
-    if (main.length >= 120 && isParchmentChatTail(candidate)) {
-      return {
-        imageText: normalizeParchmentMainText(main),
-        chatText: candidate
-      }
-    }
-  }
-
-  const boundaries = [...content.matchAll(/[。！？!?；;，,]\s*/g)]
-  for (let index = boundaries.length - 1; index >= 0; index--) {
-    const boundary = boundaries[index]
-    const candidate = content.slice(boundary.index + boundary[0].length).trim()
-    const main = content.slice(0, boundary.index).trim()
-    if (main.length < 120) break
-    if (isParchmentChatTail(candidate)) {
-      return {
-        imageText: normalizeParchmentMainText(main),
-        chatText: candidate
-      }
-    }
-  }
-
-  return { imageText: content, chatText: "" }
-}
-
 function normalizeIntentText(text = "") {
   return String(text || "")
     .replace(/\[CQ:[^\]]+\]/g, " ")
@@ -1140,6 +1094,102 @@ function compactDrawPromptText(text = "", maxLength = 3800) {
     .slice(0, maxLength)
 }
 
+function parseForwardJsonPayload(value) {
+  if (!value) return null
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value)
+    } catch {
+      return null
+    }
+  }
+  if (typeof value === "object") return value
+  return null
+}
+
+function getSegmentData(segment = {}) {
+  const data = segment?.data
+  if (data && typeof data === "object" && !Array.isArray(data)) return data
+  return {}
+}
+
+function normalizeMessageSegments(message) {
+  if (Array.isArray(message)) return message
+  if (Array.isArray(message?.message)) return message.message
+  if (Array.isArray(message?.content)) return message.content
+  return []
+}
+
+function normalizeForwardMessageList(payload) {
+  const data = payload?.data || payload
+  if (Array.isArray(data)) return data
+  if (Array.isArray(data?.messages)) return data.messages
+  if (Array.isArray(data?.nodes)) return data.nodes
+  return []
+}
+
+function extractForwardIdFromSegment(segment = {}) {
+  const data = getSegmentData(segment)
+  if (segment?.type === "forward") {
+    return segment.id || data.id || segment.resid || data.resid || segment.file || data.file || ""
+  }
+
+  if (segment?.type === "json") {
+    const raw = data.data ?? segment.data
+    const jsonData = parseForwardJsonPayload(raw)
+    if (jsonData?.app === "com.tencent.multimsg") {
+      return jsonData.meta?.detail?.resid || jsonData.meta?.detail?.uniseq || ""
+    }
+  }
+
+  return ""
+}
+
+function extractForwardIdsFromSegments(segments = []) {
+  const ids = []
+  for (const segment of normalizeMessageSegments(segments)) {
+    const id = String(extractForwardIdFromSegment(segment) || "").trim()
+    if (id && !ids.includes(id)) ids.push(id)
+  }
+  return ids
+}
+
+function extractReadableTextFromSegments(segments = [], fallback = "") {
+  const parts = []
+  for (const segment of normalizeMessageSegments(segments)) {
+    const data = getSegmentData(segment)
+    if (segment?.type === "text") {
+      const text = segment.text ?? data.text
+      if (text) parts.push(String(text))
+      continue
+    }
+    if (segment?.type === "at") {
+      const qq = segment.qq ?? data.qq
+      if (qq && String(qq) !== "all") parts.push(`@${qq}`)
+      continue
+    }
+    if (segment?.type === "image") parts.push("[图片]")
+    if (segment?.type === "video") parts.push("[视频]")
+    if (segment?.type === "record") parts.push("[语音]")
+    if (segment?.type === "file") {
+      const fileName = segment.name || data.name || segment.file || data.file
+      parts.push(`[文件${fileName ? `:${fileName}` : ""}]`)
+    }
+  }
+
+  const text = parts.join("").replace(/\s+/g, " ").trim()
+  return text || String(fallback || "").trim()
+}
+
+function getForwardSenderName(message = {}) {
+  return message.sender?.card ||
+    message.sender?.nickname ||
+    message.nickname ||
+    message.user_name ||
+    message.name ||
+    "未知"
+}
+
 function normalizeForContainment(text = "") {
   return normalizeIntentText(text)
     .replace(/[^\p{L}\p{N}\u4e00-\u9fa5]+/gu, "")
@@ -1150,6 +1200,7 @@ function isImageAnalysisRequest(text = "") {
   const content = normalizeIntentText(text)
   if (isImageGenerationRequest(content)) return false
   if (isImageCompositionEditRequest(content)) return false
+  if (looksLikeVisualInspectionRequest(content)) return true
   return matchesAnyPattern(content, IMAGE_ANALYSIS_PATTERNS)
 }
 
@@ -3527,6 +3578,75 @@ ${specialSignalsBlock}
     return `[${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}]`
   }
 
+  async collectForwardPromptLines(group, forwardId, state = {}) {
+    const id = String(forwardId || "").trim()
+    if (!group?.getForwardMsg || !id) return state.lines || []
+
+    const lines = state.lines || []
+    const visited = state.visited || new Set()
+    const depth = Number(state.depth) || 0
+    const maxDepth = Number(state.maxDepth) || FORWARD_CONTEXT_MAX_DEPTH
+    const maxLines = Number(state.maxLines) || FORWARD_CONTEXT_MAX_LINES
+    if (depth >= maxDepth || lines.length >= maxLines) return lines
+    if (visited.has(id)) {
+      lines.push(`${"  ".repeat(depth)}[嵌套转发记录重复，已跳过]`)
+      return lines
+    }
+
+    visited.add(id)
+    let forwardMsgs = []
+    try {
+      forwardMsgs = normalizeForwardMessageList(await group.getForwardMsg(id))
+    } catch (err) {
+      logger.debug(`[获取转发记录失败] id=${id} ${err}`)
+      return lines
+    }
+
+    const indent = "  ".repeat(depth)
+    for (const fMsg of forwardMsgs) {
+      if (lines.length >= maxLines) break
+      const segments = normalizeMessageSegments(fMsg)
+      const text = extractReadableTextFromSegments(segments, fMsg.raw_message || fMsg.message_text || fMsg.content_text || "")
+      const name = getForwardSenderName(fMsg)
+      if (text) lines.push(`${indent}${name}: ${text}`)
+
+      const nestedForwardIds = extractForwardIdsFromSegments(segments)
+      for (const nestedId of nestedForwardIds) {
+        if (lines.length >= maxLines) break
+        lines.push(`${indent}${name}: [嵌套转发记录]`)
+        await this.collectForwardPromptLines(group, nestedId, {
+          lines,
+          visited,
+          depth: depth + 1,
+          maxDepth,
+          maxLines
+        })
+      }
+    }
+
+    return lines
+  }
+
+  async resolveForwardPromptFromSegments(segments = [], group) {
+    const forwardIds = extractForwardIdsFromSegments(segments)
+    if (!forwardIds.length || !group?.getForwardMsg) return ""
+
+    const lines = []
+    const visited = new Set()
+    for (const forwardId of forwardIds) {
+      if (lines.length >= FORWARD_CONTEXT_MAX_LINES) break
+      await this.collectForwardPromptLines(group, forwardId, {
+        lines,
+        visited,
+        depth: 0,
+        maxDepth: FORWARD_CONTEXT_MAX_DEPTH,
+        maxLines: FORWARD_CONTEXT_MAX_LINES
+      })
+    }
+
+    return compactDrawPromptText(lines.join("\n"), FORWARD_CONTEXT_MAX_TEXT)
+  }
+
   async buildMessageContent(sender, msg, images, atQq = [], group, e = null) {
     const senderRole = roleMap[sender.role] || "member"
     const messageId = e?.message_id ? `[消息ID:${e.message_id}]` : ''
@@ -3568,50 +3688,11 @@ ${specialSignalsBlock}
             quotedMsg = reply.raw_message
           }
 
-          // 提取被引用消息中的转发记录内容
+          // 提取被引用消息中的转发记录内容，递归展开嵌套合并转发。
           let forwardContent = ""
-          let forwardId = null
-          // 情况1: type === "forward" (NapCat/Lagrange 某些版本)
-          const forwardSegment = reply.message?.find(m => m.type === "forward")
-          if (forwardSegment?.id) {
-            forwardId = forwardSegment.id
-          }
-          // 情况2: type === "json" 且 app === "com.tencent.multimsg"
-          if (!forwardId) {
-            const jsonSegment = reply.message?.find(m => m.type === "json")
-            if (jsonSegment) {
-              try {
-                const jsonData = typeof jsonSegment.data === "string"
-                  ? JSON.parse(jsonSegment.data)
-                  : jsonSegment.data
-                if (jsonData?.app === "com.tencent.multimsg") {
-                  forwardId = jsonData.meta?.detail?.resid
-                }
-              } catch {}
-            }
-          }
-          if (forwardId && e?.group?.getForwardMsg) {
-            try {
-              const forwardMsgs = await e.group.getForwardMsg(forwardId)
-              if (Array.isArray(forwardMsgs) && forwardMsgs.length > 0) {
-                const lines = []
-                for (const fMsg of forwardMsgs) {
-                  const name = fMsg.sender?.nickname || "未知"
-                  const text = fMsg.message
-                    ?.filter(m => m.type === "text")
-                    .map(m => m.text)
-                    .join("")
-                    .trim()
-                  if (text) lines.push(`${name}: ${text}`)
-                }
-                if (lines.length > 0) {
-                  forwardPromptText = lines.join("\n")
-                  forwardContent = `[转发记录内容:\n${forwardPromptText}\n]`
-                }
-              }
-            } catch (err) {
-              logger.debug(`[获取转发记录失败] ${err}`)
-            }
+          forwardPromptText = await this.resolveForwardPromptFromSegments(reply.message || [], e?.group || group)
+          if (forwardPromptText) {
+            forwardContent = `[转发记录内容:\n${forwardPromptText}\n]`
           }
 
           const quotedImages = reply.message?.filter(m => m.type === "image") || []
@@ -3712,6 +3793,10 @@ ${specialSignalsBlock}
         } catch {}
       }
       content.push(`在群里说: ${fullMsg}`)
+    }
+    const currentForwardPromptText = await this.resolveForwardPromptFromSegments(e?.message || [], group)
+    if (currentForwardPromptText) {
+      content.push(`转发了合并聊天记录:\n${currentForwardPromptText}`)
     }
     if (images?.length) {
       content.push(`发送了${images.length === 1 ? "一张" : images.length + " 张"}图片${images.map(img => `\n![图片](${img})`).join("")}`)
@@ -4169,6 +4254,12 @@ ${recentHistory || '(无)'}
           videos = rsp?.message?.filter(m => m.type === "video") || []
         }
 
+        if (!images.length && looksLikeVisualInspectionRequest(args || msg || "")) {
+          await this.sendSegmentedMessage(e, buildMissingImageAnalysisReply(), 0)
+          this.clearSession(sessionId)
+          return true
+        }
+
         const memberInfo = await (async () => {
           try {
             return await e.bot.pickGroup(groupId).pickMember(e.sender.user_id).info
@@ -4374,8 +4465,22 @@ ${mcpPrompts}
           }
         }
 
+        const understandingPrompt = this.buildUnderstandingContextPrompt({
+          e,
+          args,
+          msg,
+          userContent,
+          images,
+          videos,
+          currentIntentText: [args, msg].filter(Boolean).join("\n"),
+          groupUserMessages
+        })
+
         groupUserMessages = groupUserMessages.filter(m => m.role !== "system")
         groupUserMessages.unshift({ role: "system", content: systemContent })
+        if (understandingPrompt) {
+          groupUserMessages.splice(1, 0, { role: "system", content: understandingPrompt })
+        }
         groupUserMessages.push({ role: "user", content: userContent })
         session.userContent = userContent
         groupUserMessages = this.trimMessageHistory(groupUserMessages)
@@ -4741,6 +4846,87 @@ ${mcpPrompts}
 
     const recent = lines.slice(-8)
     return recent.length ? compactDrawPromptText(recent.join("\n"), maxLength) : ""
+  }
+
+  getUnderstandingEnhancementConfig() {
+    const cfg = this.config.understandingEnhancement || {}
+    return {
+      enabled: cfg.enabled !== false,
+      maxChars: Math.max(600, Math.min(3000, Number(cfg.maxChars) || 1400)),
+      includeRecentContext: cfg.includeRecentContext !== false
+    }
+  }
+
+  shouldInjectUnderstandingContext({ e = {}, userContent = "", images = [], videos = [], currentIntentText = "" } = {}) {
+    const cfg = this.getUnderstandingEnhancementConfig()
+    if (!cfg.enabled) return false
+
+    const content = `${currentIntentText || ""}\n${userContent || ""}`
+    if (content.length > 260) return true
+    if (e?._directTriggerMerged || e?._mergedMessageCount) return true
+    if (Array.isArray(images) && images.length) return true
+    if (Array.isArray(videos) && videos.length) return true
+    if (/\[回复\s+.+?的消息[:：]|转发了合并聊天记录|转发记录内容|嵌套转发记录/.test(content)) return true
+    if (/(这个|这个人|那个人|上面|里面|前面|刚才|刚刚|上一条|他说|她说|它|这张|这段|这句|哪句|哪个).{0,18}(什么意思|是谁|是啥|咋回事|怎么回事|为什么|总结|分析|讲讲|看看|解释)/.test(normalizeIntentText(content))) return true
+    return false
+  }
+
+  extractForwardContextFromUserContent(userContent = "", maxLength = 900) {
+    const content = String(userContent || "")
+    const blocks = []
+    for (const marker of ["转发了合并聊天记录:", "转发记录内容:"]) {
+      const index = content.indexOf(marker)
+      if (index >= 0) {
+        blocks.push(content.slice(index + marker.length).trim())
+      }
+    }
+    if (!blocks.length) return ""
+    return compactDrawPromptText(blocks.join("\n"), maxLength)
+  }
+
+  buildUnderstandingContextPrompt(context = {}) {
+    const {
+      e = {},
+      args = "",
+      msg = "",
+      userContent = "",
+      images = [],
+      videos = [],
+      groupUserMessages = [],
+      currentIntentText = ""
+    } = context
+    if (!this.shouldInjectUnderstandingContext({ e, userContent, images, videos, currentIntentText })) return ""
+
+    const cfg = this.getUnderstandingEnhancementConfig()
+    const intentText = compactDrawPromptText(currentIntentText || args || msg || "", 360)
+    const quotedContext = this.getQuotedPromptContextText(e, userContent)
+    const forwardContext = this.extractForwardContextFromUserContent(userContent)
+    const recentContext = cfg.includeRecentContext
+      ? this.getRecentPromptContextText(groupUserMessages, userContent || currentIntentText, 650)
+      : ""
+
+    const signals = []
+    if (e?._mergedMessageCount) signals.push(`同一用户连续触发 ${e._mergedMessageCount} 条，已合并成一轮`)
+    if (quotedContext) signals.push("当前消息引用了其他消息")
+    if (forwardContext || /转发了合并聊天记录|转发记录内容|嵌套转发记录/.test(userContent)) signals.push("当前上下文包含合并转发/嵌套转发记录")
+    if (images?.length) signals.push(`当前可见图片 ${images.length} 张`)
+    if (videos?.length) signals.push(`当前引用/消息含视频 ${videos.length} 条`)
+    if (/(这个|这个人|那个人|上面|里面|前面|刚才|刚刚|上一条|他说|她说|它|这张|这段|这句|哪句|哪个)/.test(normalizeIntentText(currentIntentText || msg))) signals.push("用户用了指代词，需要结合引用、转发和近期对话消解")
+
+    const lines = [
+      "【理解增强卡片】",
+      "这张卡片只用于你理解上下文，最终回复不要提到“卡片”“系统”“提示词”“分析过程”。",
+      intentText ? `用户当前原话/意图：${intentText}` : "",
+      signals.length ? `上下文信号：${signals.join("；")}` : "",
+      quotedContext ? `引用内容摘录：\n${compactDrawPromptText(quotedContext, 650)}` : "",
+      forwardContext ? `合并转发/嵌套转发摘录：\n${forwardContext}` : "",
+      recentContext ? `近期可参考上下文：\n${recentContext}` : "",
+      "理解规则：先判断用户真正要你回答什么；如果用户问“这个/里面/刚才/他说的”，优先从引用、转发记录和最近对话里找指代。",
+      "如果用户让你总结、分析或解释合并转发，要覆盖已展开的全部内容，不要只看第一层或第一条。",
+      "如果上下文仍不足，别硬编，像熟人一样自然追问一句。"
+    ].filter(Boolean)
+
+    return compactDrawPromptText(lines.join("\n"), cfg.maxChars)
   }
 
   buildImageGenerationPrompt(context = {}) {
@@ -5892,12 +6078,8 @@ ${mcpPrompts}
   processToolSpecificMessage(content, toolName) {
     let output = sanitizeFinalReplyText(content.replace(/\n/g, "\n"))
 
-    // 过滤消息记录格式（多行全局匹配）
-    // 匹配如: "[2026-01-27 16:12:51] 哈基米(QQ号: 2127498644)[群身份: member]: 以后注意点。"
-    // 或: "[01-27 16:12:51] 哈基米(QQ号: xxx)[群身份: xxx]: 在群里说: xxx"（旧历史数据格式）
-    // 或: "[16:11:11] 哈基米(QQ号: xxx)[群身份: xxx]: 在群里说: xxx"
-    // 或: "[YYYY-MM-DD HH:MM:SS] 迈(QQ号: xxx)[群身份: xxx]: xxx"（AI输出的模板格式）
-    output = output.replace(/\[(?:[A-Z]{4}-[A-Z]{2}-[A-Z]{2}\s+[A-Z]{2}:[A-Z]{2}:[A-Z]{2}|[A-Z]{2}-[A-Z]{2}\s+[A-Z]{2}:[A-Z]{2}:[A-Z]{2}|\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}|\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}|\d{2}:\d{2}:\d{2})\]\s*[^(\n]+\((?:QQ号|qq号)[:：]\s*\d+\)\[群身份[:：]\s*\w+\][:：]\s*(?:艾特了\s*[^(\n]+\((?:QQ号|qq号)[:：]\s*\d+\)\[群身份[:：]\s*\w+\])?\s*(?:在群里说[:：]\s*)?[^\n]*/gi, '')
+    // 模型有时会照抄上下文里的聊天记录前缀；这里只剥掉前缀，保留真正回复内容。
+    output = stripChatLogSpeakerPrefixes(output)
 
     // 清理模式
     const patterns = [

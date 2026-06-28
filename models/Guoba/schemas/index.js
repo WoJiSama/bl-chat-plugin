@@ -1,4 +1,8 @@
 import { readUserSettings, applyFlatUpdates } from "../../../utils/configWriter.js"
+import {
+  normalizeAiProviderUpdates,
+  withAiProviderPanelDefaults
+} from "../../../utils/guobaAiProviderConfig.js"
 
 import basic from "./basic.js"
 import permission from "./permission.js"
@@ -33,12 +37,12 @@ export const schemas = [
 ].flat()
 
 export function getConfigData() {
-  return readUserSettings()
+  return withAiProviderPanelDefaults(readUserSettings())
 }
 
 export function setConfigData(data, { Result }) {
   try {
-    applyFlatUpdates(data || {})
+    applyFlatUpdates(normalizeAiProviderUpdates(data || {}))
     return Result.ok({}, "保存成功 (´。• ᵕ •。`)")
   } catch (err) {
     return Result.error?.(`保存失败: ${err.message}`) || Result.ok({}, `保存失败: ${err.message}`)

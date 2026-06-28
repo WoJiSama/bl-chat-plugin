@@ -5,10 +5,16 @@ import fs from "fs";
 import YAML from "yaml";
 import path from "path";
 import { pluginBridge } from "../../utils/pluginBridge.js";
+import {
+  DEFAULT_IMAGE_GENERATION_URL,
+  generateImageWithFallbacks,
+  resolveImageGenerationConfigs,
+  shouldRetryWithoutUrlResponseFormat,
+  toImageGenerationUrl
+} from "../../utils/imageGenerationFallback.js";
 
 const { mimeTypes } = dependencies;
 const DEFAULT_CHAT_IMAGE_URL = 'https://api.openai.com/v1/chat/completions';
-const DEFAULT_IMAGE_GENERATION_URL = 'https://api.openai.com/v1/images/generations';
 const IMAGE_GENERATION_TIMEOUT_MS = 240000;
 const PROMPT_OPTIMIZATION_TIMEOUT_MS = 30000;
 const PROGRESS_MESSAGE_TIMEOUT_MS = 8000;
@@ -178,9 +184,9 @@ export class BananaTool extends AbstractTool {
 
     // 处理图片
     const images = await normalizeImageUrls(this.normalizeArray(rawImages));
-    const imageGenerationConfig = this.resolveImageGenerationConfig(config);
+    const imageGenerationConfigs = this.resolveImageGenerationConfigs(config);
     const safeInputPrompt = this.sanitizePromptForImageGeneration(prompt);
-    if (!options.skipProgressNotice && !images.length && imageGenerationConfig) {
+    if (!options.skipProgressNotice && !images.length && imageGenerationConfigs.length) {
       const progressMessage = await this.generateProgressMessage(config, safeInputPrompt, e);
       await this.sendProgress(e, progressMessage);
     }
@@ -189,8 +195,8 @@ export class BananaTool extends AbstractTool {
     const imgurls = await this.buildImageMessages(finalPrompt, images);
 
     try {
-      if (!images.length && imageGenerationConfig) {
-        const generatedImage = await this.generateImage(imageGenerationConfig, finalPrompt);
+      if (!images.length && imageGenerationConfigs.length) {
+        const generatedImage = await this.generateImage(imageGenerationConfigs, finalPrompt);
         await this.replyImageToRequester(e, generatedImage);
         return '图片生成成功';
       }
@@ -299,39 +305,12 @@ export class BananaTool extends AbstractTool {
     else console.error(...args);
   }
 
+  resolveImageGenerationConfigs(config) {
+    return resolveImageGenerationConfigs(config);
+  }
+
   resolveImageGenerationConfig(config) {
-    const generationCfg = config.imageGenerationAiConfig || {};
-    const editCfg = config.imageEditAiConfig || {};
-    const apiKey = generationCfg.imageGenerationApiKey || editCfg.imageGenerationApiKey || editCfg.imageEditApiKey;
-    if (!apiKey || String(apiKey).includes('sk-xxx')) return null;
-
-    const hasExplicitGenerationConfig = Boolean(
-      generationCfg.imageGenerationApiUrl ||
-      generationCfg.imageGenerationApiModel ||
-      editCfg.imageGenerationApiUrl ||
-      editCfg.imageGenerationApiModel
-    );
-    const editModel = String(editCfg.imageEditApiModel || "");
-    const editUrl = String(editCfg.imageEditApiUrl || "");
-    const shouldUseGenerationEndpoint = hasExplicitGenerationConfig ||
-      /^gpt-image/i.test(editModel) ||
-      /\/images\/(?:edits|generations)\/?$/i.test(editUrl) ||
-      /souimagery\.fun/i.test(editUrl);
-    if (!shouldUseGenerationEndpoint) return null;
-
-    return {
-      apiUrl: this.toImageGenerationUrl(
-        generationCfg.imageGenerationApiUrl ||
-        editCfg.imageGenerationApiUrl ||
-        editCfg.imageEditApiUrl ||
-        DEFAULT_IMAGE_GENERATION_URL
-      ),
-      apiKey,
-      model: generationCfg.imageGenerationApiModel ||
-        editCfg.imageGenerationApiModel ||
-        (/^gpt-image/i.test(editModel) ? editModel : "gpt-image-2"),
-      size: generationCfg.imageGenerationSize || editCfg.imageGenerationSize || "1024x1024"
-    };
+    return this.resolveImageGenerationConfigs(config)[0] || null;
   }
 
   resolvePromptOptimizerConfig(config) {
@@ -504,13 +483,7 @@ export class BananaTool extends AbstractTool {
   }
 
   toImageGenerationUrl(apiUrl = DEFAULT_IMAGE_GENERATION_URL) {
-    const url = String(apiUrl || "").trim();
-    if (!url) return DEFAULT_IMAGE_GENERATION_URL;
-    if (/\/images\/generations\/?$/i.test(url)) return url;
-    if (/\/images\/edits\/?$/i.test(url)) return url.replace(/\/images\/edits\/?$/i, "/images/generations");
-    if (/\/chat\/completions\/?$/i.test(url)) return url.replace(/\/chat\/completions\/?$/i, "/images/generations");
-    if (/\/v1\/?$/i.test(url)) return url.replace(/\/?$/i, "/images/generations");
-    return url;
+    return toImageGenerationUrl(apiUrl);
   }
 
   buildImageGenerationPayload(imageGenerationConfig, prompt, responseFormat = "") {
@@ -536,23 +509,17 @@ export class BananaTool extends AbstractTool {
   }
 
   async generateImage(imageGenerationConfig, prompt) {
-    let result = await this.parseImageGenerationResponse(
-      await this.requestImageGeneration(imageGenerationConfig, prompt, "url")
-    );
-
-    if (!result.ok && this.shouldRetryWithoutUrlResponseFormat(result.errorMessage)) {
-      this.logInfo("[图片生成] 上游不支持 response_format=url，退回默认返回格式");
-      result = await this.parseImageGenerationResponse(
-        await this.requestImageGeneration(imageGenerationConfig, prompt)
-      );
-    }
-
-    if (result.ok) return result.image;
-    throw new Error(result.errorMessage);
+    return await generateImageWithFallbacks(imageGenerationConfig, prompt, {
+      request: (config, inputPrompt, responseFormat) =>
+        this.requestImageGeneration(config, inputPrompt, responseFormat),
+      parseResponse: response => this.parseImageGenerationResponse(response),
+      logInfo: (...args) => this.logInfo(...args),
+      logWarn: (...args) => this.logWarn(...args)
+    });
   }
 
   shouldRetryWithoutUrlResponseFormat(errorMessage = "") {
-    return /response_format|unsupported|not support|unknown parameter|invalid parameter|不支持|未知参数/i.test(String(errorMessage));
+    return shouldRetryWithoutUrlResponseFormat(errorMessage);
   }
 
 	  async sendProgress(e, message) {

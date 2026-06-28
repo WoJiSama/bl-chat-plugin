@@ -1,11 +1,15 @@
 export default [
   {
     component: "SOFT_GROUP_BEGIN",
-    label: "群管理验证"
+    label: "群管理模块"
+  },
+  {
+    component: "Divider",
+    label: "入群审核"
   },
   {
     field: "groupGuard.enabled",
-    label: "入群验证开关",
+    label: "入群审核开关",
     component: "Switch",
     bottomHelpMessage: "开启后，仅对下方群列表中的群生效；机器人必须是群主或管理员才会发起验证和踢人"
   },
@@ -28,6 +32,20 @@ export default [
     component: "InputNumber",
     bottomHelpMessage: "用户进群后必须在该时间内答对。默认 300 秒",
     componentProps: { min: 30, max: 3600, step: 30, placeholder: "300" }
+  },
+  {
+    field: "groupGuard.questionMaxNumber",
+    label: "题目数字范围",
+    component: "InputNumber",
+    bottomHelpMessage: "生成 0 到该数字范围内的加减法题。10 表示十以内加减法",
+    componentProps: { min: 1, max: 100, step: 1, placeholder: "10" }
+  },
+  {
+    field: "groupGuard.questionOperators",
+    label: "题型",
+    component: "GTags",
+    bottomHelpMessage: "可填 add / sub，分别表示加法 / 减法。为空时默认加减法都启用",
+    componentProps: { allowAdd: true, allowDel: true }
   },
   {
     field: "groupGuard.maxWrongTimes",

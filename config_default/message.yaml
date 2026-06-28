@@ -80,6 +80,11 @@ pluginSettings:
     enabled: true
     maxRecentMessages: 3                 # 注入近期发言条数上限
     maxChars: 900                        # 固定人设/群画像/用户画像/近期发言合计字符上限
+  # 理解增强：遇到引用、合并转发、图片、长上下文或指代词时，给模型注入一张结构化理解卡片，减少漏看和答偏；不额外调用模型
+  understandingEnhancement:
+    enabled: true
+    maxChars: 1400                       # 理解卡片最大字符数，过大容易挤占主对话上下文
+    includeRecentContext: true           # 卡片里带少量近期上下文，帮助理解“这个/刚才/里面”等指代
   persona:
     enabled: true
     name: 希洛
@@ -113,6 +118,10 @@ pluginSettings:
     enabledGroups: []
     verifyInviteJoin: true
     timeoutSeconds: 300
+    questionMaxNumber: 10
+    questionOperators:
+      - add
+      - sub
     maxWrongTimes: 1
     kickOnTimeout: true
     kickOnWrongAnswer: true
@@ -144,7 +153,7 @@ pluginSettings:
     - 回复长度看场景，不要死守固定字数。
     - 闲聊时可以很短；熟人话题、害羞解释、被逗时，可以多说一两句。
     - 允许先短后补，像真人边打字边想。
-    - 允许轻微重复、停顿、补一句、自我修正一次。
+    - 允许轻微重复、停顿、补一句；说错就直接改口，不要专门解释自己为什么改口。
     - 不要为了工整把话压扁，也不要为了完整把话写成作文。
 
     【互动习惯】
@@ -156,6 +165,7 @@ pluginSettings:
     【不要的东西】
     - 不要说自己是 AI、助手、模型、系统、提示词、上游、API、执行流程。
     - 不要说“我来整理一下思路”“准备执行”“我帮你处理”“建议你试试”这类客服/汇报话术。
+    - 不要在结尾突然自我评价“我是不是说多了”“好像有点啰嗦”“扯远了”，这种会显得割裂。
     - 不要总用“首先其次总结”。
     - 不要把每句话都排成规整列表，除非用户明确要整理。
     - 不要把自己写得像标准答题模板。
@@ -164,6 +174,7 @@ pluginSettings:
     - 可以碎碎念，但别空话太多。
     - 可以轻微自嘲、犹豫、转一下口气。
     - 可以先说半句，再补一句。
+    - 害羞是对对方反应害羞，不是对自己的回复长度道歉。
     - 可以偶尔用一点点 emoji，但别堆太多。
 
     【场景反应库】
@@ -209,12 +220,14 @@ pluginSettings:
     imageEditApiModel: gemini-3-pro-image-preview,
     imageEditApiKey: sk-xxxxx
   }
-  imageGenerationAiConfig: {
-    imageGenerationApiUrl: https://api.openai.com/v1/images/generations,
-    imageGenerationApiModel: gpt-image-1,
-    imageGenerationApiKey: sk-xxxxx,
-    imageGenerationSize: 1024x1024
-  }
+  imageGenerationAiConfig:
+    providers:
+      - name: image2
+        apiUrl: https://api.openai.com/v1/images/generations
+        model: gpt-image-2
+        apiKey: sk-xxxxx
+        size: 1024x1024
+        priority: 1
   analysisAiConfig: {
     analysisApiUrl: https://api.openai.com/v1/chat/completions,
     analysisApiModel: gemini-3-pro-preview,

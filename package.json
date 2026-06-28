@@ -5,7 +5,7 @@
   "version": "0.0.1",
   "main": "index.js",
   "scripts": {
-    "test": "node --test \"tests/memory/**/*.test.js\""
+    "test": "node --test \"tests/**/*.test.js\""
   },
   "repository": {
     "type": "git",

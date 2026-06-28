@@ -1,10 +1,17 @@
 import { readUserSettings } from "./configWriter.js"
+import {
+  generateMathQuestion,
+  normalizeQuestionMaxNumber,
+  normalizeQuestionOperators
+} from "./groupGuardQuestion.js"
 
 const DEFAULT_GROUP_GUARD_CONFIG = {
   enabled: false,
   enabledGroups: [],
   verifyInviteJoin: true,
   timeoutSeconds: 300,
+  questionMaxNumber: 10,
+  questionOperators: ["add", "sub"],
   maxWrongTimes: 1,
   kickOnTimeout: true,
   kickOnWrongAnswer: true,
@@ -21,6 +28,8 @@ function normalizeConfig(raw = {}) {
     ? config.enabledGroups.map(id => String(id).trim()).filter(Boolean)
     : []
   config.timeoutSeconds = Math.max(30, Number(config.timeoutSeconds) || DEFAULT_GROUP_GUARD_CONFIG.timeoutSeconds)
+  config.questionMaxNumber = normalizeQuestionMaxNumber(config.questionMaxNumber)
+  config.questionOperators = normalizeQuestionOperators(config.questionOperators)
   config.maxWrongTimes = Math.max(1, Number(config.maxWrongTimes) || DEFAULT_GROUP_GUARD_CONFIG.maxWrongTimes)
   return config
 }
@@ -42,19 +51,6 @@ function renderTemplate(template, data) {
 function buildAtSegment(userId) {
   if (globalThis.segment?.at) return globalThis.segment.at(userId)
   return { type: "at", qq: userId }
-}
-
-function generateMathQuestion() {
-  const op = Math.random() < 0.5 ? "+" : "-"
-  if (op === "+") {
-    const a = Math.floor(Math.random() * 11)
-    const b = Math.floor(Math.random() * (11 - a))
-    return { question: `${a} + ${b} = ?`, answer: String(a + b) }
-  }
-
-  const a = Math.floor(Math.random() * 11)
-  const b = Math.floor(Math.random() * (a + 1))
-  return { question: `${a} - ${b} = ?`, answer: String(a - b) }
 }
 
 class GroupGuardManager {
@@ -137,7 +133,7 @@ class GroupGuardManager {
     const key = this.getKey(groupId, userId)
     this.clearPending(key)
 
-    const question = generateMathQuestion()
+    const question = generateMathQuestion(config)
     const timeoutMs = config.timeoutSeconds * 1000
     const timer = setTimeout(() => {
       this.handleTimeout(groupId, userId).catch(error => {
