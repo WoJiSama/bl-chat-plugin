@@ -81,3 +81,19 @@ test('uses recent context only when the request is contextual or vague', () => {
   assert.ok(prompt.includes('雨夜霓虹'))
   assert.ok(prompt.includes('赛博城市'))
 })
+
+test('does not wrap an already compiled prompt again', () => {
+  const first = compileImagePrompt({
+    task: 'image_generation',
+    userPrompt: '画一只白色小猫在窗台晒太阳'
+  })
+  const second = compileImagePrompt({
+    task: 'image_generation',
+    userPrompt: first,
+    recentContext: '刚才讨论的是赛博少女'
+  })
+
+  assert.equal(second, first)
+  assert.equal(second.match(/【提示词编译结果】/g)?.length, 1)
+  assert.ok(!second.includes('核心画面：【提示词编译结果】'))
+})
