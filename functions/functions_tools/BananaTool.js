@@ -22,6 +22,7 @@ const PROGRESS_MESSAGE_TIMEOUT_MS = 8000;
 const SHORT_PROMPT_OPTIMIZATION_MAX_CHARS = 80;
 const LOCAL_PROMPT_QUALITY_SUFFIX = "画面主体清晰，构图完整，细节丰富，高质量，光影自然";
 const SENSITIVE_IMAGE_PROMPT_PATTERN = /(?:露骨|情色|色情|成人内容|性描写|性暗示|身体部位|敏感内容|少儿不宜|性器官|生殖器|阴茎|阴道|鸡巴|几把|jb|勃起|射精|口交|口了|手淫|自慰|做爱|性交|性爱|性行为|上床|脱下裤子|脱裤子|脱衣服|裸露|裸体|强奸|迷奸|未成年|还小|不满18|18岁以下|养肥了再吃|帮我爽爽|用手帮你解决|伸进上衣|拍向屁股)/i;
+const COMIC_IMAGE_PROMPT_PATTERN = /(?:连环画|漫画|四格|多格|分镜|组图|小剧场)/i;
 const SAFE_REWRITE_MARKER = "安全改写后的绘图需求";
 const SENSITIVE_PROMPT_REPLACEMENTS = [
   [/(?:露骨的?)?(?:情色|色情|成人内容|性描写|性暗示|敏感内容|少儿不宜)(?:描写|内容)?/gi, "含蓄的情绪互动"],
@@ -698,14 +699,19 @@ export class BananaTool extends AbstractTool {
     if (!SENSITIVE_IMAGE_PROMPT_PATTERN.test(text)) return text;
 
     const rewrittenText = this.rewriteSensitivePromptText(text);
+    const wantsComic = COMIC_IMAGE_PROMPT_PATTERN.test(text);
     const safePrompt = [
       `${SAFE_REWRITE_MARKER}：`,
       rewrittenText,
       "",
-      "改编方式：把上面的内容画成全年龄向多格恋爱喜剧漫画，必须沿用原文的人物、称呼、关系、顺序、情绪转折和主要台词含义。",
+      "改编方式：把上面的内容转成全年龄可出图画面，必须沿用原文的人物、称呼、关系、顺序、情绪转折和主要台词含义。",
       "画面表达：不直接还原被改写的细节，统一转成脸红、靠近、躲闪、撒娇、牵手、拥抱、互相吐槽、温柔安抚、并肩休息等含蓄动作。",
-      "连环画要求：如果用户要求连环画/漫画/分镜，就做成一张图内4到8格；每格围绕原文推进，可以放简短气泡，但台词要保持含蓄自然。",
-      "风格：二次元漫画风，角色外观前后一致，表情丰富，构图清楚，光影自然，画面干净。"
+      wantsComic
+        ? "画面形式：按用户要求做成一张图内多格连环画/漫画分镜；每格围绕原文推进，可以放简短气泡，但台词要保持含蓄自然。"
+        : "画面形式：单张完整画面，不要擅自改成漫画、四格、多格或分镜。",
+      wantsComic
+        ? "风格：沿用用户指定风格；如果用户没有指定，就用干净自然的漫画/插画表现，角色外观前后一致，构图清楚。"
+        : "风格：沿用用户指定风格；如果用户没有指定，就保持自然、高质量、主体清楚、构图完整、光影干净。"
     ].join(" ");
 
     this.logWarn(`[图片提示词安全改写] 检测到需模糊处理的绘图内容，已生成安全版 prompt 原始=${text.slice(0, 160)} 改写后=${safePrompt.slice(0, 220)}`);

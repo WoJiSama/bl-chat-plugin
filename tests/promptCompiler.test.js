@@ -15,6 +15,7 @@ test('expands a normal text-to-image request into structured visual intent', () 
   assert.ok(prompt.includes('构图'))
   assert.ok(!prompt.includes('模型'))
   assert.ok(!prompt.includes('示例'))
+  assert.ok(!/敏感|露骨/.test(prompt))
 })
 
 test('uses quoted context when the user says draw this', () => {

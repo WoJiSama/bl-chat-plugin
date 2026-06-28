@@ -27,17 +27,21 @@ function createFakeRedis() {
   }
 }
 
-test('banana durable queue restores unfinished draw job after restart', async t => {
-  let BananaTool
+async function loadBananaTool(t) {
   try {
-    ;({ BananaTool } = await import('../functions/functions_tools/BananaTool.js'))
+    return (await import('../functions/functions_tools/BananaTool.js')).BananaTool
   } catch (error) {
     if (error?.code === 'ERR_MODULE_NOT_FOUND') {
       t.skip(`runtime dependency is not installed in this checkout: ${error.message}`)
-      return
+      return null
     }
     throw error
   }
+}
+
+test('banana durable queue restores unfinished draw job after restart', async t => {
+  const BananaTool = await loadBananaTool(t)
+  if (!BananaTool) return
 
   const previousRedis = globalThis.redis
   const previousBot = globalThis.Bot
@@ -104,4 +108,21 @@ test('banana durable queue restores unfinished draw job after restart', async t 
     globalThis.Bot = previousBot
     pluginBridge.instance = previousInstance
   }
+})
+
+test('safe image prompt rewrite does not force comic style unless requested', async t => {
+  const BananaTool = await loadBananaTool(t)
+  if (!BananaTool) return
+
+  const tool = new BananaTool()
+  const normal = tool.sanitizePromptForImageGeneration('画一个写实电影感人物，包含敏感内容')
+  assert.ok(normal.includes('安全改写后的绘图需求'))
+  assert.ok(normal.includes('单张完整画面'))
+  assert.ok(normal.includes('不要擅自改成漫画'))
+  assert.ok(!normal.includes('多格恋爱喜剧漫画'))
+  assert.ok(!normal.includes('二次元漫画风'))
+
+  const comic = tool.sanitizePromptForImageGeneration('画成四格漫画，包含敏感内容')
+  assert.ok(comic.includes('多格连环画/漫画分镜'))
+  assert.ok(!comic.includes('不要擅自改成漫画'))
 })
