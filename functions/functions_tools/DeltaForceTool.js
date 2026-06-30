@@ -5,16 +5,19 @@ import { AbstractTool } from "./AbstractTool.js"
 import {
   buildObjectValueReportData,
   buildPlaceProfitReportData,
+  buildPriceHistoryReportData,
   buildProfitRankReportData,
   buildSolutionListReportData,
   DeltaForceClient,
   formatDailyKeywordResponse,
   formatObjectValueSearchResponse,
   formatPlaceProfitResponse,
+  formatPriceHistoryResponse,
   formatProfitRankResponse,
   formatSolutionListResponse,
   getDeltaForceHelp,
   getDeltaForcePlaceHelp,
+  normalizeHistoryDays,
   normalizeDeltaForcePlace,
   normalizeRankLimit
 } from "../../utils/DeltaForceClient.js"
@@ -63,6 +66,9 @@ function normalizeOperation(value = "") {
     object_value: "object_value",
     value: "object_value",
     price: "object_value",
+    price_history: "price_history",
+    history: "price_history",
+    trend: "price_history",
     solution_list: "solution_list",
     solution: "solution_list",
     gun_code: "solution_list",
@@ -113,7 +119,7 @@ export class DeltaForceTool extends AbstractTool {
     this.description = [
       "三角洲行动第三方 API 工具。",
       "用户自然语言询问三角洲今日密码、每日密码、物品价格/物品价值、改枪码/改枪方案、特勤处制造利润、利润排行时调用。",
-      "优先根据强关键词选择子功能：改枪码/改枪方案=solution_list，物品价格/价值=object_value，特勤处/制造利润=place_profit，利润排行=profit_rank，今日/每日密码=daily_keyword。",
+      "优先根据强关键词选择子功能：改枪码/改枪方案=solution_list，物品价格走势/历史/折线图=price_history，物品价格/价值=object_value，特勤处/制造利润=place_profit，利润排行=profit_rank，今日/每日密码=daily_keyword。",
       "例如“今天的三角洲改枪码，和277有关”应调用 solution_list 且 keyword=277；不要因为“今天的”误选 daily_keyword。",
       "不要用于普通聊天或非三角洲行动游戏内容。"
     ].join("")
@@ -122,8 +128,8 @@ export class DeltaForceTool extends AbstractTool {
       properties: {
         operation: {
           type: "string",
-          description: "操作类型：help 帮助；daily_keyword 今日/每日密码；object_value 物品价值/价格搜索；solution_list 改枪码/改枪方案；place_profit 特勤处/制造利润总览；profit_rank 利润排行。",
-          enum: ["help", "daily_keyword", "object_value", "solution_list", "place_profit", "profit_rank"]
+          description: "操作类型：help 帮助；daily_keyword 今日/每日密码；object_value 物品价值/价格搜索；price_history 价格历史/走势折线图；solution_list 改枪码/改枪方案；place_profit 特勤处/制造利润总览；profit_rank 利润排行。",
+          enum: ["help", "daily_keyword", "object_value", "price_history", "solution_list", "place_profit", "profit_rank"]
         },
         keyword: {
           type: "string",
@@ -135,7 +141,11 @@ export class DeltaForceTool extends AbstractTool {
         },
         limit: {
           type: "number",
-          description: "返回数量，默认 10，最多 20。"
+          description: "返回数量，默认 10，最多 20。price_history 默认 5，表示匹配几个物品就画几张图。"
+        },
+        days: {
+          type: "number",
+          description: "price_history 使用的历史天数，默认 30，最多 90。"
         },
         output: {
           type: "string",
@@ -156,6 +166,7 @@ export class DeltaForceTool extends AbstractTool {
     const operation = normalizeOperation(opts.operation)
     const keyword = String(opts.keyword || "").trim()
     const limit = normalizeRankLimit(opts.limit)
+    const days = normalizeHistoryDays(opts.days)
     const placeText = String(opts.place || "").trim()
     const place = placeText ? normalizeDeltaForcePlace(placeText) : null
     const textOutput = wantsTextOutput(opts)
@@ -181,6 +192,14 @@ export class DeltaForceTool extends AbstractTool {
         const text = formatObjectValueSearchResponse(result, { keyword, limit })
         if (textOutput) return replyText(e, text)
         return replyReportImage(e, buildObjectValueReportData(result, { keyword, limit }), text)
+      }
+
+      if (operation === "price_history") {
+        if (!keyword) return replyText(e, "请告诉我要查哪个三角洲物品的价格历史，比如 显卡 或 H70。", "缺少三角洲价格历史关键词")
+        const result = await client.searchPriceHistory({ keyword, days, limit: opts.limit || 5 })
+        const text = formatPriceHistoryResponse(result, { keyword, days, limit: opts.limit || 5 })
+        if (textOutput) return replyText(e, text)
+        return replyReportImage(e, buildPriceHistoryReportData(result, { keyword, days, limit: opts.limit || 5 }), text)
       }
 
       if (operation === "solution_list") {

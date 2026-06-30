@@ -4,16 +4,19 @@ import yaml from "js-yaml"
 import {
   buildObjectValueReportData,
   buildPlaceProfitReportData,
+  buildPriceHistoryReportData,
   buildProfitRankReportData,
   buildSolutionListReportData,
   DeltaForceClient,
   formatPlaceProfitResponse,
   formatDailyKeywordResponse,
   formatObjectValueSearchResponse,
+  formatPriceHistoryResponse,
   formatProfitRankResponse,
   formatSolutionListResponse,
   getDeltaForceHelp,
   getDeltaForcePlaceHelp,
+  normalizeHistoryDays,
   normalizeDeltaForcePlace,
   normalizeRankLimit
 } from "../utils/DeltaForceClient.js"
@@ -71,6 +74,7 @@ export class DeltaForcePlugin extends plugin {
         { reg: "^[.。]三角洲\\s*$", fnc: "showHelp" },
         { reg: "^[.。]三角洲\\s*(今日密码|每日密码|密码)\\s*$", fnc: "dailyKeyword" },
         { reg: "^[.。]三角洲\\s*(物品价值|价值搜索|查价值)\\s+[\\s\\S]+$", fnc: "objectValueSearch" },
+        { reg: "^[.。]三角洲\\s*(价格历史|价格走势|历史价格|价格曲线|折线图)\\s+[\\s\\S]+$", fnc: "priceHistory" },
         { reg: "^[.。]三角洲\\s*(改枪码|改枪方案|方案码)([\\s\\S]*)$", fnc: "solutionList" },
         { reg: "^[.。]三角洲\\s*(特勤处利润|制造利润)(\\s+\\S+)?\\s*$", fnc: "placeProfit" },
         { reg: "^[.。]三角洲\\s*(利润排行)([\\s\\S]*)$", fnc: "profitRank" }
@@ -134,6 +138,41 @@ export class DeltaForcePlugin extends plugin {
     } catch (err) {
       globalThis.logger?.warn?.(`[三角洲行动工具] 物品价值搜索失败: ${err.message}`)
       await e.reply(`三角洲物品价值搜索失败：${err.message}`)
+    }
+    return true
+  }
+
+  async priceHistory(e) {
+    try {
+      const rawArgs = e.msg.replace(/^[.。]三角洲\s*(价格历史|价格走势|历史价格|价格曲线|折线图)\s*/, "").trim()
+      const args = rawArgs ? rawArgs.split(/\s+/).filter(Boolean) : []
+      let days = 30
+      let limit = 5
+      const numbers = []
+      while (args.length && /^\d+$/.test(args[args.length - 1])) {
+        numbers.unshift(Number(args.pop()))
+      }
+      if (numbers.length === 1) days = normalizeHistoryDays(numbers[0])
+      if (numbers.length >= 2) {
+        days = normalizeHistoryDays(numbers[0])
+        limit = normalizeRankLimit(numbers[1], 5)
+      }
+      const keyword = args.join(" ").trim()
+      if (!keyword) {
+        await e.reply("请提供要搜索的物品名称或 ID，例如：.三角洲 价格历史 显卡")
+        return true
+      }
+
+      const client = new DeltaForceClient(readPluginSettings())
+      const result = await client.searchPriceHistory({ keyword, days, limit })
+      await replyDeltaForceReport(
+        e,
+        buildPriceHistoryReportData(result, { keyword, days, limit }),
+        formatPriceHistoryResponse(result, { keyword, days, limit })
+      )
+    } catch (err) {
+      globalThis.logger?.warn?.(`[三角洲行动工具] 价格历史查询失败: ${err.message}`)
+      await e.reply(`三角洲价格历史查询失败：${err.message}`)
     }
     return true
   }

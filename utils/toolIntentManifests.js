@@ -11,6 +11,7 @@ const TOOL_INTENT_MANIFESTS = {
       /三角洲/,
       /改枪码|改枪方案|方案码|枪码/,
       /特勤处|制造利润|利润排行/,
+      /价格历史|历史价格|价格走势|折线图|趋势图/,
       /今日密码|每日密码/
     ],
     disclosure: [
@@ -19,6 +20,7 @@ const TOOL_INTENT_MANIFESTS = {
       "不要被“今天的/最新的/发一下”干扰，先看用户真正要查的子功能。",
       "operation 选择规则：",
       "- 改枪码、改枪方案、方案码、枪码 -> operation=solution_list",
+      "- 价格历史、历史价格、价格走势、价格曲线、折线图、趋势图 -> operation=price_history",
       "- 物品价值、价格、多少钱、值多少 -> operation=object_value",
       "- 特勤处利润、制造利润 -> operation=place_profit",
       "- 利润排行、利润榜 -> operation=profit_rank",
@@ -28,9 +30,11 @@ const TOOL_INTENT_MANIFESTS = {
       "- “名字有 非洲 的物品价格”“名称包含 非洲 的物品价值”里的 非洲 是 keyword；不要把“名字有/物品/价格”放进 keyword。",
       "- 对 solution_list，keyword 可选但有关键词就必须填写。",
       "- 对 object_value，keyword 必填；缺关键词时不要乱填，应选择 chat 追问。",
+      "- 对 price_history，keyword 必填；days 默认 30；limit 表示要给几个匹配物品画图，默认 5。",
       "等价例子：",
       "- “希洛发一下今天的三角洲的改枪码，我要和277有关的” -> {\"operation\":\"solution_list\",\"keyword\":\"277\"}",
       "- “三角洲 H70 现在多少钱” -> {\"operation\":\"object_value\",\"keyword\":\"H70\"}",
+      "- “三角洲显卡最近价格走势折线图” -> {\"operation\":\"price_history\",\"keyword\":\"显卡\"}",
       "- “希洛告诉我今天的三角洲的名字有 非洲 的物品的价格” -> {\"operation\":\"object_value\",\"keyword\":\"非洲\"}",
       "- “看下三角洲工作台利润排行前5” -> {\"operation\":\"profit_rank\",\"place\":\"工作台\",\"limit\":5}",
       "- “三角洲今日密码” -> {\"operation\":\"daily_keyword\"}"

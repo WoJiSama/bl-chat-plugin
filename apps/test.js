@@ -1305,6 +1305,8 @@ function cleanDeltaForceKeyword(text = "", operation = "") {
     value = value.replace(/(?:改枪码|改枪方案|方案码|枪码|改枪|方案)/g, " ")
   } else if (operation === "object_value") {
     value = value.replace(/(?:物品价值|价值搜索|查价值|价格|价值|多少钱|卖多少|值多少)/g, " ")
+  } else if (operation === "price_history") {
+    value = value.replace(/(?:价格历史|历史价格|价格走势|走势|价格曲线|折线图|趋势图|价格|历史|最近|近\s*\d{1,2}\s*天|这\s*\d{1,2}\s*天)/g, " ")
   } else {
     value = value.replace(/(?:特勤处利润|制造利润|利润排行|利润榜|排行|今日密码|每日密码|密码|口令)/g, " ")
   }
@@ -1340,6 +1342,8 @@ function resolveNaturalDeltaForceToolCall(text = "") {
   let operation = ""
   if (/(改枪码|改枪方案|方案码|枪码|改枪|方案)/.test(content)) {
     operation = "solution_list"
+  } else if (/(价格历史|历史价格|价格走势|走势|价格曲线|折线图|趋势图)/.test(content)) {
+    operation = "price_history"
   } else if (/(物品价值|价值搜索|查价值|价格|多少钱|卖多少|值多少)/.test(content)) {
     operation = "object_value"
   } else if (/(利润排行|利润榜|收益排行|赚钱排行)/.test(content)) {
@@ -1354,7 +1358,7 @@ function resolveNaturalDeltaForceToolCall(text = "") {
   if (!operation) return null
 
   const params = { operation, prompt: text }
-  if (operation === "solution_list" || operation === "object_value") {
+  if (operation === "solution_list" || operation === "object_value" || operation === "price_history") {
     const keyword = extractDeltaForceKeyword(content, operation)
     if (keyword) params.keyword = keyword
   }
@@ -1364,6 +1368,12 @@ function resolveNaturalDeltaForceToolCall(text = "") {
   }
   const limitMatch = content.match(/(?:前|top\s*)?(\d{1,2})\s*(?:条|个|名|项)?/i)
   if (limitMatch && !params.keyword) params.limit = Number(limitMatch[1])
+  if (operation === "price_history") {
+    const daysMatch = content.match(/(\d{1,2})\s*天/)
+    if (daysMatch) params.days = Number(daysMatch[1])
+    const countMatch = content.match(/(?:前|top\s*)?(\d{1,2})\s*(?:个|件|项|张图)/i)
+    if (countMatch) params.limit = Number(countMatch[1])
+  }
 
   return {
     toolName: "deltaForceTool",

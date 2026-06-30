@@ -2,16 +2,19 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import {
   DeltaForceClient,
+  buildPriceHistoryReportData,
   buildObjectValueReportData,
   buildDeltaForceUrl,
   buildSolutionListReportData,
   formatDailyKeywordResponse,
   formatObjectValueSearchResponse,
   formatPlaceProfitResponse,
+  formatPriceHistoryResponse,
   formatProfitRankResponse,
   formatSolutionListResponse,
   getDeltaForceHelp,
   getDeltaForcePlaceHelp,
+  normalizeHistoryDays,
   normalizeDeltaForcePlace,
   normalizeRankLimit
 } from "../utils/DeltaForceClient.js"
@@ -155,6 +158,72 @@ test("DeltaForceClient searches object value by name or id", async () => {
   await client.searchObjectValue({ keyword: "11010006002-c1" })
   assert.equal(seenUrls[0], "https://api.example.com/api/v1/df/price/ocr/latest?page=1&limit=20&objectName=H70")
   assert.equal(seenUrls[1], "https://api.example.com/api/v1/df/price/ocr/latest?page=1&limit=10&objectID=11010006002-c1")
+})
+
+test("DeltaForceClient requests price history and fetches pages", async () => {
+  const seenUrls = []
+  const client = new DeltaForceClient({
+    deltaForceSystem: {
+      enabled: true,
+      apiBaseUrl: "https://api.example.com",
+      apiKey: "secret"
+    }
+  }, {
+    fetchImpl: async (url) => {
+      seenUrls.push(url)
+      const page = Number(new URL(url).searchParams.get("page"))
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          data: {
+            items: page === 1
+              ? [{ objectID: "110-c1", objectName: "显卡", price: 100, timestamp: 1782740000 }]
+              : [{ objectID: "110-c1", objectName: "显卡", price: 120, timestamp: 1782826400 }],
+            pagination: { page, limit: 1, total: 2, hasMore: page === 1 },
+            stats: { days: 30 }
+          }
+        })
+      }
+    }
+  })
+
+  const body = await client.getAllPriceHistory({ objectID: "110-c1", days: 30, limit: 1 })
+  assert.equal(seenUrls[0], "https://api.example.com/api/v1/df/price/ocr/history?objectID=110-c1&days=30&page=1&limit=1")
+  assert.equal(seenUrls[1], "https://api.example.com/api/v1/df/price/ocr/history?objectID=110-c1&days=30&page=2&limit=1")
+  assert.equal(body.data.items.length, 2)
+})
+
+test("price history report groups daily prices into chart rows", () => {
+  const body = {
+    data: {
+      keyword: "显卡",
+      days: 30,
+      items: [
+        {
+          latest: { objectID: "110-c1", objectName: "显卡", condition: "全新" },
+          history: {
+            data: {
+              items: [
+                { objectID: "110-c1", objectName: "显卡", condition: "全新", price: 100, timestamp: 1782740000 },
+                { objectID: "110-c1", objectName: "显卡", condition: "全新", price: 200, timestamp: 1782743600 },
+                { objectID: "110-c1", objectName: "显卡", condition: "全新", price: 300, timestamp: 1782826400 }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+
+  const report = buildPriceHistoryReportData(body, { keyword: "显卡" })
+  assert.equal(report.kind, "price-history")
+  assert.equal(report.rows.length, 1)
+  assert.equal(report.rows[0].name, "显卡")
+  assert.equal(report.rows[0].pointCount, 2)
+  assert.match(report.rows[0].chartSvg, /<svg/)
+  assert.match(formatPriceHistoryResponse(body, { keyword: "显卡" }), /显卡/)
+  assert.equal(normalizeHistoryDays(999), 90)
 })
 
 test("DeltaForceClient requests solution list with page and bounded limit", async () => {

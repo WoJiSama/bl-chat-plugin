@@ -1,6 +1,10 @@
 const DEFAULT_TIMEOUT_MS = 10000
 const DEFAULT_RANK_LIMIT = 10
 const MAX_RANK_LIMIT = 20
+const DEFAULT_HISTORY_DAYS = 30
+const DEFAULT_HISTORY_LIMIT = 5
+const MAX_HISTORY_DAYS = 90
+const MAX_HISTORY_PAGES = 10
 
 export const DELTA_FORCE_PLACES = [
   {
@@ -72,6 +76,12 @@ export function normalizeRankLimit(value, fallback = DEFAULT_RANK_LIMIT) {
   return Math.max(1, Math.min(number, MAX_RANK_LIMIT))
 }
 
+export function normalizeHistoryDays(value, fallback = DEFAULT_HISTORY_DAYS) {
+  const number = Number.parseInt(value, 10)
+  if (!Number.isFinite(number) || number <= 0) return fallback
+  return Math.max(1, Math.min(number, MAX_HISTORY_DAYS))
+}
+
 export function getDeltaForceHelp() {
   return [
     "三角洲命令",
@@ -81,6 +91,7 @@ export function getDeltaForceHelp() {
     ".三角洲 特勤处利润 [场所] [数量] - 查看制造利润总览",
     ".三角洲 利润排行 [场所] [数量] - 查看制造利润排行",
     ".三角洲 物品价值 <名称或ID> [数量] - 搜索物品价值",
+    ".三角洲 价格历史 <名称或ID> [天数] [数量] - 查看物品 30 天价格折线图",
     ".三角洲 改枪码 [关键词] [数量] - 查看改枪方案码"
   ].join("\n")
 }
@@ -203,6 +214,97 @@ export class DeltaForceClient {
         ...unwrapApiData(body),
         keyword: text,
         limit: resultLimit
+      }
+    }
+  }
+
+  async getPriceHistory({ objectID = "", days = DEFAULT_HISTORY_DAYS, page = 1, limit = 1000 } = {}) {
+    const id = String(objectID || "").trim()
+    if (!id) throw new Error("请提供要查询价格历史的物品 ID")
+    const body = await this.requestJson("/api/v1/df/price/ocr/history", {
+      objectID: id,
+      days: normalizeHistoryDays(days),
+      page: Math.max(1, Number.parseInt(page, 10) || 1),
+      limit: Math.max(1, Math.min(Number.parseInt(limit, 10) || 1000, 1000))
+    })
+    return {
+      ...body,
+      data: {
+        ...unwrapApiData(body),
+        objectID: id,
+        days: normalizeHistoryDays(days)
+      }
+    }
+  }
+
+  async getAllPriceHistory({ objectID = "", days = DEFAULT_HISTORY_DAYS, limit = 1000, maxPages = MAX_HISTORY_PAGES } = {}) {
+    const first = await this.getPriceHistory({ objectID, days, page: 1, limit })
+    const data = unwrapApiData(first)
+    const firstItems = getHistoryItems(data)
+    const pagination = data?.pagination || {}
+    const total = Math.max(Number(pagination.total) || firstItems.length, firstItems.length)
+    const pageLimit = Math.max(Number(pagination.limit) || limit || firstItems.length || 1, 1)
+    const totalPages = Math.min(Math.ceil(total / pageLimit), maxPages)
+    const all = [...firstItems]
+
+    for (let page = 2; page <= totalPages; page++) {
+      const next = await this.getPriceHistory({ objectID, days, page, limit: pageLimit })
+      const nextData = unwrapApiData(next)
+      const nextItems = getHistoryItems(nextData)
+      if (!nextItems.length) break
+      all.push(...nextItems)
+    }
+
+    return {
+      code: first?.code,
+      message: first?.message,
+      data: {
+        ...data,
+        items: all,
+        objectID: String(objectID || "").trim(),
+        days: normalizeHistoryDays(days),
+        pagination: {
+          ...pagination,
+          page: 1,
+          limit: pageLimit,
+          total,
+          fetched: all.length
+        }
+      }
+    }
+  }
+
+  async searchPriceHistory({ keyword = "", days = DEFAULT_HISTORY_DAYS, limit = DEFAULT_HISTORY_LIMIT } = {}) {
+    const text = String(keyword || "").trim()
+    if (!text) throw new Error("请提供要查询价格历史的物品名称或 ID")
+    const resultLimit = normalizeRankLimit(limit, DEFAULT_HISTORY_LIMIT)
+    const latest = await this.searchObjectValue({ keyword: text, limit: resultLimit })
+    const latestData = unwrapApiData(latest)
+    const latestItems = getObjectValueItems(latestData)
+    const histories = []
+
+    for (const item of latestItems) {
+      const objectID = item.objectID ?? item.objectId ?? item.id
+      if (!objectID) continue
+      const history = await this.getAllPriceHistory({
+        objectID,
+        days: normalizeHistoryDays(days)
+      })
+      histories.push({
+        latest: item,
+        history
+      })
+    }
+
+    return {
+      code: latest?.code,
+      message: latest?.message,
+      data: {
+        keyword: text,
+        days: normalizeHistoryDays(days),
+        limit: resultLimit,
+        items: histories,
+        total: Number(latestData?.total ?? latestData?.pagination?.total) || latestItems.length
       }
     }
   }
@@ -343,6 +445,14 @@ function getObjectValueItems(data) {
   return []
 }
 
+function getHistoryItems(data) {
+  if (!data || typeof data !== "object") return []
+  if (Array.isArray(data.list)) return data.list
+  if (Array.isArray(data.items)) return data.items
+  if (Array.isArray(data.records)) return data.records
+  return []
+}
+
 function formatDiff(value) {
   const number = Number(value)
   if (!Number.isFinite(number)) return stringifyValue(value)
@@ -365,6 +475,22 @@ function formatUnixTime(value) {
   if (!Number.isFinite(number) || number <= 0) return stringifyValue(value)
   const ms = number > 100000000000 ? number : number * 1000
   return new Date(ms).toLocaleString("zh-CN", { hour12: false })
+}
+
+function formatDateLabel(timestamp) {
+  const number = Number(timestamp)
+  if (!Number.isFinite(number) || number <= 0) return ""
+  const ms = number > 100000000000 ? number : number * 1000
+  const date = new Date(ms)
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, "0")
+  const day = String(date.getDate()).padStart(2, "0")
+  return `${year}-${month}-${day}`
+}
+
+function shortDateLabel(date = "") {
+  const match = String(date).match(/^\d{4}-(\d{2})-(\d{2})$/)
+  return match ? `${Number(match[1])}/${Number(match[2])}` : String(date)
 }
 
 function formatObjectValueItem(item, index) {
@@ -673,6 +799,130 @@ export function buildObjectValueReportData(body, { keyword = "", limit = DEFAULT
   }
 }
 
+function buildDailyPriceSeries(items = []) {
+  const buckets = new Map()
+  for (const item of items) {
+    const date = formatDateLabel(item.timestamp ?? item.time ?? item.createdAt ?? item.updatedAt)
+    const price = Number(item.price ?? item.latestPrice ?? item.value)
+    if (!date || !Number.isFinite(price) || price <= 0) continue
+    const bucket = buckets.get(date) || { date, sum: 0, count: 0, min: price, max: price }
+    bucket.sum += price
+    bucket.count += 1
+    bucket.min = Math.min(bucket.min, price)
+    bucket.max = Math.max(bucket.max, price)
+    buckets.set(date, bucket)
+  }
+
+  return [...buckets.values()]
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map(bucket => ({
+      date: bucket.date,
+      label: shortDateLabel(bucket.date),
+      price: Math.round(bucket.sum / bucket.count),
+      min: Math.round(bucket.min),
+      max: Math.round(bucket.max),
+      count: bucket.count
+    }))
+}
+
+function buildPriceChartSvg(series = []) {
+  const width = 980
+  const height = 330
+  const padding = { top: 28, right: 34, bottom: 56, left: 92 }
+  const plotWidth = width - padding.left - padding.right
+  const plotHeight = height - padding.top - padding.bottom
+  const prices = series.map(point => Number(point.price)).filter(Number.isFinite)
+  if (!prices.length) {
+    return `<svg class="price-chart" viewBox="0 0 ${width} ${height}" role="img"><text x="${width / 2}" y="${height / 2}" fill="#aeb8c4" text-anchor="middle" font-size="22">暂无历史价格数据</text></svg>`
+  }
+
+  const minPrice = Math.min(...prices)
+  const maxPrice = Math.max(...prices)
+  const span = Math.max(maxPrice - minPrice, 1)
+  const paddedMin = Math.max(0, minPrice - span * 0.08)
+  const paddedMax = maxPrice + span * 0.08
+  const ySpan = Math.max(paddedMax - paddedMin, 1)
+  const xOf = index => padding.left + (series.length <= 1 ? plotWidth / 2 : (index / (series.length - 1)) * plotWidth)
+  const yOf = price => padding.top + plotHeight - ((price - paddedMin) / ySpan) * plotHeight
+  const coords = series.map((point, index) => ({
+    ...point,
+    x: xOf(index),
+    y: yOf(point.price)
+  }))
+  const path = coords.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(" ")
+  const areaPath = `${path} L ${coords.at(-1).x.toFixed(1)} ${padding.top + plotHeight} L ${coords[0].x.toFixed(1)} ${padding.top + plotHeight} Z`
+  const yTicks = [paddedMin, paddedMin + ySpan / 2, paddedMax]
+  const xTickIndexes = [...new Set([0, Math.floor((series.length - 1) / 2), series.length - 1])]
+
+  return `<svg class="price-chart" viewBox="0 0 ${width} ${height}" role="img">
+    <defs>
+      <linearGradient id="priceArea" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#78d39a" stop-opacity="0.30"/>
+        <stop offset="100%" stop-color="#78d39a" stop-opacity="0.02"/>
+      </linearGradient>
+    </defs>
+    <rect x="0" y="0" width="${width}" height="${height}" rx="8" fill="#171d25"/>
+    ${yTicks.map(value => {
+      const y = yOf(value)
+      return `<line x1="${padding.left}" y1="${y.toFixed(1)}" x2="${width - padding.right}" y2="${y.toFixed(1)}" stroke="#2f3845" stroke-width="1"/>
+        <text x="${padding.left - 14}" y="${(y + 6).toFixed(1)}" fill="#91a0b2" font-size="16" text-anchor="end">${formatNumber(value)}</text>`
+    }).join("")}
+    <line x1="${padding.left}" y1="${padding.top}" x2="${padding.left}" y2="${padding.top + plotHeight}" stroke="#4b5563" stroke-width="1.5"/>
+    <line x1="${padding.left}" y1="${padding.top + plotHeight}" x2="${width - padding.right}" y2="${padding.top + plotHeight}" stroke="#4b5563" stroke-width="1.5"/>
+    <path d="${areaPath}" fill="url(#priceArea)"/>
+    <path d="${path}" fill="none" stroke="#86efac" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/>
+    ${coords.map(point => `<circle cx="${point.x.toFixed(1)}" cy="${point.y.toFixed(1)}" r="4.8" fill="#f5d58a" stroke="#171d25" stroke-width="2"/>`).join("")}
+    ${xTickIndexes.map(index => {
+      const point = coords[index]
+      return `<text x="${point.x.toFixed(1)}" y="${height - 20}" fill="#91a0b2" font-size="16" text-anchor="middle">${point.label}</text>`
+    }).join("")}
+  </svg>`
+}
+
+export function buildPriceHistoryReportData(body, { keyword = "", days = DEFAULT_HISTORY_DAYS, limit = DEFAULT_HISTORY_LIMIT } = {}) {
+  const data = unwrapApiData(body)
+  const items = Array.isArray(data?.items) ? data.items : []
+  const searchText = keyword || data?.keyword || ""
+  const normalizedDays = normalizeHistoryDays(days || data?.days)
+  const rows = items.map(entry => {
+    const latest = entry.latest || {}
+    const historyData = unwrapApiData(entry.history)
+    const historyItems = getHistoryItems(historyData)
+    const series = buildDailyPriceSeries(historyItems)
+    const latestPoint = series.at(-1)
+    const firstPoint = series[0]
+    const diff = latestPoint && firstPoint ? latestPoint.price - firstPoint.price : 0
+    const diffPercent = latestPoint && firstPoint && firstPoint.price
+      ? (diff / firstPoint.price) * 100
+      : 0
+    return {
+      objectID: latest.objectID ?? latest.objectId ?? historyData?.objectID ?? "",
+      name: latest.objectName || latest.name || latest.itemName || historyItems[0]?.objectName || "未知物品",
+      condition: latest.condition || historyItems[0]?.condition || "",
+      latestPrice: latestPoint ? formatNumber(latestPoint.price) : latest.latestPrice !== undefined ? formatNumber(latest.latestPrice) : "",
+      change: Number.isFinite(diff) && diff !== 0 ? `${formatDiff(diff)} / ${formatPercent(diffPercent)}` : "0",
+      days: normalizedDays,
+      pointCount: series.length,
+      sampleCount: historyItems.length,
+      chartSvg: buildPriceChartSvg(series)
+    }
+  })
+
+  const total = Number(data?.total)
+  const suffix = Number.isFinite(total) && total > rows.length ? ` / 共 ${formatNumber(total)} 个匹配` : ""
+  return {
+    kind: "price-history",
+    title: searchText
+      ? `三角洲价格历史：${searchText}（${rows.length}${suffix}）`
+      : `三角洲价格历史（${rows.length}）`,
+    subtitle: `OCR 历史价格｜默认 ${DEFAULT_HISTORY_DAYS} 天｜按 objectID 分组`,
+    generatedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
+    columns: ["价格走势"],
+    emptyText: searchText ? `没有找到「${searchText}」的价格历史数据` : "没有找到价格历史数据",
+    rows: rows.slice(0, normalizeRankLimit(limit, DEFAULT_HISTORY_LIMIT))
+  }
+}
+
 export function formatObjectValueSearchResponse(body, { keyword = "", limit = DEFAULT_RANK_LIMIT } = {}) {
   const data = unwrapApiData(body)
   const searchText = keyword || data?.keyword || ""
@@ -689,6 +939,16 @@ export function formatObjectValueSearchResponse(body, { keyword = "", limit = DE
     ? `三角洲物品价值：${searchText}（Top ${items.length}${suffix}）`
     : `三角洲物品价值（Top ${items.length}${suffix}）`
   return [title, ...items.map(formatObjectValueItem).filter(Boolean)].join("\n")
+}
+
+export function formatPriceHistoryResponse(body, { keyword = "", days = DEFAULT_HISTORY_DAYS, limit = DEFAULT_HISTORY_LIMIT } = {}) {
+  const report = buildPriceHistoryReportData(body, { keyword, days, limit })
+  if (!report.rows.length) return report.emptyText
+  const lines = [report.title]
+  for (const row of report.rows) {
+    lines.push(`${row.name}${row.condition ? `｜${row.condition}` : ""}｜现价 ${row.latestPrice || "-"}｜${row.days}天涨跌 ${row.change}｜样本 ${row.sampleCount}`)
+  }
+  return lines.join("\n")
 }
 
 export function formatSolutionListResponse(body, { keyword = "", limit = DEFAULT_RANK_LIMIT } = {}) {

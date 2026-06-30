@@ -94,6 +94,29 @@ function buildObjectValueRows(rows) {
   }).join("")
 }
 
+function buildPriceHistoryRows(rows) {
+  return rows.map(row => `
+    <tr>
+      <td>
+        <div class="history-card">
+          <div class="history-head">
+            <div>
+              <div class="history-name">${escapeHtml(row.name)}</div>
+              <div class="history-meta">${escapeHtml(row.objectID)}${row.condition ? `｜${escapeHtml(row.condition)}` : ""}</div>
+            </div>
+            <div class="history-stats">
+              <div class="history-price">${escapeHtml(row.latestPrice || "-")}</div>
+              <div class="history-change">${escapeHtml(row.days)}天涨跌 ${escapeHtml(row.change || "0")}</div>
+              <div class="history-samples">${escapeHtml(row.pointCount || 0)} 天 / ${escapeHtml(row.sampleCount || 0)} 样本</div>
+            </div>
+          </div>
+          ${row.chartSvg || ""}
+        </div>
+      </td>
+    </tr>
+  `).join("")
+}
+
 export function buildDeltaForceReportView(report) {
   const columnsHtml = (report.columns || [])
     .map(column => `<th>${escapeHtml(column)}</th>`)
@@ -104,6 +127,7 @@ export function buildDeltaForceReportView(report) {
   if (report.kind === "profit-rank") rowsHtml = buildRankRows(rows)
   if (report.kind === "solution-list") rowsHtml = buildSolutionRows(rows)
   if (report.kind === "object-value") rowsHtml = buildObjectValueRows(rows)
+  if (report.kind === "price-history") rowsHtml = buildPriceHistoryRows(rows)
   if (!rows.length) {
     rowsHtml = `<tr><td class="empty" colspan="${columnCount}">${escapeHtml(report.emptyText || "暂无数据")}</td></tr>`
   }
