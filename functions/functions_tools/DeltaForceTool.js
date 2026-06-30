@@ -76,6 +76,8 @@ export class DeltaForceTool extends AbstractTool {
     this.description = [
       "三角洲行动第三方 API 工具。",
       "用户自然语言询问三角洲今日密码、每日密码、物品价格/物品价值、改枪码/改枪方案、特勤处制造利润、利润排行时调用。",
+      "优先根据强关键词选择子功能：改枪码/改枪方案=solution_list，物品价格/价值=object_value，特勤处/制造利润=place_profit，利润排行=profit_rank，今日/每日密码=daily_keyword。",
+      "例如“今天的三角洲改枪码，和277有关”应调用 solution_list 且 keyword=277；不要因为“今天的”误选 daily_keyword。",
       "不要用于普通聊天或非三角洲行动游戏内容。"
     ].join("")
     this.parameters = {

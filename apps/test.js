@@ -21,6 +21,7 @@ import { stripChatLogSpeakerPrefix, stripChatLogSpeakerPrefixes } from "../utils
 import { splitParchmentReplyText } from "../utils/parchmentReply.js"
 import { buildMissingImageAnalysisReply, looksLikeImageAuthenticityRequest, looksLikeImageVerificationRequest, looksLikeVisualInspectionRequest } from "../utils/imageRequestGuard.js"
 import { compileImagePrompt } from "../utils/promptCompiler.js"
+import { buildToolIntentDisclosure, selectToolIntentCandidates } from "../utils/toolIntentManifests.js"
 import fs from "fs"
 import YAML from "yaml"
 import path from "path"
@@ -1290,6 +1291,83 @@ function resolveAvatarInspectionTargets({ e = {}, text = "", atQq = [], memberMa
   return {
     images: targets.map(item => item.image).filter(Boolean),
     prompt: `${text || "看一下头像"}\n目标头像：${names}。请基于头像本身做简洁自然的描述，不要假装知道头像背后的真实身份或经历。`
+  }
+}
+
+function cleanDeltaForceKeyword(text = "", operation = "") {
+  let value = removeBotAnchors(text, Bot.nickname, [])
+    .replace(/\[CQ:[^\]]+\]/g, " ")
+    .replace(/[.。]?\s*三角洲(?:行动)?/g, " ")
+    .replace(/(?:帮我|给我|替我|麻烦|可以|能不能|能|发一下|发下|看一下|看下|查一下|查下|查查|搜一下|搜下|找一下|找下|我要|想要|要|一下|今天的?|今日|每日|最新|有关的?|相关的?|相关|关于|和|跟|与|的)/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+
+  if (operation === "solution_list") {
+    value = value.replace(/(?:改枪码|改枪方案|方案码|枪码|改枪|方案)/g, " ")
+  } else if (operation === "object_value") {
+    value = value.replace(/(?:物品价值|价值搜索|查价值|价格|价值|多少钱|卖多少|值多少)/g, " ")
+  } else {
+    value = value.replace(/(?:特勤处利润|制造利润|利润排行|利润榜|排行|今日密码|每日密码|密码|口令)/g, " ")
+  }
+
+  return value
+    .replace(/[，,。.!！?？:：;；~～]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
+function extractDeltaForceKeyword(text = "", operation = "") {
+  const content = normalizeIntentText(text)
+  const relationPatterns = [
+    /(?:和|跟|与|关于|有关|相关|包含|带|搜|查|找)\s*([A-Za-z0-9_\-.\u4e00-\u9fa5·•]{1,40})\s*(?:有关|相关|的)?/,
+    /([A-Za-z0-9_\-.\u4e00-\u9fa5·•]{1,40})\s*(?:有关|相关)/
+  ]
+  for (const pattern of relationPatterns) {
+    const match = content.match(pattern)
+    const keyword = cleanDeltaForceKeyword(match?.[1] || "", operation)
+    if (keyword) return keyword
+  }
+
+  const cleaned = cleanDeltaForceKeyword(content, operation)
+  const tokens = cleaned.split(/\s+/).filter(Boolean)
+  return tokens.length ? tokens.join(" ") : ""
+}
+
+function resolveNaturalDeltaForceToolCall(text = "") {
+  const content = normalizeIntentText(text)
+  if (!content.includes("三角洲")) return null
+
+  let operation = ""
+  if (/(改枪码|改枪方案|方案码|枪码|改枪|方案)/.test(content)) {
+    operation = "solution_list"
+  } else if (/(物品价值|价值搜索|查价值|价格|多少钱|卖多少|值多少)/.test(content)) {
+    operation = "object_value"
+  } else if (/(利润排行|利润榜|收益排行|赚钱排行)/.test(content)) {
+    operation = "profit_rank"
+  } else if (/(特勤处利润|制造利润|制造收益|特勤处收益)/.test(content)) {
+    operation = "place_profit"
+  } else if (/(今日密码|每日密码|今天.*密码|密码|口令)/.test(content)) {
+    operation = "daily_keyword"
+  } else if (/帮助|菜单|怎么用|指令/.test(content)) {
+    operation = "help"
+  }
+  if (!operation) return null
+
+  const params = { operation }
+  if (operation === "solution_list" || operation === "object_value") {
+    const keyword = extractDeltaForceKeyword(content, operation)
+    if (keyword) params.keyword = keyword
+  }
+  if (operation === "place_profit" || operation === "profit_rank") {
+    const place = ["工作台", "技术中心", "制药台", "防具台"].find(name => content.includes(name))
+    if (place) params.place = place
+  }
+  const limitMatch = content.match(/(?:前|top\s*)?(\d{1,2})\s*(?:条|个|名|项)?/i)
+  if (limitMatch && !params.keyword) params.limit = Number(limitMatch[1])
+
+  return {
+    toolName: "deltaForceTool",
+    params
   }
 }
 
@@ -4663,6 +4741,18 @@ ${mcpPrompts}
           }
         }
 
+        const naturalDeltaForceCall = toolChoice === "auto"
+          ? resolveNaturalDeltaForceToolCall(currentIntentText)
+          : null
+        if (naturalDeltaForceCall) {
+          session.tools = this.getToolsByName(["deltaForceTool"])
+          if (session.tools?.length) {
+            toolChoice = { type: "function", function: { name: "deltaForceTool" } }
+            forcedToolCall = this.buildForcedToolCall("deltaForceTool", naturalDeltaForceCall.params)
+            logger.info(`[工具选择] group=${groupId} 强制使用 deltaForceTool 处理三角洲自然语言请求 params=${JSON.stringify(naturalDeltaForceCall.params)}`)
+          }
+        }
+
         if (msg?.includes("导图") || msg?.includes("思维导图")) {
           session.tools = this.getToolsByName(["aiMindMapTool"])
           if (session.tools?.length) toolChoice = { type: "function", function: { name: "aiMindMapTool" } }
@@ -5309,12 +5399,18 @@ ${mcpPrompts}
     const availableTools = (context.sessionTools || context.tools || [])
       .map(tool => tool?.function)
       .filter(tool => tool?.name)
-    const toolCatalog = availableTools
+    const availableToolNames = availableTools.map(tool => tool.name)
+    const candidateToolNames = selectToolIntentCandidates([userText, quoted].filter(Boolean).join("\n"), availableToolNames)
+    const disclosedTools = candidateToolNames.length
+      ? availableTools.filter(tool => candidateToolNames.includes(tool.name))
+      : availableTools
+    const toolCatalog = disclosedTools
       .map(tool => {
         const props = Object.keys(tool.parameters?.properties || {}).join(", ")
         return `- ${tool.name}: ${String(tool.description || "").slice(0, 180)}${props ? ` 参数: ${props}` : ""}`
       })
       .join("\n")
+    const toolIntentDisclosure = buildToolIntentDisclosure(candidateToolNames)
 
     try {
       const response = await this.fetchWithTimeout(url, {
@@ -5338,8 +5434,9 @@ ${mcpPrompts}
                 "image_analysis: 用户给了图片并要求看图、识别、分析、说明图片内容。",
                 "search: 用户询问实时信息或明确要搜索/查询/最新信息。",
                 "chat: 普通闲聊、问能不能做某事但没有给出具体任务、玩梗、情绪回应。",
-                "如果用户需求明确对应【可用工具】中的某个工具，优先输出该工具名；这适用于三角洲、提醒、点歌、禁言、改名片、戳一戳、点赞、礼物、聊天记录、表情、导图等已有工具。",
+                "如果用户需求明确对应【候选工具】中的某个工具，优先输出该工具名；这适用于三角洲、提醒、点歌、禁言、改名片、戳一戳、点赞、礼物、聊天记录、表情、导图等已有工具。",
                 "选择具体工具时，intent 写 tool，toolName 写工具名，params 按该工具参数名生成 JSON；不确定必要参数时不要乱填，选 chat 让希洛追问。",
+                "如果【候选工具详细规则】出现，必须优先按详细规则抽参；详细规则比通用描述更可信。",
                 "语义判断框架：先判断载体和真实目标。图片/截图/引用/转发常是载体，用户真正要处理的可能是里面的内容、说法、政策、事件或人物。",
                 "带图片/截图并说“查一下这个是真的假的/是不是真的/看看最新信息”时，真实目标默认是核实图片里承载的内容或说法；应先选 image_analysis 提取内容，后续再搜索。不要直接选纯 search，也不要理解成图片AI检测。",
                 "只有用户明确说“图片本身、AI生成、P图、合成、修过、改过、伪造痕迹”时，才把目标理解为图片本身真实性鉴定。",
@@ -5348,8 +5445,9 @@ ${mcpPrompts}
                 "reason 只写简短依据，不要输出完整思维链。",
                 "输出格式: {\"intent\":\"...\",\"confidence\":0到1,\"toolName\":\"可选工具名\",\"params\":{},\"prompt\":\"给工具用的中文任务文本\",\"query\":\"搜索词或空字符串\",\"reason\":\"简短原因\"}",
                 "",
-                "【可用工具】",
-                toolCatalog || "(无)"
+                candidateToolNames.length ? "【候选工具】" : "【可用工具摘要】",
+                toolCatalog || "(无)",
+                toolIntentDisclosure ? `\n【候选工具详细规则】\n${toolIntentDisclosure}` : ""
               ].join("\n")
             },
             {
@@ -5375,7 +5473,7 @@ ${mcpPrompts}
       const parsed = this.extractJsonObject(content)
       const normalized = this.normalizeToolDecision(parsed, {
         ...context,
-        availableToolNames: availableTools.map(tool => tool.name)
+        availableToolNames
       })
       if (normalized) {
         logger.info(`[语义工具分类] intent=${normalized.intent} tool=${normalized.toolName || "none"} confidence=${parsed?.confidence ?? ""} reason=${String(parsed?.reason || "").slice(0, 80)}`)
