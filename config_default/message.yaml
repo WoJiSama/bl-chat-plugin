@@ -11,6 +11,10 @@ pluginSettings:
     - "973682389"
   enableGroupWhitelist: true
   whitelistRejectMsg: 本群未开启此功能哦~
+  userBlacklist:
+    enabled: false
+    users: []
+    silent: true
   groupMaxMessages: 30
   groupChatMemoryDays: 1
   maxToolRounds: 2

@@ -2254,6 +2254,7 @@ export class ExamplePlugin extends plugin {
         const mode = String(this.config?.chatTriggerMode || 'strict').toLowerCase()
         if (mode !== 'smart') return
         if (!this.checkGroupPermission(e)) return
+        if (this.isUserBlacklisted(e)) return
         if (await this.isMutedInGroup(e)) return
         if (state.inFlight) return
         state.forceGateCheck = true
@@ -2562,6 +2563,10 @@ export class ExamplePlugin extends plugin {
    */
   async handleRandomReplySmart(e) {
     const groupId = e.group_id
+    if (this.isUserBlacklisted(e)) {
+      logger.info(`[用户黑名单] smart group=${groupId} user=${e.user_id} msg="${summarizeForLog(e.msg || "")}"`)
+      return false
+    }
     const state = this.getSmartState(groupId)
     // 记录该群最新消息时间戳给 applyReplyDebounce 用（仅 smart 模式需要，避免 strict 模式持续累积内存）
     const shouldRecordIncoming = !e?._smartWaitRerun && !e?._smartQueuedRerun && !e?._proactiveReply
@@ -3146,6 +3151,10 @@ ${specialSignalsBlock}
         logger.info(`[WaitTool] group=${groupId} 不在白名单，取消续话`)
         return
       }
+      if (this.isUserBlacklisted(e)) {
+        logger.info(`[WaitTool] group=${groupId} user=${e.user_id} 命中用户黑名单，取消续话`)
+        return
+      }
       if (await this.isMutedInGroup(e)) {
         logger.info(`[WaitTool] group=${groupId} 被禁言，取消续话`)
         return
@@ -3183,6 +3192,9 @@ ${specialSignalsBlock}
     }
     if (!this.checkGroupPermission(anchor)) {
       return { ok: false, error: 'not_whitelisted' }
+    }
+    if (this.isUserBlacklisted(anchor)) {
+      return { ok: false, error: 'user_blacklisted' }
     }
     if (await this.isMutedInGroup(anchor)) {
       return { ok: false, error: 'muted' }
@@ -3734,6 +3746,15 @@ ${specialSignalsBlock}
   checkGroupPermission(e) {
     if (!this.config.enableGroupWhitelist) return true
     return this.config.allowedGroups.some(id => String(id) === String(e.group_id))
+  }
+
+  isUserBlacklisted(e) {
+    const blacklist = this.config?.userBlacklist
+    if (!blacklist?.enabled) return false
+    const userId = e?.user_id
+    if (userId === undefined || userId === null) return false
+    const users = Array.isArray(blacklist.users) ? blacklist.users : []
+    return users.some(id => String(id).trim() === String(userId))
   }
 
   async getGroupUserMessages(groupId, userId) {
@@ -4310,6 +4331,11 @@ ${recentHistory || '(无)'}
       return false
     }
 
+    if (this.isUserBlacklisted(e)) {
+      logger.info(`[用户黑名单] group=${e.group_id} user=${e.user_id} msg="${summarizeForLog(e.msg || "")}"`)
+      return false
+    }
+
     const messageTypes = e.message?.map(m => m.type) || []
     if (this.config.excludeMessageTypes.some(t => messageTypes.includes(t))) return false
 
@@ -4424,6 +4450,11 @@ ${recentHistory || '(无)'}
   async handleTool(e) {
     if (!this.config.enabled || !e.group_id) {
       if (!e.group_id) await e.reply("该命令只能在群聊中使用。")
+      return false
+    }
+
+    if (this.isUserBlacklisted(e)) {
+      logger.info(`[用户黑名单] tool group=${e.group_id} user=${e.user_id} msg="${summarizeForLog(e.msg || "")}"`)
       return false
     }
 
