@@ -1319,6 +1319,7 @@ function cleanDeltaForceKeyword(text = "", operation = "") {
 function extractDeltaForceKeyword(text = "", operation = "") {
   const content = normalizeIntentText(text)
   const relationPatterns = [
+    /(?:名字|名称|物品名|道具名)(?:里|中)?(?:有|包含|含有|带有|带)\s*([A-Za-z0-9_\-.\u4e00-\u9fa5·•]{1,40})/,
     /(?:和|跟|与|关于|有关|相关|包含|带|搜|查|找)\s*([A-Za-z0-9_\-.\u4e00-\u9fa5·•]{1,40})\s*(?:有关|相关|的)?/,
     /([A-Za-z0-9_\-.\u4e00-\u9fa5·•]{1,40})\s*(?:有关|相关)/
   ]

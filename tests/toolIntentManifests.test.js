@@ -14,6 +14,8 @@ test("selects delta force manifest for natural delta force requests", () => {
   assert.match(disclosure, /operation=solution_list/)
   assert.match(disclosure, /keyword/)
   assert.match(disclosure, /277/)
+  assert.match(disclosure, /名字有 非洲/)
+  assert.match(disclosure, /"keyword":"非洲"/)
 })
 
 test("does not disclose unavailable or unrelated tool manifests", () => {
