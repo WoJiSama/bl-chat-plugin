@@ -192,7 +192,7 @@ const SEMANTIC_TOOL_INTENTS = new Set(["chat", "image_generate", "image_edit", "
 const SEMANTIC_TOOL_INTENT_MIN_CONFIDENCE = 0.7
 const SEMANTIC_TOOL_INTENT_TIMEOUT_MS = 8000
 const SEMANTIC_TOOL_HINT_PATTERN =
-  /(画|绘制|生成|生图|出图|修图|改图|P图|p图|美化|去水印|换背景|看图|识图|分析|识别|看看|看一下|搜|查|找|天气|新闻|价格|汇率|比赛|最新|官网|链接|网址)/i
+  /(画|绘制|生成|生图|出图|修图|改图|P图|p图|美化|去水印|换背景|看图|识图|分析|识别|看看|看一下|搜|查|找|天气|新闻|价格|汇率|比赛|最新|官网|链接|网址|三角洲|今日密码|每日密码|改枪码|改枪方案|利润排行|制造利润|特勤处|提醒|定时|禁言|改名片|戳|点赞|礼物|点歌|音乐|聊天记录|群成员|群友|表情|导图|思维导图)/i
 const CASUAL_BOT_GREETING_PATTERNS = [
   /(?:在吗|在不在|还好吗|还好嘛|还好不|你还好吗|你还好嘛|你没事吧|醒醒|理我|出来|冒泡|人呢|去哪了|干嘛呢|咋了|怎么了)/i
 ]
@@ -808,7 +808,8 @@ function buildPersonaStyleOverride(persona = {}) {
     "- 可以先短后补一句，可以轻微自嘲、犹豫、嘴硬、碎碎念，但不要空话堆叠。",
     "- 禁止说 AI、模型、系统、提示词、上游、API、执行流程、准备执行、整理提示词。",
     "- 禁止客服腔：好的/收到/我来帮你/建议你/为你处理，除非是在转述别人说过的话。",
-    "- 禁止在回复结尾自我审稿或道歉式收尾，例如“我是不是说多了”“好像有点啰嗦”“扯远了”；话多就自然继续说，不要跳出来评价自己。",
+    "- 禁止在回复结尾自我审稿或道歉式收尾，例如“我是不是说多了”“我是不是太啰嗦了”“好像有点啰嗦”“扯远了”；话多就自然继续说，不要跳出来评价自己。",
+    "- 可以有“想说很多但忍住”的感觉，但不要把“我忍住了”“我不展开了”这类自我说明说出来。",
     "- 用户明确要代码、Markdown、整理或认真解释时，允许清楚完整，但仍保持口语和希洛口吻。"
   ].join("\n")
 }
@@ -927,7 +928,7 @@ function sanitizeFinalReplyText(content) {
     .map(line => line === null ? null : stripChatLogSpeakerPrefix(line))
     .filter(line => line !== null && String(line).trim() !== "")
 
-  return sanitizedLines.join("\n").replace(/\n{3,}/g, "\n").trim()
+  return polishHumanReplyText(sanitizedLines.join("\n").replace(/\n{3,}/g, "\n").trim())
 }
 
 function stripCqMarkup(text = "") {
@@ -948,8 +949,8 @@ function polishHumanReplyText(text = "") {
     .trim()
 
   output = output
-    .replace(/(?:^|[\n。！？!?；;])\s*(?:唔|呜|嗯|诶|欸|啊|呃|哎呀?|嘛|那个)?[，,、\s]*(?:我)?(?:是不是|好像|感觉)?(?:说(?:得|的)?有点多了|说多了|讲多了|说太多了|有点啰嗦|有点话多|扯远了|跑题了)[。！？!?~～…\s]*$/g, "")
-    .replace(/(?:唔|呜|嗯|诶|欸|啊|呃|哎呀?|嘛|那个)[，,、\s]*(?:我)?(?:是不是|好像|感觉)?(?:说(?:得|的)?有点多了|说多了|讲多了|说太多了|有点啰嗦|有点话多|扯远了|跑题了)[。！？!?~～…\s]*$/g, "")
+    .replace(/(?:^|[\n。！？!?；;])\s*(?:唔|呜|嗯|诶|欸|啊|呃|哎呀?|嘛|那个)?[，,、\s]*(?:我)?(?:是不是|好像|感觉)?(?:说(?:得|的)?有点多了|说多了|讲多了|说太多了|有点啰嗦|太啰嗦了?|有点话多|太话多了?|扯远了|跑题了)[。！？!?~～…\s]*$/g, "")
+    .replace(/(?:唔|呜|嗯|诶|欸|啊|呃|哎呀?|嘛|那个)[，,、\s]*(?:我)?(?:是不是|好像|感觉)?(?:说(?:得|的)?有点多了|说多了|讲多了|说太多了|有点啰嗦|太啰嗦了?|有点话多|太话多了?|扯远了|跑题了)[。！？!?~～…\s]*$/g, "")
     .trim()
 
   output = output.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim()
@@ -1205,6 +1206,91 @@ function isImageAnalysisRequest(text = "") {
   if (looksLikeVisualInspectionRequest(content)) return true
   if (looksLikeImageVerificationRequest(content)) return true
   return matchesAnyPattern(content, IMAGE_ANALYSIS_PATTERNS)
+}
+
+function isAvatarInspectionRequest(text = "") {
+  const content = normalizeIntentText(text)
+  if (!content || !content.includes("头像")) return false
+  if (isImageGenerationRequest(content) || isImageEditRequest(content)) return false
+  return /(?:看|看看|看下|看一下|帮.*看|分析|识别|描述|评价|点评|说说|讲讲).{0,24}头像/.test(content) ||
+    /头像.{0,24}(?:看|看看|分析|识别|描述|评价|点评|怎么样|好看|是什么|是啥|有啥|像什么|说说|讲讲)/.test(content)
+}
+
+function buildQqAvatarUrl(userId) {
+  const qq = String(userId || "").replace(/\D/g, "")
+  return qq ? `https://q1.qlogo.cn/g?b=qq&nk=${qq}&s=640` : ""
+}
+
+function getReplyTargetUserId(reply = {}) {
+  return reply?.sender?.user_id || reply?.sender?.qq || getReplySender(reply)
+}
+
+function extractAvatarLookupTerms(text = "", botName = "", prefixes = []) {
+  const cleaned = removeBotAnchors(text, botName, prefixes)
+    .replace(/\[CQ:[^\]]+\]/g, " ")
+    .replace(/@\S+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+  if (!cleaned.includes("头像")) return []
+
+  const terms = []
+  const patterns = [
+    /([A-Za-z0-9_\-.\u4e00-\u9fa5·•]{2,32})\s*的?头像/g,
+    /(?:看|看看|看下|看一下|帮.*看|分析|识别|描述|评价|点评|说说|讲讲)\s*([A-Za-z0-9_\-.\u4e00-\u9fa5·•]{2,32})\s*的?头像/g
+  ]
+  for (const pattern of patterns) {
+    for (const match of cleaned.matchAll(pattern)) {
+      const term = String(match[1] || "")
+        .replace(/^(?:我|你|他|她|它|ta|TA|这个|那个|这人|那人|对方|大家|群友)$/, "")
+        .replace(/^(?:帮我|给我|替我|可以|能不能|能|想要|要|希洛|看看|看下|看一下|分析|识别|描述|评价|点评|说说|讲讲)+/, "")
+        .replace(/[，,。.!！?？:：;；~～]+$/g, "")
+        .trim()
+      if (term) terms.push(term)
+    }
+  }
+  return uniqText(terms).slice(0, 5)
+}
+
+function resolveAvatarInspectionTargets({ e = {}, text = "", atQq = [], memberMap = null, reply = null, botName = "", prefixes = [] } = {}) {
+  if (!isAvatarInspectionRequest(text)) return null
+
+  const targets = []
+  const addTarget = (userId, label = "") => {
+    const qq = String(userId || "").replace(/\D/g, "")
+    if (!qq || String(qq) === String(Bot.uin)) return
+    if (targets.some(item => item.userId === qq)) return
+    const member = memberMap?.get?.(Number(qq))
+    targets.push({
+      userId: qq,
+      label: label || (member ? formatMemberDisplayName(member, `用户${qq}`) : `用户${qq}`),
+      image: buildQqAvatarUrl(qq)
+    })
+  }
+
+  for (const qq of atQq || []) addTarget(qq)
+
+  const content = normalizeIntentText(text)
+  const replyTarget = getReplyTargetUserId(reply)
+  if (replyTarget && /(?:他|她|ta|TA|这个|那个|这人|那人|对方|回复|引用).{0,12}头像|头像.{0,12}(?:他|她|ta|TA|这个|那个|这人|那人|对方)/.test(content)) {
+    addTarget(replyTarget, reply?.sender?.card || reply?.sender?.nickname || "")
+  }
+
+  const terms = extractAvatarLookupTerms(text, botName, prefixes)
+  const memberMatches = matchGroupMembersByTerms(memberMap, terms, e?.user_id)
+  for (const item of memberMatches) {
+    if (item.members?.length === 1) addTarget(item.members[0].userId, item.members[0].names?.[0] || "")
+  }
+
+  if (!targets.length && /(?:我|自己|本人|咱|俺).{0,8}头像|头像.{0,8}(?:我|自己|本人|咱|俺)|^(?:.*?)(?:看|看看|看下|看一下|分析|评价|点评|描述)(?:一下)?头像/.test(content)) {
+    addTarget(e?.user_id, e?.sender?.card || e?.sender?.nickname || "")
+  }
+
+  if (!targets.length) return null
+  const names = targets.map(item => `${item.label}(QQ:${item.userId})`).join("、")
+  return {
+    images: targets.map(item => item.image).filter(Boolean),
+    prompt: `${text || "看一下头像"}\n目标头像：${names}。请基于头像本身做简洁自然的描述，不要假装知道头像背后的真实身份或经历。`
+  }
 }
 
 function getImageAnalysisToolNames(text = "") {
@@ -4292,12 +4378,30 @@ ${recentHistory || '(无)'}
         }
 
         let videos = []
+        let repliedMessage = null
         if (e.getReply) {
-          const rsp = await e.getReply()
-          videos = rsp?.message?.filter(m => m.type === "video") || []
+          repliedMessage = await e.getReply()
+          videos = repliedMessage?.message?.filter(m => m.type === "video") || []
         }
 
-        if (!images.length && looksLikeVisualInspectionRequest(args || msg || "")) {
+        let memberMap = null
+        try {
+          memberMap = e.group ? await e.group.getMemberMap() : null
+        } catch {}
+        const avatarInspection = resolveAvatarInspectionTargets({
+          e,
+          text: args || msg || "",
+          atQq,
+          memberMap,
+          reply: repliedMessage,
+          botName: Bot.nickname,
+          prefixes: this.config.triggerPrefixes
+        })
+        if (avatarInspection?.images?.length) {
+          session.avatarInspection = avatarInspection
+        }
+
+        if (!images.length && !avatarInspection?.images?.length && looksLikeVisualInspectionRequest(args || msg || "")) {
           await this.sendSegmentedMessage(e, buildMissingImageAnalysisReply(), 0)
           this.clearSession(sessionId)
           return true
@@ -4311,10 +4415,6 @@ ${recentHistory || '(无)'}
         const senderRole = roleMap[e.sender?.role] || roleMap[memberInfo?.role] || "member"
 
         const userContent = await this.buildMessageContent(e.sender, args, images, atQq, e.group, e)
-        let memberMap = null
-        try {
-          memberMap = e.group ? await e.group.getMemberMap() : null
-        } catch {}
         const explicitTeachingFacts = extractExplicitTeachingFacts(e.message || [], memberMap, {
           text: e.msg || args,
           botName: Bot.nickname,
@@ -4551,6 +4651,18 @@ ${mcpPrompts}
           session.groupUserMessages.at(-1).content += `[用户头像链接: (https://q1.qlogo.cn/g?b=qq&nk=${e.user_id}&s=640)]`
         }
 
+        if (toolChoice === "auto" && session.avatarInspection?.images?.length) {
+          session.tools = this.getToolsByName(["googleImageAnalysisTool"])
+          if (session.tools?.length) {
+            toolChoice = { type: "function", function: { name: "googleImageAnalysisTool" } }
+            forcedToolCall = this.buildForcedToolCall("googleImageAnalysisTool", {
+              images: session.avatarInspection.images,
+              prompt: session.avatarInspection.prompt
+            })
+            logger.info(`[工具选择] group=${groupId} 强制使用 googleImageAnalysisTool 处理头像识别请求`)
+          }
+        }
+
         if (msg?.includes("导图") || msg?.includes("思维导图")) {
           session.tools = this.getToolsByName(["aiMindMapTool"])
           if (session.tools?.length) toolChoice = { type: "function", function: { name: "aiMindMapTool" } }
@@ -4580,7 +4692,8 @@ ${mcpPrompts}
               videos,
               currentIntentText,
               userContent,
-              groupUserMessages: session.groupUserMessages
+              groupUserMessages: session.groupUserMessages,
+              sessionTools: session.tools
             })
           : null
         const semanticToolCall = semanticDecision?.toolName
@@ -5084,8 +5197,22 @@ ${mcpPrompts}
   normalizeToolDecision(decision = {}, context = {}) {
     const intent = String(decision.intent || "chat").trim()
     const confidence = Number(decision.confidence)
-    if (!SEMANTIC_TOOL_INTENTS.has(intent)) return null
     if (!Number.isFinite(confidence) || confidence < SEMANTIC_TOOL_INTENT_MIN_CONFIDENCE) return null
+
+    const requestedToolName = String(decision.toolName || decision.tool_name || "").trim()
+    const availableToolNames = new Set(Array.isArray(context.availableToolNames) ? context.availableToolNames : [])
+    if (requestedToolName && availableToolNames.has(requestedToolName)) {
+      const params = decision.params && typeof decision.params === "object"
+        ? decision.params
+        : (decision.arguments && typeof decision.arguments === "object" ? decision.arguments : {})
+      return {
+        intent: "tool",
+        toolName: requestedToolName,
+        params
+      }
+    }
+
+    if (!SEMANTIC_TOOL_INTENTS.has(intent)) return null
 
     const images = Array.isArray(context.images) ? context.images : []
     if (intent === "image_edit" && !images.length) return null
@@ -5179,6 +5306,15 @@ ${mcpPrompts}
     const hasImages = Array.isArray(context.images) && context.images.length > 0
     const hasVideos = Array.isArray(context.videos) && context.videos.length > 0
     const quoted = String(context.userContent || "").slice(0, 1600)
+    const availableTools = (context.sessionTools || context.tools || [])
+      .map(tool => tool?.function)
+      .filter(tool => tool?.name)
+    const toolCatalog = availableTools
+      .map(tool => {
+        const props = Object.keys(tool.parameters?.properties || {}).join(", ")
+        return `- ${tool.name}: ${String(tool.description || "").slice(0, 180)}${props ? ` 参数: ${props}` : ""}`
+      })
+      .join("\n")
 
     try {
       const response = await this.fetchWithTimeout(url, {
@@ -5202,13 +5338,18 @@ ${mcpPrompts}
                 "image_analysis: 用户给了图片并要求看图、识别、分析、说明图片内容。",
                 "search: 用户询问实时信息或明确要搜索/查询/最新信息。",
                 "chat: 普通闲聊、问能不能做某事但没有给出具体任务、玩梗、情绪回应。",
+                "如果用户需求明确对应【可用工具】中的某个工具，优先输出该工具名；这适用于三角洲、提醒、点歌、禁言、改名片、戳一戳、点赞、礼物、聊天记录、表情、导图等已有工具。",
+                "选择具体工具时，intent 写 tool，toolName 写工具名，params 按该工具参数名生成 JSON；不确定必要参数时不要乱填，选 chat 让希洛追问。",
                 "语义判断框架：先判断载体和真实目标。图片/截图/引用/转发常是载体，用户真正要处理的可能是里面的内容、说法、政策、事件或人物。",
                 "带图片/截图并说“查一下这个是真的假的/是不是真的/看看最新信息”时，真实目标默认是核实图片里承载的内容或说法；应先选 image_analysis 提取内容，后续再搜索。不要直接选纯 search，也不要理解成图片AI检测。",
                 "只有用户明确说“图片本身、AI生成、P图、合成、修过、改过、伪造痕迹”时，才把目标理解为图片本身真实性鉴定。",
                 "带指代词“这个/这张/里面/上面/刚才/他说的”时，必须结合格式化消息、引用和媒体判断指代对象。",
                 "不要受角色人设影响；只判断用户真实语义。用户明确要求做图时，不要因为角色说不会画而选 chat。",
                 "reason 只写简短依据，不要输出完整思维链。",
-                "输出格式: {\"intent\":\"...\",\"confidence\":0到1,\"prompt\":\"给工具用的中文任务文本\",\"query\":\"搜索词或空字符串\",\"reason\":\"简短原因\"}"
+                "输出格式: {\"intent\":\"...\",\"confidence\":0到1,\"toolName\":\"可选工具名\",\"params\":{},\"prompt\":\"给工具用的中文任务文本\",\"query\":\"搜索词或空字符串\",\"reason\":\"简短原因\"}",
+                "",
+                "【可用工具】",
+                toolCatalog || "(无)"
               ].join("\n")
             },
             {
@@ -5232,7 +5373,10 @@ ${mcpPrompts}
       const data = JSON.parse(text)
       const content = data?.choices?.[0]?.message?.content
       const parsed = this.extractJsonObject(content)
-      const normalized = this.normalizeToolDecision(parsed, context)
+      const normalized = this.normalizeToolDecision(parsed, {
+        ...context,
+        availableToolNames: availableTools.map(tool => tool.name)
+      })
       if (normalized) {
         logger.info(`[语义工具分类] intent=${normalized.intent} tool=${normalized.toolName || "none"} confidence=${parsed?.confidence ?? ""} reason=${String(parsed?.reason || "").slice(0, 80)}`)
       }

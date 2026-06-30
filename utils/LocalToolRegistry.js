@@ -29,6 +29,7 @@ import { TextImageTool } from "../functions/functions_tools/TextImageTool.js"
 import { SendLocalEmojiTool } from "../functions/functions_tools/SendLocalEmojiTool.js"
 import { WaitTool } from "../functions/functions_tools/WaitTool.js"
 import { SendGiftTool } from "../functions/functions_tools/SendGiftTool.js"
+import { DeltaForceTool } from "../functions/functions_tools/DeltaForceTool.js"
 
 const PLUGIN_NAME = "bl-chat-plugin"
 const CUSTOM_TOOL_EXTENSIONS = new Set([".js", ".mjs", ".cjs"])
@@ -64,6 +65,7 @@ const BUILT_IN_TOOL_FACTORIES = [
   () => new SendLocalEmojiTool(),
   () => new WaitTool(),
   () => new SendGiftTool(),
+  () => new DeltaForceTool(),
 ]
 
 function logInfo(message) {

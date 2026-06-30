@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{title}}</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 28px;
+      width: 1180px;
+      background: #111;
+      color: #e9edf2;
+      font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+    }
+
+    .report {
+      width: 1124px;
+      border-radius: 8px;
+      overflow: hidden;
+      background: #22272e;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: 0 18px 42px rgba(0, 0, 0, 0.34);
+    }
+
+    .header {
+      padding: 24px 28px 18px;
+      background: linear-gradient(135deg, #303845 0%, #252b33 58%, #1e242b 100%);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .title {
+      margin: 0 0 8px;
+      font-size: 32px;
+      line-height: 1.2;
+      font-weight: 800;
+      letter-spacing: 0;
+      color: #f6f8fb;
+    }
+
+    .meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      color: #aeb8c4;
+      font-size: 18px;
+      line-height: 1.4;
+    }
+
+    .table-wrap {
+      padding: 16px 18px 20px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+      font-size: 18px;
+    }
+
+    th {
+      padding: 13px 12px;
+      color: #9fb2c8;
+      background: #1a2028;
+      font-size: 16px;
+      font-weight: 700;
+      text-align: left;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    td {
+      padding: 13px 12px;
+      vertical-align: top;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      line-height: 1.38;
+      color: #edf1f5;
+      overflow-wrap: anywhere;
+    }
+
+    tr:nth-child(even) td {
+      background: rgba(255, 255, 255, 0.025);
+    }
+
+    .rank {
+      width: 66px;
+      color: #f3c76a;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .name {
+      font-weight: 800;
+      color: #fff;
+    }
+
+    .number {
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+      color: #d9e8ff;
+    }
+
+    .strong {
+      color: #8fe1ad;
+      font-weight: 800;
+    }
+
+    .center {
+      text-align: center;
+      white-space: nowrap;
+      color: #dfe6ef;
+    }
+
+    .tag {
+      display: inline-block;
+      min-width: 74px;
+      padding: 4px 8px;
+      border-radius: 6px;
+      color: #dce8f7;
+      background: rgba(77, 140, 205, 0.16);
+      border: 1px solid rgba(111, 170, 226, 0.18);
+      text-align: center;
+      white-space: nowrap;
+      font-weight: 700;
+    }
+
+    .materials {
+      color: #bdc8d6;
+      font-size: 15px;
+      line-height: 1.45;
+    }
+
+    .solution-list th:nth-child(1) {
+      width: 72px;
+    }
+
+    .solution-list th:nth-child(2) {
+      width: 230px;
+    }
+
+    .solution-list th:nth-child(3) {
+      width: 112px;
+    }
+
+    .solution-list th:nth-child(4),
+    .solution-list th:nth-child(5) {
+      width: 132px;
+    }
+
+    .solution-list th:nth-child(6) {
+      width: 446px;
+    }
+
+    .object-value th:nth-child(1) {
+      width: 72px;
+    }
+
+    .object-value th:nth-child(2) {
+      width: 230px;
+    }
+
+    .object-value th:nth-child(3) {
+      width: 104px;
+    }
+
+    .object-value th:nth-child(4),
+    .object-value th:nth-child(5) {
+      width: 130px;
+    }
+
+    .object-value th:nth-child(6) {
+      width: 170px;
+    }
+
+    .object-value th:nth-child(7) {
+      width: 126px;
+    }
+
+    .object-value th:nth-child(8) {
+      width: 162px;
+    }
+
+    .time {
+      color: #c9d2de;
+      font-size: 15px;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+
+    .solution-name {
+      margin-top: 4px;
+      color: #cfd7e2;
+      font-size: 16px;
+      line-height: 1.35;
+      font-weight: 600;
+    }
+
+    .solution-code {
+      color: #f5d58a;
+      font-size: 16px;
+      line-height: 1.45;
+      font-family: Consolas, "SFMono-Regular", Menlo, monospace;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+
+    .solution-comment {
+      margin-top: 6px;
+      color: #aeb8c4;
+      font-size: 15px;
+      line-height: 1.45;
+    }
+
+    .muted {
+      color: #6f7a86;
+    }
+
+    .empty {
+      padding: 32px 18px;
+      text-align: center;
+      color: #aeb8c4;
+      font-size: 18px;
+    }
+  </style>
+</head>
+<body class="{{kindClass}}">
+  <main class="report">
+    <section class="header">
+      <h1 class="title">{{title}}</h1>
+      <div class="meta">
+        <span>{{subtitle}}</span>
+        <span>{{generatedAt}}</span>
+      </div>
+    </section>
+    <section class="table-wrap">
+      <table>
+        <thead>
+          <tr>{{@ columnsHtml}}</tr>
+        </thead>
+        <tbody>
+          {{@ rowsHtml}}
+        </tbody>
+      </table>
+    </section>
+  </main>
+</body>
+</html>

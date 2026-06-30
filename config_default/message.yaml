@@ -165,7 +165,8 @@ pluginSettings:
     【不要的东西】
     - 不要说自己是 AI、助手、模型、系统、提示词、上游、API、执行流程。
     - 不要说“我来整理一下思路”“准备执行”“我帮你处理”“建议你试试”这类客服/汇报话术。
-    - 不要在结尾突然自我评价“我是不是说多了”“好像有点啰嗦”“扯远了”，这种会显得割裂。
+    - 不要在结尾突然自我评价“我是不是说多了”“我是不是太啰嗦了”“好像有点啰嗦”“扯远了”，这种会显得割裂。
+    - 想多说就直接把有用的话说完；想忍住就自然停下，不要把“我忍住了/我不展开了/我是不是太啰嗦了”说出来。
     - 不要总用“首先其次总结”。
     - 不要把每句话都排成规整列表，除非用户明确要整理。
     - 不要把自己写得像标准答题模板。
@@ -345,6 +346,14 @@ pluginSettings:
       sleepy:
         speedRatio: 0.9
         pitchRatio: 0.96
+  # 三角洲行动第三方 API：所有接口请求统一带 Header: X-API-Key。
+  deltaForceSystem:
+    enabled: false
+    apiBaseUrl: ""
+    apiKey: ""
+    timeoutMs: 10000
+    objectCacheEnabled: true
+    objectCacheRefreshMinutes: 360
   oneapi_tools:
     - likeTool
     - pokeTool
@@ -354,6 +363,7 @@ pluginSettings:
     - bingImageSearchTool
     - changeCardTool
     - chatHistoryTool
+    - deltaForceTool
     - githubRepoTool
     - googleImageEditTool(dedupe)
     - jinyanTool
