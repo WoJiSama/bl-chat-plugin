@@ -48,7 +48,7 @@ const clearGroupMemoryPending = new Map()
 const CLEAR_GROUP_MEMORY_CONFIRM_TTL_MS = 30000
 
 // 终态工具：本轮调用后不再请求 LLM 续话（工具的执行结果本身即为最终输出）
-const TERMINAL_TOOL_NAMES = new Set(['sendLocalEmojiTool', 'waitTool', 'bananaTool', 'googleImageEditTool', 'voiceTool'])
+const TERMINAL_TOOL_NAMES = new Set(['sendLocalEmojiTool', 'waitTool', 'bananaTool', 'googleImageEditTool', 'voiceTool', 'deltaForceTool'])
 const BACKGROUND_TERMINAL_TOOL_NAMES = new Set(['bananaTool', 'googleImageEditTool'])
 
 const activeDedupeToolRuns = new Map()
@@ -1353,7 +1353,7 @@ function resolveNaturalDeltaForceToolCall(text = "") {
   }
   if (!operation) return null
 
-  const params = { operation }
+  const params = { operation, prompt: text }
   if (operation === "solution_list" || operation === "object_value") {
     const keyword = extractDeltaForceKeyword(content, operation)
     if (keyword) params.keyword = keyword

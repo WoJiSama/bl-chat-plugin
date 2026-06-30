@@ -3,6 +3,10 @@ import path from "path"
 import yaml from "js-yaml"
 import { AbstractTool } from "./AbstractTool.js"
 import {
+  buildObjectValueReportData,
+  buildPlaceProfitReportData,
+  buildProfitRankReportData,
+  buildSolutionListReportData,
   DeltaForceClient,
   formatDailyKeywordResponse,
   formatObjectValueSearchResponse,
@@ -15,6 +19,7 @@ import {
   normalizeRankLimit
 } from "../../utils/DeltaForceClient.js"
 import { DeltaForceObjectCache } from "../../utils/DeltaForceObjectCache.js"
+import { renderDeltaForceReport } from "../../utils/DeltaForceReportRenderer.js"
 
 let objectCache = null
 
@@ -69,6 +74,38 @@ function normalizeOperation(value = "") {
   return aliases[text] || text
 }
 
+function wantsTextOutput(opts = {}) {
+  const value = String(opts.output || opts.format || "").trim().toLowerCase()
+  if (["text", "plain", "文字", "文本"].includes(value)) return true
+  const prompt = String(opts.prompt || opts.userText || "").trim()
+  return /(?:用|发|给).{0,6}(?:文字|文本)|不要(?:发)?图|别(?:发)?图|纯文字/.test(prompt)
+}
+
+async function replyReportImage(e, report, fallbackText) {
+  try {
+    const image = await renderDeltaForceReport(e, report)
+    if (image && e?.reply) {
+      await e.reply(image)
+      return "已按三角洲命令格式发送图片报表"
+    }
+  } catch (err) {
+    globalThis.logger?.warn?.(`[三角洲行动工具] 图片渲染失败: ${err.message}`)
+  }
+  if (e?.reply) {
+    await e.reply(fallbackText)
+    return "图片报表生成失败，已改发文字结果"
+  }
+  return fallbackText
+}
+
+async function replyText(e, text, status = "已发送三角洲文字结果") {
+  if (e?.reply) {
+    await e.reply(text)
+    return status
+  }
+  return text
+}
+
 export class DeltaForceTool extends AbstractTool {
   constructor() {
     super()
@@ -99,6 +136,15 @@ export class DeltaForceTool extends AbstractTool {
         limit: {
           type: "number",
           description: "返回数量，默认 10，最多 20。"
+        },
+        output: {
+          type: "string",
+          description: "输出格式。默认 image，保持和 .三角洲 命令一致发送图片报表；用户明确要求文字时填 text。",
+          enum: ["image", "text"]
+        },
+        prompt: {
+          type: "string",
+          description: "用户原话，可用于判断是否明确要求纯文字。"
         }
       },
       required: ["operation"],
@@ -112,52 +158,63 @@ export class DeltaForceTool extends AbstractTool {
     const limit = normalizeRankLimit(opts.limit)
     const placeText = String(opts.place || "").trim()
     const place = placeText ? normalizeDeltaForcePlace(placeText) : null
+    const textOutput = wantsTextOutput(opts)
 
     if (placeText && !place) {
       return `不支持这个制作场所：「${placeText}」\n${getDeltaForcePlaceHelp()}`
     }
 
-    if (operation === "help") return getDeltaForceHelp()
+    if (operation === "help") return replyText(e, getDeltaForceHelp())
 
     const settings = readPluginSettings()
     const client = new DeltaForceClient(settings)
 
     if (operation === "daily_keyword") {
       const result = await client.getDailyKeyword()
-      return formatDailyKeywordResponse(result)
+      return replyText(e, formatDailyKeywordResponse(result))
     }
 
     if (operation === "object_value") {
-      if (!keyword) return "请告诉我要查哪个三角洲物品的价值，比如 H70 或物品名。"
+      if (!keyword) return replyText(e, "请告诉我要查哪个三角洲物品的价值，比如 H70 或物品名。", "缺少三角洲物品关键词")
       const result = await client.searchObjectValue({ keyword, limit })
-      return formatObjectValueSearchResponse(result, { keyword, limit })
+      const text = formatObjectValueSearchResponse(result, { keyword, limit })
+      if (textOutput) return replyText(e, text)
+      return replyReportImage(e, buildObjectValueReportData(result, { keyword, limit }), text)
     }
 
     if (operation === "solution_list") {
       const result = await client.getSolutionList({ keyword, limit })
-      return formatSolutionListResponse(result, { keyword, limit })
+      const text = formatSolutionListResponse(result, { keyword, limit })
+      if (textOutput) return replyText(e, text)
+      return replyReportImage(e, buildSolutionListReportData(result, { keyword, limit }), text)
     }
 
     if (operation === "place_profit") {
       const cache = await getObjectCache(settings)
       const result = await client.getPlaceProfit()
-      return formatPlaceProfitResponse(result, {
+      const options = {
         placeType: place?.type || "",
         limit,
         objectNameResolver: cache
-      })
+      }
+      const text = formatPlaceProfitResponse(result, options)
+      if (textOutput) return replyText(e, text)
+      return replyReportImage(e, buildPlaceProfitReportData(result, options), text)
     }
 
     if (operation === "profit_rank") {
       const cache = await getObjectCache(settings)
       const result = await client.getPlaceProfitRank({ placeType: place?.type || "", limit })
-      return formatProfitRankResponse(result, {
+      const options = {
         placeType: place?.type || "",
         limit,
         objectNameResolver: cache
-      })
+      }
+      const text = formatProfitRankResponse(result, options)
+      if (textOutput) return replyText(e, text)
+      return replyReportImage(e, buildProfitRankReportData(result, options), text)
     }
 
-    return `没认出要查三角洲的哪一项。\n${getDeltaForceHelp()}`
+    return replyText(e, `没认出要查三角洲的哪一项。\n${getDeltaForceHelp()}`, "未识别三角洲操作")
   }
 }
