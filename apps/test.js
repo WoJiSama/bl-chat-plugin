@@ -18,7 +18,6 @@ import { personProfileInjector } from "../utils/PersonProfileInjector.js"
 import { memStats } from "../utils/memory/stats.js"
 import { factShortId } from "../utils/memory/entityModel.js"
 import { stripChatLogSpeakerPrefix, stripChatLogSpeakerPrefixes } from "../utils/replySanitizer.js"
-import { splitParchmentReplyText } from "../utils/parchmentReply.js"
 import { buildMissingImageAnalysisReply, looksLikeImageAuthenticityRequest, looksLikeImageVerificationRequest, looksLikeVisualInspectionRequest } from "../utils/imageRequestGuard.js"
 import { compileImagePrompt } from "../utils/promptCompiler.js"
 import { buildToolIntentDisclosure, selectToolIntentCandidates } from "../utils/toolIntentManifests.js"
@@ -1983,10 +1982,10 @@ export class ExamplePlugin extends plugin {
       (userAskedForDiagnosticImageAnalysis || looksLikeDiagnosticExplanation(output) || looksLikeDiagnosticExplanation(content))
 
     if (userAskedForEducation && (replyLooksLikeEducation || String(output || "").trim().length > 180)) {
-      return "parchment"
+      return "document"
     }
     if (isAnalysisDiagnosticReply) {
-      return "parchment"
+      return "document"
     }
     if (replyLooksLikeCodeOrMarkdown || (userAskedForCodeOrMarkdown && String(output || "").trim().length > 30)) {
       return "chat"
@@ -6133,18 +6132,9 @@ ${mcpPrompts}
       toolName,
       e
     })
-    const parchmentSplit = textImageTemplate && String(textImageTemplate).startsWith("parchment")
-      ? splitParchmentReplyText(output)
-      : { imageText: output, chatText: "" }
-    const finalImageOutput = parchmentSplit.imageText || output
-    const finalChatFollowUp = parchmentSplit.chatText || ""
     const botMessageId = textImageTemplate
-      ? await this.sendFinalReplyAsTextImage(e, finalImageOutput, textImageTemplate)
+      ? await this.sendFinalReplyAsTextImage(e, output, textImageTemplate)
       : await this.sendSegmentedMessage(e, output)
-    if (finalChatFollowUp) {
-      logger.info(`[textImageTool] 羊皮纸回复已拆分，主体转图，口头补充单独发送 chars=${finalChatFollowUp.length}`)
-      await this.sendSegmentedMessage(e, finalChatFollowUp, 0)
-    }
 
     // 更新会话追踪中的对话历史
     if (this.config.conversationTrackingEnabled && e.group_id && e.user_id) {

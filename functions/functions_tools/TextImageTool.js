@@ -1,11 +1,12 @@
 import fs from "fs"
 import path from "path"
 import sharp from "sharp"
+import puppeteer from "puppeteer"
 import { AbstractTool } from "./AbstractTool.js"
 
 const AVATAR_SIZE = 64
 const CHAT_MAX_TEXT_LENGTH = 1800
-const PARCHMENT_MAX_TEXT_LENGTH = 12000
+const DOCUMENT_MAX_TEXT_LENGTH = 12000
 const DELETE_RETRY_DELAYS_MS = [0, 200, 1000]
 
 const TEXT_FONT_SIZE = 28
@@ -16,71 +17,6 @@ const QUOTE_FONT_SIZE = 25
 const QUOTE_LINE_HEIGHT = 36
 const CODE_FONT_SIZE = 20
 const CODE_LINE_HEIGHT = 30
-const PARCHMENT_TEXT_FONT_SIZE = 30
-const PARCHMENT_TEXT_LINE_HEIGHT = 48
-const PARCHMENT_HEADING_FONT_SIZE = 38
-const PARCHMENT_HEADING_LINE_HEIGHT = 56
-const PARCHMENT_QUOTE_FONT_SIZE = 28
-const PARCHMENT_QUOTE_LINE_HEIGHT = 44
-const PARCHMENT_VARIANTS = {
-  short: {
-    name: "short",
-    paperX: 12,
-    paperY: 10,
-    paperWidth: 820,
-    paperPaddingX: 58,
-    paperPaddingY: 48,
-    minHeight: 300,
-    blockGap: 12,
-    paragraphMaxUnits: 34,
-    headingMaxUnits: 28,
-    quoteMaxUnits: 34,
-    textFontSize: 29,
-    textLineHeight: 44,
-    headingFontSize: 35,
-    headingLineHeight: 50,
-    quoteFontSize: 27,
-    quoteLineHeight: 40
-  },
-  medium: {
-    name: "medium",
-    paperX: 14,
-    paperY: 12,
-    paperWidth: 1040,
-    paperPaddingX: 78,
-    paperPaddingY: 70,
-    minHeight: 420,
-    blockGap: 16,
-    paragraphMaxUnits: 42,
-    headingMaxUnits: 34,
-    quoteMaxUnits: 42,
-    textFontSize: PARCHMENT_TEXT_FONT_SIZE,
-    textLineHeight: PARCHMENT_TEXT_LINE_HEIGHT,
-    headingFontSize: PARCHMENT_HEADING_FONT_SIZE,
-    headingLineHeight: PARCHMENT_HEADING_LINE_HEIGHT,
-    quoteFontSize: PARCHMENT_QUOTE_FONT_SIZE,
-    quoteLineHeight: PARCHMENT_QUOTE_LINE_HEIGHT
-  },
-  long: {
-    name: "long",
-    paperX: 12,
-    paperY: 10,
-    paperWidth: 1130,
-    paperPaddingX: 84,
-    paperPaddingY: 62,
-    minHeight: 560,
-    blockGap: 13,
-    paragraphMaxUnits: 50,
-    headingMaxUnits: 42,
-    quoteMaxUnits: 50,
-    textFontSize: 28,
-    textLineHeight: 43,
-    headingFontSize: 36,
-    headingLineHeight: 52,
-    quoteFontSize: 26,
-    quoteLineHeight: 40
-  }
-}
 const CODE_COLORS = {
   default: "#e5e7eb",
   keyword: "#c084fc",
@@ -634,132 +570,6 @@ function parseMarkdown(text) {
   return blocks.length ? blocks : [createTextBlock("paragraph", "")]
 }
 
-function cleanOverviewLine(text = "", maxLength = 96) {
-  return stripInlineMarkdown(String(text || ""))
-    .replace(/^#{1,3}\s+/, "")
-    .replace(/^>\s*/, "")
-    .replace(/^\s*(?:[-*+•]|\d+\.)\s+/, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, maxLength)
-}
-
-function getOverviewSentences(text = "") {
-  return String(text || "")
-    .replace(/```[\s\S]*?```/g, " ")
-    .split(/(?<=[。！？!?；;])|\n+/)
-    .map(item => cleanOverviewLine(item, 120))
-    .filter(item => item.length >= 8 && !/^(?:http|CQ:|data:image|base64)/i.test(item))
-}
-
-function extractParchmentOverview(text = "", { maxPoints = 4 } = {}) {
-  const content = String(text || "").trim()
-  const nonEmptyLines = content.split(/\r?\n/).filter(line => line.trim())
-  if (content.length < 360 && nonEmptyLines.length < 5) return null
-
-  const heading = nonEmptyLines
-    .map(line => line.match(/^\s*#{1,3}\s+(.{2,40})\s*$/)?.[1])
-    .find(Boolean)
-  const title = cleanOverviewLine(heading || "这段先看这里", 34)
-  const sentences = getOverviewSentences(content)
-  const summary = sentences.find(line =>
-    /(原因|主要|问题|结论|本质|关键|先|可以|需要|建议|检查|确认)/.test(line)
-  ) || sentences[0] || ""
-  if (!summary) return null
-
-  const directPoints = nonEmptyLines
-    .filter(line => /^\s*(?:[-*+•]|\d+\.)\s+\S/.test(line))
-    .map(line => cleanOverviewLine(line, 90))
-  const keywordPoints = sentences.filter(line =>
-    line !== summary && /(先|再|然后|最后|如果|需要|检查|确认|注意|建议|解决|版本|依赖|配置)/.test(line)
-  )
-  const fallbackPoints = sentences.filter(line => line !== summary)
-  const points = [...directPoints, ...keywordPoints, ...fallbackPoints]
-    .map(line => cleanOverviewLine(line, 90))
-    .filter((line, index, list) => line && list.indexOf(line) === index && line !== summary && line !== title)
-    .slice(0, maxPoints)
-
-  if (!points.length && summary.length < 24) return null
-  return { eyebrow: "先看结论", title, summary, points }
-}
-
-function createParchmentOverviewBlock(text, variant) {
-  if (variant.name === "short") return null
-  const overview = extractParchmentOverview(text, { maxPoints: variant.name === "long" ? 5 : 4 })
-  if (!overview) return null
-
-  const eyebrowFontSize = 20
-  const eyebrowLineHeight = 28
-  const titleFontSize = Math.max(32, variant.headingFontSize - 2)
-  const titleLineHeight = Math.max(44, variant.headingLineHeight - 4)
-  const summaryFontSize = Math.max(25, variant.textFontSize - 2)
-  const summaryLineHeight = Math.max(36, variant.textLineHeight - 6)
-  const pointFontSize = Math.max(23, variant.textFontSize - 5)
-  const pointLineHeight = Math.max(32, variant.textLineHeight - 10)
-  const maxUnits = Math.max(28, variant.paragraphMaxUnits - 6)
-  const titleLines = wrapText(overview.title, Math.max(22, variant.headingMaxUnits - 4)).slice(0, 2)
-  const summaryLines = wrapText(overview.summary, maxUnits)
-  const points = overview.points.map(point => ({
-    text: point,
-    lines: wrapText(point, Math.max(24, maxUnits - 3))
-  }))
-  const pointsHeight = points.reduce((sum, point) => sum + Math.max(34, point.lines.length * pointLineHeight) + 12, 0)
-  const height = 28 + eyebrowLineHeight + 10 + titleLines.length * titleLineHeight + 16 +
-    summaryLines.length * summaryLineHeight + (points.length ? 24 + pointsHeight : 0) + 30
-
-  return {
-    type: "overview",
-    lines: [],
-    eyebrow: overview.eyebrow,
-    title: overview.title,
-    titleLines,
-    summaryLines,
-    points,
-    eyebrowFontSize,
-    eyebrowLineHeight,
-    titleFontSize,
-    titleLineHeight,
-    summaryFontSize,
-    summaryLineHeight,
-    pointFontSize,
-    pointLineHeight,
-    height
-  }
-}
-
-function selectParchmentVariant(text = "", variantName = "") {
-  if (variantName && PARCHMENT_VARIANTS[variantName]) return PARCHMENT_VARIANTS[variantName]
-
-  const content = String(text || "").trim()
-  const nonEmptyLines = content.split(/\r?\n/).filter(line => line.trim()).length
-  const hasCodeBlock = /```|^\s*(?:public|private|class|function|const|let|var|def|import|package)\b/m.test(content)
-
-  if (!hasCodeBlock && content.length <= 260 && nonEmptyLines <= 5) return PARCHMENT_VARIANTS.short
-  if (content.length >= 1100 || nonEmptyLines >= 12) return PARCHMENT_VARIANTS.long
-  return PARCHMENT_VARIANTS.medium
-}
-
-function parseParchmentBlocks(text, variant = PARCHMENT_VARIANTS.medium) {
-  const blocks = parseMarkdown(text)
-  const parchmentBlocks = blocks.map(block => {
-    if (block.type === "code" || block.type === "spacer") return block
-
-    const source = block.text || block.lines.join("\n")
-    const isHeading = block.type === "heading"
-    const isQuote = block.type === "quote"
-    return createTextBlock(block.type, source, {
-      fontSize: isHeading ? variant.headingFontSize : isQuote ? variant.quoteFontSize : variant.textFontSize,
-      lineHeight: isHeading ? variant.headingLineHeight : isQuote ? variant.quoteLineHeight : variant.textLineHeight,
-      maxUnits: isHeading ? variant.headingMaxUnits : isQuote ? variant.quoteMaxUnits : variant.paragraphMaxUnits,
-      fontWeight: isHeading ? "700" : block.fontWeight,
-      fill: isQuote ? "#6d5534" : "#3d2614",
-      prefix: block.prefix
-    })
-  })
-  const overview = createParchmentOverviewBlock(text, variant)
-  return overview ? [overview, ...parchmentBlocks] : parchmentBlocks
-}
-
 function measureBlockWidth(block) {
   if (block.type === "code") {
     const codeWidth = Math.max(...block.lines.map(line => measureTextWidth(line, block.fontSize, true)), 80)
@@ -810,12 +620,206 @@ async function deleteGeneratedFile(filePath) {
   }
 }
 
+function renderInlineMarkdownHtml(text = "") {
+  return escapeXml(text)
+    .replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/__([^_]+)__/g, "<strong>$1</strong>")
+}
+
+function renderHighlightedCodeHtml(line, language = "") {
+  return highlightCodeLine(line, language)
+    .map(token => `<span class="token ${token.type}">${escapeXml(token.text)}</span>`)
+    .join("") || " "
+}
+
+function markdownToDocumentHtml(text = "") {
+  const html = []
+  const paragraphLines = []
+  let inCode = false
+  let codeLanguage = ""
+  let codeLines = []
+
+  const flushParagraph = () => {
+    if (!paragraphLines.length) return
+    const joined = paragraphLines.join("\n").trim()
+    paragraphLines.length = 0
+    if (!joined) return
+
+    const lines = joined.split(/\n+/).map(line => line.trim()).filter(Boolean)
+    const allList = lines.every(line => /^\s*(?:[-*+•]|\d+\.)\s+\S/.test(line))
+    if (allList) {
+      html.push(`<ul>${lines.map(line => {
+        const item = line.replace(/^\s*(?:[-*+•]|\d+\.)\s+/, "")
+        return `<li>${renderInlineMarkdownHtml(item)}</li>`
+      }).join("")}</ul>`)
+      return
+    }
+
+    html.push(`<p>${renderInlineMarkdownHtml(joined).replace(/\n+/g, "<br>")}</p>`)
+  }
+
+  const flushCode = () => {
+    const language = normalizeLanguage(codeLanguage)
+    const label = language ? `<div class="code-label">${escapeXml(language)}</div>` : ""
+    const code = codeLines
+      .map(line => `<div class="code-line">${renderHighlightedCodeHtml(line, language)}</div>`)
+      .join("")
+    html.push(`<pre class="code-block">${label}<code>${code || '<div class="code-line"> </div>'}</code></pre>`)
+    codeLines = []
+    codeLanguage = ""
+  }
+
+  for (const rawLine of String(text || "").split(/\r?\n/)) {
+    const fence = rawLine.match(/^```\s*([^`]*)$/)
+    if (fence) {
+      if (inCode) {
+        flushCode()
+        inCode = false
+      } else {
+        flushParagraph()
+        codeLanguage = fence[1] || ""
+        inCode = true
+      }
+      continue
+    }
+
+    if (inCode) {
+      codeLines.push(rawLine)
+      continue
+    }
+
+    if (!rawLine.trim()) {
+      flushParagraph()
+      continue
+    }
+
+    const heading = rawLine.match(/^\s*(#{1,3})\s+(.+)$/)
+    if (heading) {
+      flushParagraph()
+      const level = Math.min(3, heading[1].length)
+      html.push(`<h${level}>${renderInlineMarkdownHtml(heading[2].trim())}</h${level}>`)
+      continue
+    }
+
+    const quote = rawLine.match(/^\s*>\s+(.+)$/)
+    if (quote) {
+      flushParagraph()
+      html.push(`<blockquote>${renderInlineMarkdownHtml(quote[1].trim())}</blockquote>`)
+      continue
+    }
+
+    paragraphLines.push(rawLine)
+  }
+
+  if (inCode) flushCode()
+  flushParagraph()
+  return html.join("\n") || "<p></p>"
+}
+
+function buildDocumentHtml(text = "") {
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: #f3f5f8; color: #1f2937; }
+    body {
+      width: 980px;
+      padding: 28px;
+      font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif;
+      letter-spacing: 0;
+    }
+    .document {
+      width: 924px;
+      padding: 42px 48px;
+      background: #ffffff;
+      border: 1px solid #d9dee7;
+      border-radius: 8px;
+      box-shadow: 0 18px 38px rgba(27, 39, 63, 0.14);
+    }
+    .content { font-size: 26px; line-height: 1.68; }
+    h1, h2, h3 {
+      margin: 0 0 18px;
+      color: #111827;
+      line-height: 1.28;
+      font-weight: 800;
+      letter-spacing: 0;
+    }
+    h1 { font-size: 34px; padding-bottom: 16px; border-bottom: 2px solid #e6eaf1; }
+    h2 { margin-top: 30px; font-size: 31px; }
+    h3 { margin-top: 24px; font-size: 28px; }
+    p { margin: 0 0 20px; white-space: normal; overflow-wrap: anywhere; }
+    ul { margin: 0 0 22px; padding-left: 32px; }
+    li { margin: 0 0 10px; padding-left: 4px; overflow-wrap: anywhere; }
+    blockquote {
+      margin: 4px 0 22px;
+      padding: 14px 18px;
+      color: #4b5563;
+      background: #f7f9fc;
+      border-left: 5px solid #74849a;
+      border-radius: 6px;
+      overflow-wrap: anywhere;
+    }
+    strong { font-weight: 800; color: #111827; }
+    .inline-code {
+      padding: 2px 7px;
+      border-radius: 5px;
+      background: #eef2f7;
+      color: #1f3a5f;
+      font-family: Consolas, "SFMono-Regular", Menlo, monospace;
+      font-size: 0.88em;
+    }
+    .code-block {
+      position: relative;
+      margin: 8px 0 24px;
+      padding: 44px 20px 18px;
+      overflow: hidden;
+      border-radius: 8px;
+      background: #111827;
+      color: #e5e7eb;
+      font-family: Consolas, "SFMono-Regular", Menlo, monospace;
+      font-size: 20px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .code-label {
+      position: absolute;
+      top: 12px;
+      left: 18px;
+      color: #9ca3af;
+      font-size: 15px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .code-line { min-height: 31px; }
+    .token.keyword { color: #c084fc; }
+    .token.string { color: #86efac; }
+    .token.number { color: #fbbf24; }
+    .token.comment { color: #7dd3fc; }
+    .token.literal { color: #f472b6; }
+    .token.function { color: #93c5fd; }
+    .token.operator { color: #f9a8d4; }
+    .token.punctuation { color: #94a3b8; }
+  </style>
+</head>
+<body>
+  <main class="document">
+    <article class="content">${markdownToDocumentHtml(text)}</article>
+  </main>
+</body>
+</html>`
+}
+
 export class TextImageTool extends AbstractTool {
   constructor() {
     super()
     this.name = "textImageTool"
     this.description =
-      "把文字、Markdown 或代码内容渲染成图片并发送。默认使用 QQ 聊天气泡样式；科普、讲解、推导、公式总结这类较长内容应使用 parchment 羊皮纸模板。只要用户要求写代码、给代码、实现算法、提供示例代码、编写 Markdown/MD 文档或输出较长结构化文本，都必须调用本工具，把完整内容作为 text 参数发送，不要直接在普通回复里发送代码或 Markdown 原文。也适用于文字可能被 QQ 群管家、其他 QQ 机器人、风控、敏感词检测撤回的场景。代码内容即使没有使用 ``` 包裹，也可以交给本工具自动识别并按代码块高亮渲染。调用后不要再重复发送原始文字。"
+      "把文字、Markdown 或代码内容渲染成图片并发送。默认使用 QQ 聊天气泡样式；科普、讲解、推导、公式总结这类较长内容应使用 document 文档模板。只要用户要求写代码、给代码、实现算法、提供示例代码、编写 Markdown/MD 文档或输出较长结构化文本，都必须调用本工具，把完整内容作为 text 参数发送，不要直接在普通回复里发送代码或 Markdown 原文。也适用于文字可能被 QQ 群管家、其他 QQ 机器人、风控、敏感词检测撤回的场景。代码内容即使没有使用 ``` 包裹，也可以交给本工具自动识别并按代码块高亮渲染。调用后不要再重复发送原始文字。"
     this.parameters = {
       type: "object",
       properties: {
@@ -833,8 +837,8 @@ export class TextImageTool extends AbstractTool {
         },
         template: {
           type: "string",
-          enum: ["chat", "parchment", "parchment_short", "parchment_medium", "parchment_long"],
-          description: "渲染模板。chat 为聊天气泡；parchment 会按内容长度自动选择羊皮纸；parchment_short/parchment_medium/parchment_long 可固定短纸条、标准纸和长卷"
+          enum: ["chat", "document"],
+          description: "渲染模板。chat 为聊天气泡；document 为 HTML 文档卡片，适合长文本、讲解、代码和 Markdown"
         }
       },
       required: ["text"],
@@ -847,9 +851,10 @@ export class TextImageTool extends AbstractTool {
     if (!text) return "error: text 不能为空"
 
     const rawTemplate = String(opts.template || "").trim()
-    const template = rawTemplate.startsWith("parchment") ? "parchment" : "chat"
-    const parchmentVariantName = rawTemplate.match(/^parchment_(short|medium|long)$/)?.[1] || ""
-    const maxTextLength = template === "parchment" ? PARCHMENT_MAX_TEXT_LENGTH : CHAT_MAX_TEXT_LENGTH
+    const template = rawTemplate === "document" || rawTemplate === "html" || rawTemplate.startsWith("parchment")
+      ? "document"
+      : "chat"
+    const maxTextLength = template === "document" ? DOCUMENT_MAX_TEXT_LENGTH : CHAT_MAX_TEXT_LENGTH
     const safeText = text.slice(0, maxTextLength)
     const nickname = String(opts.nickname || globalThis.Bot?.nickname || "机器人").trim()
     const avatarUrl =
@@ -857,8 +862,8 @@ export class TextImageTool extends AbstractTool {
     let imagePath = ""
 
     try {
-      imagePath = template === "parchment"
-        ? await this.renderParchmentImage({ text: safeText, variantName: parchmentVariantName })
+      imagePath = template === "document"
+        ? await this.renderDocumentImage({ text: safeText })
         : await this.renderChatImage({
             text: safeText,
             nickname,
@@ -872,188 +877,36 @@ export class TextImageTool extends AbstractTool {
     }
   }
 
-  async renderParchmentImage({ text, variantName = "" }) {
+  async renderDocumentImage({ text }) {
     const outputDir = path.join(process.cwd(), "resources", "bl-chat-plugin", "safe_text_images")
     await fs.promises.mkdir(outputDir, { recursive: true })
-
-    const variant = selectParchmentVariant(text, variantName)
-    const blocks = parseParchmentBlocks(text, variant)
-    const paperX = variant.paperX
-    const paperY = variant.paperY
-    const paperWidth = variant.paperWidth
-    const paperPaddingX = variant.paperPaddingX
-    const paperPaddingY = variant.paperPaddingY
-    const contentWidth = paperWidth - paperPaddingX * 2
-    const contentX = paperX + paperPaddingX
-    let currentY = paperY + paperPaddingY
-    const contentHeight = blocks.reduce((sum, block, index) => {
-      const gap = index > 0 && block.type !== "spacer" ? variant.blockGap : 0
-      return sum + block.height + gap
-    }, 0)
-    const paperHeight = Math.max(variant.minHeight, contentHeight + paperPaddingY * 2)
-    const width = paperX * 2 + paperWidth
-    const height = paperY * 2 + paperHeight
-    const paperPath = `
-      M ${paperX + 26} ${paperY + 10}
-      C ${paperX + paperWidth * 0.13} ${paperY - 6}, ${paperX + paperWidth * 0.26} ${paperY + 6}, ${paperX + paperWidth * 0.36} ${paperY + 2}
-      C ${paperX + paperWidth * 0.55} ${paperY - 8}, ${paperX + paperWidth * 0.75} ${paperY + 10}, ${paperX + paperWidth - 28} ${paperY + 4}
-      C ${paperX + paperWidth + 10} ${paperY + paperHeight * 0.22}, ${paperX + paperWidth - 12} ${paperY + paperHeight * 0.72}, ${paperX + paperWidth - 8} ${paperY + paperHeight - 26}
-      C ${paperX + paperWidth * 0.84} ${paperY + paperHeight + 8}, ${paperX + paperWidth * 0.59} ${paperY + paperHeight - 2}, ${paperX + paperWidth * 0.40} ${paperY + paperHeight + 6}
-      C ${paperX + paperWidth * 0.23} ${paperY + paperHeight + 12}, ${paperX + paperWidth * 0.10} ${paperY + paperHeight - 8}, ${paperX + 20} ${paperY + paperHeight - 2}
-      C ${paperX - 8} ${paperY + paperHeight * 0.67}, ${paperX + 6} ${paperY + paperHeight * 0.48}, ${paperX + 2} ${paperY + 38}
-      C ${paperX + 8} ${paperY + 20}, ${paperX + 16} ${paperY + 14}, ${paperX + 26} ${paperY + 10}
-      Z`
-
-    const blockSvg = blocks.map((block, index) => {
-      if (index > 0 && block.type !== "spacer") currentY += variant.blockGap
-      if (block.type === "spacer") {
-        currentY += Math.max(18, block.height)
-        return ""
-      }
-
-      if (block.type === "overview") {
-        const rectY = currentY
-        const rectHeight = block.height
-        const rectX = contentX - 22
-        const rectWidth = contentWidth + 44
-        const eyebrowY = rectY + 28 + block.eyebrowFontSize
-        const eyebrowWidth = Math.ceil(measureTextWidth(block.eyebrow, block.eyebrowFontSize) + 32)
-        let textY = rectY + 28 + block.eyebrowLineHeight + 10
-        const titleSvg = block.titleLines
-          .map((line, lineIndex) =>
-            `<tspan x="${contentX}" y="${textY + block.titleFontSize + lineIndex * block.titleLineHeight}">${escapeXml(line)}</tspan>`
-          )
-          .join("")
-        textY += block.titleLines.length * block.titleLineHeight + 18
-        const dividerY = textY - 13
-        const summarySvg = block.summaryLines
-          .map((line, lineIndex) =>
-            `<tspan x="${contentX}" y="${textY + block.summaryFontSize + lineIndex * block.summaryLineHeight}">${escapeXml(line)}</tspan>`
-          )
-          .join("")
-        textY += block.summaryLines.length * block.summaryLineHeight + 24
-        const pointsSvg = block.points.map((point, pointIndex) => {
-          const pointY = textY
-          const badgeY = pointY + 3
-          const badgeTextY = pointY + block.pointFontSize + 1
-          const linesSvg = point.lines
-            .map((line, lineIndex) =>
-              `<tspan x="${contentX + 52}" y="${pointY + lineIndex * block.pointLineHeight + block.pointFontSize}">${escapeXml(line)}</tspan>`
-            )
-            .join("")
-          textY += Math.max(34, point.lines.length * block.pointLineHeight) + 12
-          const order = String(pointIndex + 1).padStart(2, "0")
-          return `
-    <rect x="${contentX}" y="${badgeY}" width="38" height="26" rx="13" fill="#6f431c" opacity="${pointIndex === 0 ? "0.92" : "0.72"}"/>
-    <text x="${contentX + 8}" y="${badgeTextY}" font-size="16" fill="#fff5d6" font-weight="700" font-family="Georgia, Times New Roman, serif">${order}</text>
-    <text font-size="${block.pointFontSize}" fill="#4a2d14" font-family="STKaiti, KaiTi, Kaiti SC, Songti SC, Microsoft YaHei, serif" dominant-baseline="alphabetic">
-      ${linesSvg}
-    </text>`
-        }).join("")
-
-        currentY += rectHeight
-        return `
-  <g>
-    <rect x="${rectX}" y="${rectY}" width="${rectWidth}" height="${rectHeight}" rx="22" fill="#fff1bd" opacity="0.24"/>
-    <rect x="${rectX + 8}" y="${rectY + 8}" width="${rectWidth - 16}" height="${rectHeight - 16}" rx="18" fill="none" stroke="#7d4f22" stroke-width="2" stroke-opacity="0.30"/>
-    <rect x="${contentX}" y="${rectY + 24}" width="${eyebrowWidth}" height="30" rx="15" fill="#5d3717" opacity="0.86"/>
-    <text x="${contentX + 16}" y="${eyebrowY}" font-size="${block.eyebrowFontSize}" fill="#fff0c2" font-weight="700" font-family="STKaiti, KaiTi, Kaiti SC, Songti SC, Microsoft YaHei, serif">${escapeXml(block.eyebrow)}</text>
-    <text font-size="${block.titleFontSize}" fill="#3a210f" font-weight="700" font-family="STKaiti, KaiTi, Kaiti SC, Songti SC, Microsoft YaHei, serif" dominant-baseline="alphabetic">
-      ${titleSvg}
-    </text>
-    <path d="M ${contentX} ${dividerY} C ${contentX + rectWidth * 0.20} ${dividerY - 8}, ${contentX + rectWidth * 0.48} ${dividerY + 7}, ${contentX + rectWidth * 0.72} ${dividerY - 3}" fill="none" stroke="#8d5e2d" stroke-width="2" stroke-opacity="0.34"/>
-    <text font-size="${block.summaryFontSize}" fill="#3d2614" font-weight="600" font-family="STKaiti, KaiTi, Kaiti SC, Songti SC, Microsoft YaHei, serif" dominant-baseline="alphabetic">
-      ${summarySvg}
-    </text>
-    ${pointsSvg}
-  </g>`
-      }
-
-      if (block.type === "code") {
-        const rectY = currentY
-        const rectHeight = block.height + 10
-        const labelSvg = block.language
-          ? `<text x="${contentX + 18}" y="${rectY + 25}" font-size="15" fill="#d6c2a2" font-family="Consolas, Cascadia Mono, monospace">${escapeXml(block.language)}</text>`
-          : ""
-        const firstLineY = rectY + 22 + block.labelHeight + CODE_FONT_SIZE
-        const linesSvg = block.lines
-          .map((line, lineIndex) =>
-            renderHighlightedCodeLine(line, block.language, contentX + 18, firstLineY + lineIndex * CODE_LINE_HEIGHT)
-          )
-          .join("")
-        currentY += rectHeight
-        return `
-  <rect x="${contentX - 6}" y="${rectY}" width="${contentWidth + 12}" height="${rectHeight}" rx="10" fill="#2a1b12" opacity="0.94"/>
-  ${labelSvg}
-  ${linesSvg}`
-      }
-
-      const prefixWidth = block.prefix ? measureTextWidth(`${block.prefix} `, block.fontSize) : 0
-      const lineX = contentX + prefixWidth
-      const prefixSvg = block.prefix
-        ? `<text x="${contentX}" y="${currentY + block.fontSize}" font-size="${block.fontSize}" fill="#5d3f20" font-family="STKaiti, KaiTi, Kaiti SC, Songti SC, serif">${escapeXml(block.prefix)}</text>`
-        : ""
-      const quoteSvg = block.type === "quote"
-        ? `<rect x="${contentX - 18}" y="${currentY + 4}" width="5" height="${block.height - 4}" rx="2" fill="#9d7a45" opacity="0.75"/>`
-        : ""
-      const linesSvg = block.lines
-        .map((line, lineIndex) =>
-          `<tspan x="${lineX}" y="${currentY + block.fontSize + lineIndex * block.lineHeight}">${escapeXml(line)}</tspan>`
-        )
-        .join("")
-
-      currentY += block.height
-      return `
-  ${quoteSvg}
-  ${prefixSvg}
-  <text font-size="${block.fontSize}" fill="${block.fill}" font-weight="${block.fontWeight}" font-family="STKaiti, KaiTi, Kaiti SC, Songti SC, Microsoft YaHei, serif" dominant-baseline="alphabetic">
-    ${linesSvg}
-  </text>`
-    }).join("")
-
-    const svg = `
-<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
-  <defs>
-    <filter id="paperShadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#4a2c12" flood-opacity="0.36"/>
-    </filter>
-    <filter id="paperNoise">
-      <feTurbulence type="fractalNoise" baseFrequency="0.018" numOctaves="4" seed="17"/>
-      <feColorMatrix type="matrix" values="0.22 0 0 0 0.69  0 0.17 0 0 0.52  0 0 0.09 0 0.31  0 0 0 0.20 0"/>
-    </filter>
-    <linearGradient id="paperGradient" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#f3dfae"/>
-      <stop offset="45%" stop-color="#dfbe7a"/>
-      <stop offset="100%" stop-color="#c7944c"/>
-    </linearGradient>
-    <radialGradient id="paperLight" cx="50%" cy="35%" r="75%">
-      <stop offset="0%" stop-color="#fff0c7" stop-opacity="0.9"/>
-      <stop offset="100%" stop-color="#9b642b" stop-opacity="0.12"/>
-    </radialGradient>
-  </defs>
-  <rect width="100%" height="100%" fill="#24170d"/>
-  <rect width="100%" height="100%" fill="#110b06" opacity="0.18"/>
-  <g filter="url(#paperShadow)">
-    <path d="${paperPath}" fill="url(#paperGradient)"/>
-    <path d="${paperPath}" fill="url(#paperLight)"/>
-    <rect x="${paperX + 26}" y="${paperY + 28}" width="${paperWidth - 52}" height="${paperHeight - 56}" rx="26" fill="url(#paperGradient)" filter="url(#paperNoise)" opacity="0.28"/>
-    <rect x="${paperX + 34}" y="${paperY + 34}" width="${paperWidth - 68}" height="${paperHeight - 68}" rx="20" fill="none" stroke="#8c5928" stroke-width="2" stroke-opacity="0.34"/>
-    <rect x="${paperX + 46}" y="${paperY + 46}" width="${paperWidth - 92}" height="${paperHeight - 92}" rx="14" fill="none" stroke="#f8df9b" stroke-width="1" stroke-opacity="0.28"/>
-  </g>
-  ${blockSvg}
-</svg>`
-
     const outputPath = path.join(
       outputDir,
-      `safe_text_parchment_${variant.name}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.png`
+      `safe_text_document_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.png`
     )
 
+    let browser
     try {
-      await sharp(Buffer.from(svg)).png().toFile(outputPath)
+      browser = await puppeteer.launch({
+        headless: "new",
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-gpu"
+        ]
+      })
+      const page = await browser.newPage()
+      await page.setViewport({ width: 980, height: 1200, deviceScaleFactor: 2 })
+      await page.setContent(buildDocumentHtml(text), { waitUntil: "networkidle0", timeout: 60000 })
+      await page.screenshot({ path: outputPath, fullPage: true, type: "png" })
+      await page.close()
       return outputPath
     } catch (error) {
       await deleteGeneratedFile(outputPath)
       throw error
+    } finally {
+      if (browser) await browser.close().catch(() => {})
     }
   }
 
