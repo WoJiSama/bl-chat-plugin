@@ -4742,18 +4742,6 @@ ${mcpPrompts}
           }
         }
 
-        const naturalDeltaForceCall = toolChoice === "auto"
-          ? resolveNaturalDeltaForceToolCall(currentIntentText)
-          : null
-        if (naturalDeltaForceCall) {
-          session.tools = this.getToolsByName(["deltaForceTool"])
-          if (session.tools?.length) {
-            toolChoice = { type: "function", function: { name: "deltaForceTool" } }
-            forcedToolCall = this.buildForcedToolCall("deltaForceTool", naturalDeltaForceCall.params)
-            logger.info(`[工具选择] group=${groupId} 强制使用 deltaForceTool 处理三角洲自然语言请求 params=${JSON.stringify(naturalDeltaForceCall.params)}`)
-          }
-        }
-
         if (msg?.includes("导图") || msg?.includes("思维导图")) {
           session.tools = this.getToolsByName(["aiMindMapTool"])
           if (session.tools?.length) toolChoice = { type: "function", function: { name: "aiMindMapTool" } }
@@ -4795,6 +4783,18 @@ ${mcpPrompts}
           toolChoice = { type: "function", function: { name: semanticToolCall.toolName } }
           forcedToolCall = semanticToolCall.toolCall
           logger.info(`[工具选择] group=${groupId} 语义分类强制使用 ${semanticToolCall.toolName} intent=${semanticToolCall.intent}`)
+        }
+
+        const naturalDeltaForceCall = toolChoice === "auto"
+          ? resolveNaturalDeltaForceToolCall(currentIntentText)
+          : null
+        if (naturalDeltaForceCall) {
+          session.tools = this.getToolsByName(["deltaForceTool"])
+          if (session.tools?.length) {
+            toolChoice = { type: "function", function: { name: "deltaForceTool" } }
+            forcedToolCall = this.buildForcedToolCall("deltaForceTool", naturalDeltaForceCall.params)
+            logger.info(`[工具选择] group=${groupId} 规则兜底使用 deltaForceTool 处理三角洲自然语言请求 params=${JSON.stringify(naturalDeltaForceCall.params)}`)
+          }
         }
 
         if (toolChoice === "auto" && images?.length && isImageCompositionEditRequest(currentIntentText)) {
