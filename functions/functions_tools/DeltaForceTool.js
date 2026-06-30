@@ -152,7 +152,7 @@ export class DeltaForceTool extends AbstractTool {
     }
   }
 
-  async func(opts = {}) {
+  async func(opts = {}, e = null) {
     const operation = normalizeOperation(opts.operation)
     const keyword = String(opts.keyword || "").trim()
     const limit = normalizeRankLimit(opts.limit)
