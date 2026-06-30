@@ -5050,6 +5050,10 @@ ${mcpPrompts}
     if (toolName === "searchInformationTool" || toolName === "webParserTool" || toolName === "githubRepoTool") {
       return "我刚刚翻到一半卡住了，不想拿半吊子的东西糊弄你。你再问一次，我重新看。"
     }
+    if (toolName === "deltaForceTool") {
+      const text = String(context?.error || context?.failedResult || "").replace(/^error:\s*/i, "").replace(/^工具\s+deltaForceTool\s+执行失败:\s*/i, "").trim()
+      return text ? `三角洲查询失败：${text}` : "三角洲接口刚刚没查成，你再发一次我重试。"
+    }
 
     const userText = [
       context?.session?.rawArgs,

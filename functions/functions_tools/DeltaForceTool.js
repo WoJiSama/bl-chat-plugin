@@ -166,53 +166,58 @@ export class DeltaForceTool extends AbstractTool {
 
     if (operation === "help") return replyText(e, getDeltaForceHelp())
 
-    const settings = readPluginSettings()
-    const client = new DeltaForceClient(settings)
+    try {
+      const settings = readPluginSettings()
+      const client = new DeltaForceClient(settings)
 
-    if (operation === "daily_keyword") {
-      const result = await client.getDailyKeyword()
-      return replyText(e, formatDailyKeywordResponse(result))
-    }
-
-    if (operation === "object_value") {
-      if (!keyword) return replyText(e, "请告诉我要查哪个三角洲物品的价值，比如 H70 或物品名。", "缺少三角洲物品关键词")
-      const result = await client.searchObjectValue({ keyword, limit })
-      const text = formatObjectValueSearchResponse(result, { keyword, limit })
-      if (textOutput) return replyText(e, text)
-      return replyReportImage(e, buildObjectValueReportData(result, { keyword, limit }), text)
-    }
-
-    if (operation === "solution_list") {
-      const result = await client.getSolutionList({ keyword, limit })
-      const text = formatSolutionListResponse(result, { keyword, limit })
-      if (textOutput) return replyText(e, text)
-      return replyReportImage(e, buildSolutionListReportData(result, { keyword, limit }), text)
-    }
-
-    if (operation === "place_profit") {
-      const cache = await getObjectCache(settings)
-      const result = await client.getPlaceProfit()
-      const options = {
-        placeType: place?.type || "",
-        limit,
-        objectNameResolver: cache
+      if (operation === "daily_keyword") {
+        const result = await client.getDailyKeyword()
+        return replyText(e, formatDailyKeywordResponse(result))
       }
-      const text = formatPlaceProfitResponse(result, options)
-      if (textOutput) return replyText(e, text)
-      return replyReportImage(e, buildPlaceProfitReportData(result, options), text)
-    }
 
-    if (operation === "profit_rank") {
-      const cache = await getObjectCache(settings)
-      const result = await client.getPlaceProfitRank({ placeType: place?.type || "", limit })
-      const options = {
-        placeType: place?.type || "",
-        limit,
-        objectNameResolver: cache
+      if (operation === "object_value") {
+        if (!keyword) return replyText(e, "请告诉我要查哪个三角洲物品的价值，比如 H70 或物品名。", "缺少三角洲物品关键词")
+        const result = await client.searchObjectValue({ keyword, limit })
+        const text = formatObjectValueSearchResponse(result, { keyword, limit })
+        if (textOutput) return replyText(e, text)
+        return replyReportImage(e, buildObjectValueReportData(result, { keyword, limit }), text)
       }
-      const text = formatProfitRankResponse(result, options)
-      if (textOutput) return replyText(e, text)
-      return replyReportImage(e, buildProfitRankReportData(result, options), text)
+
+      if (operation === "solution_list") {
+        const result = await client.getSolutionList({ keyword, limit })
+        const text = formatSolutionListResponse(result, { keyword, limit })
+        if (textOutput) return replyText(e, text)
+        return replyReportImage(e, buildSolutionListReportData(result, { keyword, limit }), text)
+      }
+
+      if (operation === "place_profit") {
+        const cache = await getObjectCache(settings)
+        const result = await client.getPlaceProfit()
+        const options = {
+          placeType: place?.type || "",
+          limit,
+          objectNameResolver: cache
+        }
+        const text = formatPlaceProfitResponse(result, options)
+        if (textOutput) return replyText(e, text)
+        return replyReportImage(e, buildPlaceProfitReportData(result, options), text)
+      }
+
+      if (operation === "profit_rank") {
+        const cache = await getObjectCache(settings)
+        const result = await client.getPlaceProfitRank({ placeType: place?.type || "", limit })
+        const options = {
+          placeType: place?.type || "",
+          limit,
+          objectNameResolver: cache
+        }
+        const text = formatProfitRankResponse(result, options)
+        if (textOutput) return replyText(e, text)
+        return replyReportImage(e, buildProfitRankReportData(result, options), text)
+      }
+    } catch (err) {
+      const message = String(err?.message || err || "未知错误").replace(/^三角洲 API 请求失败：/, "")
+      return replyText(e, `三角洲查询失败：${message}`, "三角洲查询失败")
     }
 
     return replyText(e, `没认出要查三角洲的哪一项。\n${getDeltaForceHelp()}`, "未识别三角洲操作")
