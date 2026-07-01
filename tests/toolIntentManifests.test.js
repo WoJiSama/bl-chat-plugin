@@ -28,3 +28,48 @@ test("does not disclose unavailable or unrelated tool manifests", () => {
     []
   )
 })
+
+test("selects common tool manifests from natural language", () => {
+  assert.deepEqual(
+    selectToolIntentCandidates("半小时后提醒我收菜", ["reminderTool", "searchInformationTool"]),
+    ["reminderTool"]
+  )
+  assert.match(buildToolIntentDisclosure(["reminderTool"]), /action=create/)
+
+  assert.deepEqual(
+    selectToolIntentCandidates("来首周杰伦的歌", ["searchMusicTool", "searchInformationTool"]),
+    ["searchMusicTool"]
+  )
+  assert.match(buildToolIntentDisclosure(["searchMusicTool"]), /isArtistOnly=true/)
+
+  assert.deepEqual(
+    selectToolIntentCandidates("把这段内容整理成思维导图", ["aiMindMapTool", "textImageTool"]),
+    ["aiMindMapTool"]
+  )
+})
+
+test("prefers specific manifests over generic search or web parsing", () => {
+  assert.deepEqual(
+    selectToolIntentCandidates(
+      "查一下三角洲今日密码",
+      ["deltaForceTool", "searchInformationTool"]
+    ),
+    ["deltaForceTool"]
+  )
+
+  assert.deepEqual(
+    selectToolIntentCandidates(
+      "看看 https://github.com/user/repo 这个仓库",
+      ["githubRepoTool", "webParserTool", "searchInformationTool"]
+    ),
+    ["githubRepoTool"]
+  )
+
+  assert.deepEqual(
+    selectToolIntentCandidates(
+      "帮我总结 https://example.com 这个页面",
+      ["githubRepoTool", "webParserTool", "searchInformationTool"]
+    ),
+    ["webParserTool"]
+  )
+})
