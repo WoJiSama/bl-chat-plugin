@@ -54,7 +54,7 @@ const activeDedupeToolRuns = new Map()
 const taskStatusCache = new Map()
 const activeUserToolTaskCache = new Map()
 const directTriggerMergeTimers = new Map()
-const imageGenerationMergeTimers = new Map()
+const toolRequestMergeTimers = new Map()
 const activeConversations = new Map() // 会话追踪: key: `${groupId}_${userId}`, value: { lastActiveTime, chatHistory: [], timer: null }
 const trackingThrottle = new Map() // 节流: key: `${groupId}_${userId}`, value: lastCallTime
 const pendingJudgments = [] // 批量判断队列
@@ -2659,28 +2659,42 @@ export class ExamplePlugin extends plugin {
     return false
   }
 
-  isMergeableImageGenerationRequest(e = {}) {
-    if (!e?.group_id || !e?.user_id || e?._imageGenerationMerged || e?._directTriggerMerged || e?._smartWaitRerun || e?._smartQueuedRerun || e?._proactiveReply) return false
+  isMergeableToolRequest(e = {}) {
+    if (!e?.group_id || !e?.user_id || e?._toolRequestMerged || e?._directTriggerMerged || e?._smartWaitRerun || e?._smartQueuedRerun || e?._proactiveReply) return false
     if (e.forceGrabRedBag || this.isCommand(e)) return false
     const text = String(e.msg || "").trim()
-    if (!isImageGenerationRequest(text)) return false
-    if (isImageCompositionEditRequest(text) || isImageAnalysisRequest(text)) return false
+    if (!text || isDrawTaskStatusInquiry(text)) return false
     const message = Array.isArray(e.message) ? e.message : []
-    return !message.some(seg => ["image", "video", "record", "file"].includes(seg?.type))
+    if (message.some(seg => ["image", "video", "record", "file"].includes(seg?.type))) return false
+    return this.isLikelyToolRequestText(text)
   }
 
-  buildMergedImageGenerationEvent(baseEvent, messages = []) {
+  isLikelyToolRequestText(text = "") {
+    const content = normalizeIntentText(text)
+    if (!content) return false
+    return Boolean(
+      isImageGenerationRequest(content) ||
+      isImageCompositionEditRequest(content) ||
+      isImageAnalysisRequest(content) ||
+      isRealtimeInfoRequest(content) ||
+      isExplicitSearchRequest(content) ||
+      isExplicitToolIntent(content) ||
+      resolveNaturalDeltaForceToolCall(content)
+    )
+  }
+
+  buildMergedToolRequestEvent(baseEvent, messages = []) {
     const merged = this.buildMergedDirectTriggerEvent(baseEvent, messages)
-    merged._imageGenerationMerged = true
+    merged._toolRequestMerged = true
     return merged
   }
 
-  scheduleMergedImageGeneration(e, handler) {
+  scheduleMergedToolRequest(e, handler) {
     const mergeMs = this.getDirectTriggerMergeMs()
-    if (mergeMs <= 0 || !this.isMergeableImageGenerationRequest(e)) return null
+    if (mergeMs <= 0 || !this.isMergeableToolRequest(e)) return null
 
-    const key = `${e.group_id}:${e.user_id}:image_generation`
-    const previous = imageGenerationMergeTimers.get(key)
+    const key = `${e.group_id}:${e.user_id}:tool_request`
+    const previous = toolRequestMergeTimers.get(key)
     if (previous?.timer) clearTimeout(previous.timer)
 
     const messages = previous?.messages || []
@@ -2698,20 +2712,20 @@ export class ExamplePlugin extends plugin {
     messages.droppedCount = droppedCount
 
     const timer = setTimeout(async () => {
-      const entry = imageGenerationMergeTimers.get(key)
+      const entry = toolRequestMergeTimers.get(key)
       if (!entry || entry.timer !== timer) return
-      imageGenerationMergeTimers.delete(key)
-      const mergedEvent = this.buildMergedImageGenerationEvent(e, entry.messages)
-      logger.info(`[生图合并] group=${e.group_id} user=${e.user_id} total=${entry.messages.length + (entry.droppedCount || 0)} retained=${entry.messages.length} dropped=${entry.droppedCount || 0} latest="${summarizeForLog(entry.messages.at(-1)?.text || "")}"`)
+      toolRequestMergeTimers.delete(key)
+      const mergedEvent = this.buildMergedToolRequestEvent(e, entry.messages)
+      logger.info(`[工具请求合并] group=${e.group_id} user=${e.user_id} total=${entry.messages.length + (entry.droppedCount || 0)} retained=${entry.messages.length} dropped=${entry.droppedCount || 0} latest="${summarizeForLog(entry.messages.at(-1)?.text || "")}"`)
       try {
         await handler(mergedEvent)
       } catch (error) {
-        logger.error(`[生图合并] 执行失败:`, error)
+        logger.error(`[工具请求合并] 执行失败:`, error)
       }
     }, mergeMs)
 
-    imageGenerationMergeTimers.set(key, { timer, messages, droppedCount })
-    logger.info(`[生图合并] group=${e.group_id} user=${e.user_id} wait=${mergeMs}ms count=${messages.length} dropped=${droppedCount} msg="${summarizeForLog(e.msg || "")}"`)
+    toolRequestMergeTimers.set(key, { timer, messages, droppedCount })
+    logger.info(`[工具请求合并] group=${e.group_id} user=${e.user_id} wait=${mergeMs}ms count=${messages.length} dropped=${droppedCount} msg="${summarizeForLog(e.msg || "")}"`)
     return false
   }
 
@@ -4627,10 +4641,10 @@ ${recentHistory || '(无)'}
       return false
     }
 
-    const scheduledImageGeneration = this.scheduleMergedImageGeneration(e, async mergedEvent => {
+    const scheduledToolRequest = this.scheduleMergedToolRequest(e, async mergedEvent => {
       await this.handleTool(mergedEvent)
     })
-    if (scheduledImageGeneration === false) return false
+    if (scheduledToolRequest === false) return false
 
     if (this.localToolsReadyPromise) await this.localToolsReadyPromise
     await this.refreshLocalToolRegistry({ silent: true })
