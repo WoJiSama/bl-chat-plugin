@@ -126,3 +126,37 @@ test('safe image prompt rewrite does not force comic style unless requested', as
   assert.ok(comic.includes('多格连环画/漫画分镜'))
   assert.ok(!comic.includes('不要擅自改成漫画'))
 })
+
+test('queued draw notice quotes the active draw request', async t => {
+  const BananaTool = await loadBananaTool(t)
+  if (!BananaTool) return
+
+  const previousSegment = globalThis.segment
+  const sent = []
+  globalThis.segment = {
+    reply: id => ({ type: 'reply', id: String(id) })
+  }
+
+  try {
+    const tool = new BananaTool()
+    const event = {
+      user_id: 222,
+      sender: { user_id: 222, nickname: '后来的人' },
+      reply: async message => sent.push(message)
+    }
+    await tool.replyQueuedDraw(event, {
+      activeTask: {
+        requesterName: 'Verse hall',
+        requesterId: '111',
+        messageId: '1771120112'
+      }
+    })
+
+    assert.equal(sent.length, 1)
+    assert.ok(Array.isArray(sent[0]))
+    assert.deepEqual(sent[0][0], { type: 'reply', id: '1771120112' })
+    assert.match(sent[0][1], /Verse hall/)
+  } finally {
+    globalThis.segment = previousSegment
+  }
+})

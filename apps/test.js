@@ -54,6 +54,7 @@ const activeDedupeToolRuns = new Map()
 const taskStatusCache = new Map()
 const activeUserToolTaskCache = new Map()
 const directTriggerMergeTimers = new Map()
+const imageGenerationMergeTimers = new Map()
 const activeConversations = new Map() // 会话追踪: key: `${groupId}_${userId}`, value: { lastActiveTime, chatHistory: [], timer: null }
 const trackingThrottle = new Map() // 节流: key: `${groupId}_${userId}`, value: lastCallTime
 const pendingJudgments = [] // 批量判断队列
@@ -1291,6 +1292,97 @@ function resolveAvatarInspectionTargets({ e = {}, text = "", atQq = [], memberMa
     images: targets.map(item => item.image).filter(Boolean),
     prompt: `${text || "看一下头像"}\n目标头像：${names}。请基于头像本身做简洁自然的描述，不要假装知道头像背后的真实身份或经历。`
   }
+}
+
+function findUniqueGroupMemberMention(memberMap, text = "", currentUserId = null) {
+  if (!memberMap) return null
+  const content = normalizeForContainment(text)
+  if (!content) return null
+
+  const candidates = []
+  for (const member of memberMap.values()) {
+    if (!member?.user_id) continue
+    const names = getMemberNames(member).filter(Boolean)
+    let score = 0
+    for (const name of names) {
+      const normalizedName = normalizeForContainment(name)
+      if (!normalizedName || normalizedName.length < 2) continue
+      if (content.includes(normalizedName)) {
+        score = Math.max(score, normalizedName.length)
+      }
+    }
+    const qq = String(member.user_id)
+    if (qq.length >= 5 && content.includes(qq)) score = Math.max(score, qq.length)
+    if (score > 0) {
+      candidates.push({
+        member,
+        names,
+        score,
+        isCurrentSpeaker: currentUserId && String(member.user_id) === String(currentUserId)
+      })
+    }
+  }
+
+  candidates.sort((a, b) => b.score - a.score)
+  if (!candidates.length) return null
+  if (candidates[1] && candidates[1].score === candidates[0].score) return null
+  return candidates[0]
+}
+
+function resolveAvatarDrawReference({ e = {}, text = "", atQq = [], memberMap = null, reply = null, botName = "", prefixes = [] } = {}) {
+  const content = normalizeIntentText(text)
+  if (!isImageGenerationRequest(content)) return null
+
+  const targets = []
+  const addTarget = (userId, label = "") => {
+    const qq = String(userId || "").replace(/\D/g, "")
+    if (!qq || String(qq) === String(Bot.uin)) return
+    if (targets.some(item => item.userId === qq)) return
+    const member = memberMap?.get?.(Number(qq))
+    targets.push({
+      userId: qq,
+      label: label || (member ? formatMemberDisplayName(member, `用户${qq}`) : `用户${qq}`),
+      image: buildQqAvatarUrl(qq)
+    })
+  }
+
+  const shouldUseAtTargets = (atQq || []).length > 0 &&
+    /(?:画|绘制|生成|做|捏).{0,40}(?:@|他|她|ta|TA|这个人|那个人|这人|头像|人像|立绘|角色|本人)|(?:把|将).{0,24}(?:@|他|她|ta|TA|这个人|那个人|这人).{0,40}(?:画|绘制|生成|做|捏)/.test(content)
+  if (shouldUseAtTargets) {
+    for (const qq of atQq || []) addTarget(qq)
+  }
+
+  const replyTarget = getReplyTargetUserId(reply)
+  if (replyTarget && /(?:画|绘制|生成|做|捏).{0,24}(?:他|她|ta|TA|这个人|那个人|这人|对方|回复|引用)|(?:把|将).{0,12}(?:他|她|ta|TA|这个人|那个人|这人|对方).{0,24}(?:画|绘制|生成|做|捏)/.test(content)) {
+    addTarget(replyTarget, reply?.sender?.card || reply?.sender?.nickname || "")
+  }
+
+  if (!targets.length && /(?:画|绘制|生成|做|捏).{0,20}(?:我|自己|本人|咱|俺)|(?:把|将).{0,8}(?:我|自己|本人|咱|俺).{0,24}(?:画|绘制|生成|做|捏)/.test(content)) {
+    addTarget(e?.user_id, e?.sender?.card || e?.sender?.nickname || "")
+  }
+
+  if (!targets.length) {
+    const cleaned = removeBotAnchors(text, botName, prefixes)
+      .replace(/\[CQ:[^\]]+\]/g, " ")
+      .replace(/@\S+/g, " ")
+    const candidate = findUniqueGroupMemberMention(memberMap, cleaned, e?.user_id)
+    if (candidate?.member?.user_id) {
+      addTarget(candidate.member.user_id, candidate.names?.[0] || "")
+    }
+  }
+
+  if (!targets.length) return null
+  const names = targets.map(item => `${item.label}(QQ:${item.userId})`).join("、")
+  return {
+    images: targets.map(item => item.image).filter(Boolean),
+    targets,
+    promptHint: `群友头像参考：${names}。用户想画群里的这个/这些人，请把所附 QQ 头像作为外观参考，保留头像中能看见的发型、脸部观感、服饰/配色和整体气质；不要编造头像背后的真实身份或经历。`
+  }
+}
+
+function formatAvatarDrawReferencePrompt(reference = null) {
+  if (!reference?.images?.length) return ""
+  return reference.promptHint || ""
 }
 
 function cleanDeltaForceKeyword(text = "", operation = "") {
@@ -2567,6 +2659,62 @@ export class ExamplePlugin extends plugin {
     return false
   }
 
+  isMergeableImageGenerationRequest(e = {}) {
+    if (!e?.group_id || !e?.user_id || e?._imageGenerationMerged || e?._directTriggerMerged || e?._smartWaitRerun || e?._smartQueuedRerun || e?._proactiveReply) return false
+    if (e.forceGrabRedBag || this.isCommand(e)) return false
+    const text = String(e.msg || "").trim()
+    if (!isImageGenerationRequest(text)) return false
+    if (isImageCompositionEditRequest(text) || isImageAnalysisRequest(text)) return false
+    const message = Array.isArray(e.message) ? e.message : []
+    return !message.some(seg => ["image", "video", "record", "file"].includes(seg?.type))
+  }
+
+  buildMergedImageGenerationEvent(baseEvent, messages = []) {
+    const merged = this.buildMergedDirectTriggerEvent(baseEvent, messages)
+    merged._imageGenerationMerged = true
+    return merged
+  }
+
+  scheduleMergedImageGeneration(e, handler) {
+    const mergeMs = this.getDirectTriggerMergeMs()
+    if (mergeMs <= 0 || !this.isMergeableImageGenerationRequest(e)) return null
+
+    const key = `${e.group_id}:${e.user_id}:image_generation`
+    const previous = imageGenerationMergeTimers.get(key)
+    if (previous?.timer) clearTimeout(previous.timer)
+
+    const messages = previous?.messages || []
+    messages.push({
+      event: e,
+      text: stripCqMarkup(e.msg || ""),
+      at: Date.now()
+    })
+    const maxMessages = this.getDirectTriggerMergeMaxMessages()
+    let droppedCount = previous?.droppedCount || 0
+    while (messages.length > maxMessages) {
+      messages.shift()
+      droppedCount++
+    }
+    messages.droppedCount = droppedCount
+
+    const timer = setTimeout(async () => {
+      const entry = imageGenerationMergeTimers.get(key)
+      if (!entry || entry.timer !== timer) return
+      imageGenerationMergeTimers.delete(key)
+      const mergedEvent = this.buildMergedImageGenerationEvent(e, entry.messages)
+      logger.info(`[生图合并] group=${e.group_id} user=${e.user_id} total=${entry.messages.length + (entry.droppedCount || 0)} retained=${entry.messages.length} dropped=${entry.droppedCount || 0} latest="${summarizeForLog(entry.messages.at(-1)?.text || "")}"`)
+      try {
+        await handler(mergedEvent)
+      } catch (error) {
+        logger.error(`[生图合并] 执行失败:`, error)
+      }
+    }, mergeMs)
+
+    imageGenerationMergeTimers.set(key, { timer, messages, droppedCount })
+    logger.info(`[生图合并] group=${e.group_id} user=${e.user_id} wait=${mergeMs}ms count=${messages.length} dropped=${droppedCount} msg="${summarizeForLog(e.msg || "")}"`)
+    return false
+  }
+
   /**
    * smart 模式触发入口：每条群消息进入此函数，按 talkValue 阈值/空窗补偿/强制覆盖三种条件决定是否调 Timing Gate
    */
@@ -3451,6 +3599,18 @@ ${specialSignalsBlock}
     return replies[Math.floor(Math.random() * replies.length)]
   }
 
+  buildReplySegment(messageId) {
+    if (!messageId) return null
+    if (globalThis.segment?.reply) return globalThis.segment.reply(messageId)
+    if (typeof segment !== "undefined" && segment?.reply) return segment.reply(messageId)
+    return { type: "reply", id: String(messageId), data: { id: String(messageId) } }
+  }
+
+  buildTaskStatusReplyMessage(status, text) {
+    const replySegment = this.buildReplySegment(status?.messageId)
+    return replySegment ? [replySegment, text] : text
+  }
+
   async handleActiveDrawStatusQuestion(e, text = "") {
     if (!isDrawTaskStatusInquiry(text)) return false
     const statuses = await Promise.all([
@@ -3461,7 +3621,7 @@ ${specialSignalsBlock}
     if (!status) return false
 
     logger.info(`[活跃任务] 命中图片任务进度追问 group=${e.group_id} user=${e.user_id} tool=${status.toolName} status=${status.status}`)
-    await e.reply(this.buildDrawTaskStatusReply(status))
+    await e.reply(this.buildTaskStatusReplyMessage(status, this.buildDrawTaskStatusReply(status)))
     return true
   }
 
@@ -4467,6 +4627,11 @@ ${recentHistory || '(无)'}
       return false
     }
 
+    const scheduledImageGeneration = this.scheduleMergedImageGeneration(e, async mergedEvent => {
+      await this.handleTool(mergedEvent)
+    })
+    if (scheduledImageGeneration === false) return false
+
     if (this.localToolsReadyPromise) await this.localToolsReadyPromise
     await this.refreshLocalToolRegistry({ silent: true })
     await this.waitForMCPReady()
@@ -4518,6 +4683,21 @@ ${recentHistory || '(无)'}
         })
         if (avatarInspection?.images?.length) {
           session.avatarInspection = avatarInspection
+        }
+
+        const avatarDrawReference = !images.length
+          ? resolveAvatarDrawReference({
+              e,
+              text: args || msg || "",
+              atQq,
+              memberMap,
+              reply: repliedMessage,
+              botName: Bot.nickname,
+              prefixes: this.config.triggerPrefixes
+            })
+          : null
+        if (avatarDrawReference?.images?.length) {
+          session.avatarDrawReference = avatarDrawReference
         }
 
         if (!images.length && !avatarInspection?.images?.length && looksLikeVisualInspectionRequest(args || msg || "")) {
@@ -4802,6 +4982,7 @@ ${mcpPrompts}
           }
         }
 
+        const imageGenerationReferenceImages = this.getImageGenerationReferenceImages(images, session)
         const semanticDecision = toolChoice === "auto"
           ? await this.classifySemanticToolIntent({
               e,
@@ -4812,11 +4993,12 @@ ${mcpPrompts}
               currentIntentText,
               userContent,
               groupUserMessages: session.groupUserMessages,
+              avatarDrawReference: session.avatarDrawReference,
               sessionTools: session.tools
             })
           : null
         const semanticToolCall = semanticDecision?.toolName
-          ? this.buildToolCallFromDecision(semanticDecision, { e, images, args, msg, currentIntentText, userContent, groupUserMessages: session.groupUserMessages })
+          ? this.buildToolCallFromDecision(semanticDecision, { e, images: imageGenerationReferenceImages, args, msg, currentIntentText, userContent, groupUserMessages: session.groupUserMessages, avatarDrawReference: session.avatarDrawReference })
           : null
         if (toolChoice === "auto" && semanticToolCall) {
           session.tools = semanticToolCall.tools
@@ -4869,8 +5051,8 @@ ${mcpPrompts}
           if (session.tools?.length) {
             toolChoice = { type: "function", function: { name: "bananaTool" } }
             forcedToolCall = this.buildForcedToolCall("bananaTool", {
-              prompt: this.buildImageGenerationPrompt({ e, args, msg, currentIntentText, userContent, images }),
-              images
+              prompt: this.buildImageGenerationPrompt({ e, args, msg, currentIntentText, userContent, images: imageGenerationReferenceImages, avatarDrawReference: session.avatarDrawReference }),
+              images: imageGenerationReferenceImages
             })
             logger.info(`[工具选择] group=${groupId} 强制使用 bananaTool 处理生图请求`)
           }
@@ -5249,10 +5431,14 @@ ${mcpPrompts}
   }
 
   buildImageGenerationPrompt(context = {}) {
+    const mergedPrompt = Array.isArray(context.e?._mergedOriginalTexts) && context.e._mergedOriginalTexts.length
+      ? context.e._mergedOriginalTexts.join("\n")
+      : ""
     const basePrompt = compactDrawPromptText(
-      context.prompt || context.args || context.msg || context.currentIntentText || "",
+      context.prompt || mergedPrompt || context.args || context.msg || context.currentIntentText || "",
       1800
     )
+    const avatarReferencePrompt = formatAvatarDrawReferencePrompt(context.avatarDrawReference)
     const quotedContext = this.getQuotedPromptContextText(context.e, context.userContent)
     const recentContext = this.getRecentPromptContextText(
       context.groupUserMessages || context.messages || [],
@@ -5270,13 +5456,21 @@ ${mcpPrompts}
 
     return compileImagePrompt({
       task: "image_generation",
-      userPrompt: basePrompt,
+      userPrompt: [basePrompt, avatarReferencePrompt].filter(Boolean).join("\n"),
       quotedContext,
       recentContext,
       hasReferenceImages: Array.isArray(context.images) && context.images.length > 0,
       hasContextualReference: hasContextualDrawReference(referenceText),
       isComic: COMIC_DRAW_PATTERN.test(referenceText)
     })
+  }
+
+  getImageGenerationReferenceImages(images = [], session = {}) {
+    if (Array.isArray(images) && images.length) return images
+    if (Array.isArray(session.avatarDrawReference?.images) && session.avatarDrawReference.images.length) {
+      return session.avatarDrawReference.images
+    }
+    return []
   }
 
   buildImageEditPrompt(context = {}) {
@@ -5864,8 +6058,9 @@ ${mcpPrompts}
     }
     if (toolName === "bananaTool") {
       if (!params.prompt && session.rawArgs) params.prompt = session.rawArgs
-      if ((!Array.isArray(params.images) || !params.images.length) && session.images?.length) {
-        params.images = session.images
+      const imageGenerationReferenceImages = this.getImageGenerationReferenceImages(params.images, session)
+      if ((!Array.isArray(params.images) || !params.images.length) && imageGenerationReferenceImages.length) {
+        params.images = imageGenerationReferenceImages
       }
       params.prompt = this.buildImageGenerationPrompt({
         e,
@@ -5874,7 +6069,8 @@ ${mcpPrompts}
         msg: e?.msg,
         currentIntentText: [session.rawArgs, e?.msg].filter(Boolean).join("\n"),
         userContent: session.userContent,
-        images: params.images
+        images: params.images,
+        avatarDrawReference: session.avatarDrawReference
       }) || params.prompt
     }
 

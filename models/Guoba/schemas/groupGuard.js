@@ -95,5 +95,132 @@ export default [
     label: "超时踢出提示",
     component: "InputTextArea",
     bottomHelpMessage: "超时后的提示。支持变量：{userId}、{question}、{timeout}"
+  },
+  {
+    component: "Divider",
+    label: "复合群管"
+  },
+  {
+    field: "groupModeration.enabled",
+    label: "复合群管开关",
+    component: "Switch",
+    bottomHelpMessage: "检测低活跃成员的广告、外链、招募话术等风险"
+  },
+  {
+    field: "groupModeration.enabledGroups",
+    label: "启用群号",
+    component: "GTags",
+    bottomHelpMessage: "需要启用复合群管的群组 ID（按回车添加）。为空时不生效",
+    componentProps: { allowAdd: true, allowDel: true }
+  },
+  {
+    field: "groupModeration.globalAdmins",
+    label: "全局管理员 QQ",
+    component: "GTags",
+    bottomHelpMessage: "所有启用群都会向这些 QQ 私聊转发证据；这些用户本身不会被检测",
+    componentProps: { allowAdd: true, allowDel: true }
+  },
+  {
+    field: "groupModeration.groupAdmins",
+    label: "每群管理员",
+    component: "GSubForm",
+    bottomHelpMessage: "可为不同群单独配置接收证据的管理员；群原生群主/管理员也会被跳过检测",
+    componentProps: {
+      multiple: true,
+      schemas: [
+        { field: "groupId", label: "群号", component: "Input" },
+        {
+          field: "admins",
+          label: "管理员 QQ",
+          component: "GTags",
+          componentProps: { allowAdd: true, allowDel: true }
+        }
+      ]
+    }
+  },
+  {
+    field: "groupModeration.minActiveLevel",
+    label: "低活跃等级阈值",
+    component: "InputNumber",
+    bottomHelpMessage: "默认检测群活跃等级小于等于 5 的成员",
+    componentProps: { min: 0, max: 100, step: 1, placeholder: "5" }
+  },
+  {
+    field: "groupModeration.inspectLowLevelOnly",
+    label: "只检测低活跃成员",
+    component: "Switch",
+    bottomHelpMessage: "开启后，活跃等级高于阈值的普通成员不会进入广告检测"
+  },
+  {
+    field: "groupModeration.publicReportEnabled",
+    label: "群内提醒",
+    component: "Switch",
+    bottomHelpMessage: "命中报告阈值后在群内发自然语言提醒"
+  },
+  {
+    field: "groupModeration.forwardEvidenceToAdmins",
+    label: "私聊转发证据",
+    component: "Switch",
+    bottomHelpMessage: "命中后把证据私聊转发给全局管理员和本群管理员"
+  },
+  {
+    field: "groupModeration.modelReviewEnabled",
+    label: "启用模型复核",
+    component: "Switch",
+    bottomHelpMessage: "开启后使用 toolsAiConfig 对疑似内容做语义复核，会增加模型调用量"
+  },
+  {
+    field: "groupModeration.thresholds.report",
+    label: "提醒阈值",
+    component: "InputNumber",
+    componentProps: { min: 0, max: 1, step: 0.01, placeholder: "0.70" }
+  },
+  {
+    field: "groupModeration.thresholds.recall",
+    label: "撤回阈值",
+    component: "InputNumber",
+    componentProps: { min: 0, max: 1, step: 0.01, placeholder: "0.85" }
+  },
+  {
+    field: "groupModeration.thresholds.mute",
+    label: "禁言阈值",
+    component: "InputNumber",
+    componentProps: { min: 0, max: 1, step: 0.01, placeholder: "0.90" }
+  },
+  {
+    field: "groupModeration.thresholds.kick",
+    label: "踢出阈值",
+    component: "InputNumber",
+    componentProps: { min: 0, max: 1, step: 0.01, placeholder: "0.97" }
+  },
+  {
+    field: "groupModeration.actions.recallEnabled",
+    label: "允许自动撤回",
+    component: "Switch",
+    bottomHelpMessage: "默认关闭。开启后达到撤回阈值会尝试撤回消息"
+  },
+  {
+    field: "groupModeration.actions.muteEnabled",
+    label: "允许自动禁言",
+    component: "Switch",
+    bottomHelpMessage: "默认关闭。开启后达到禁言阈值会尝试禁言"
+  },
+  {
+    field: "groupModeration.actions.kickEnabled",
+    label: "允许自动踢出",
+    component: "Switch",
+    bottomHelpMessage: "默认关闭。开启后达到踢出阈值会尝试踢人"
+  },
+  {
+    field: "groupModeration.actions.muteSeconds",
+    label: "禁言秒数",
+    component: "InputNumber",
+    componentProps: { min: 60, max: 2592000, step: 60, placeholder: "600" }
+  },
+  {
+    field: "groupModeration.reportTemplate",
+    label: "群内提醒模板",
+    component: "InputTextArea",
+    bottomHelpMessage: "支持变量：{rules}、{confidence}、{action}、{actionText}、{evidenceText}"
   }
 ]

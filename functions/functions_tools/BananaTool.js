@@ -556,7 +556,21 @@ export class BananaTool extends AbstractTool {
     const message = sameRequester
       ? "我现在还在帮你上一张画画诶，有点忙不过来了…不过这张我也记住了，等上一张画完就来画这张，好不好~"
       : `我现在正在帮「${activeName}」画画诶，有点忙不过来了…不过我已经记住你的了，等我帮那边画完就来帮你画，好不好~`;
-    await e.reply(message);
+    await e.reply(this.buildQueuedDrawReplyMessage(message, activeTask));
+  }
+
+  buildQueuedDrawReplyMessage(message, activeTask = {}) {
+    const messageId = activeTask?.messageId;
+    if (!messageId) return message;
+    const replySegment = this.buildReplySegment(messageId);
+    return replySegment ? [replySegment, message] : message;
+  }
+
+  buildReplySegment(messageId) {
+    if (!messageId) return null;
+    if (globalThis.segment?.reply) return globalThis.segment.reply(messageId);
+    if (typeof segment !== "undefined" && segment?.reply) return segment.reply(messageId);
+    return { type: "reply", id: String(messageId), data: { id: String(messageId) } };
   }
 
   getQueuedFailureMessage() {

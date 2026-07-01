@@ -134,6 +134,30 @@ pluginSettings:
     retryMessage: "回答错误，请重新回答：{question}"
     failMessage: "回答错误，已移出群聊"
     timeoutMessage: "用户 {userId} 入群验证超时，已移出群聊"
+  # 复合群管：检测低活跃成员的广告/引流/招募等风险。默认只提醒和转发证据，不自动撤回/禁言/踢人。
+  groupModeration:
+    enabled: false
+    enabledGroups: []
+    globalAdmins: []
+    groupAdmins: []
+    minActiveLevel: 5
+    inspectLowLevelOnly: true
+    publicReportEnabled: true
+    forwardEvidenceToAdmins: true
+    evidenceMaxChars: 1200
+    modelReviewEnabled: false
+    modelThreshold: 0.55
+    thresholds:
+      report: 0.70
+      recall: 0.85
+      mute: 0.90
+      kick: 0.97
+    actions:
+      recallEnabled: false
+      muteEnabled: false
+      kickEnabled: false
+      muteSeconds: 600
+    reportTemplate: "群管检测：命中规则{rules},置信度:{confidence}。{actionText}{evidenceText}"
   # 群通知：入群欢迎和退群提示，支持按群开启和自定义文案。
   groupNotice:
     enabled: false
