@@ -63,6 +63,51 @@ function messageHasType(record, type) {
   return Array.isArray(record.message) && record.message.some(seg => seg?.type === type)
 }
 
+function decodeEntities(text = "") {
+  return String(text || "")
+    .replace(/&amp;/g, "&")
+    .replace(/&#91;/g, "[")
+    .replace(/&#93;/g, "]")
+    .replace(/&quot;/g, "\"")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+}
+
+function renderSegment(seg = {}) {
+  const type = seg?.type || "unknown"
+  if (type === "text") return decodeEntities(seg.text || "")
+  if (type === "at") return `@${seg.qq || ""}`
+  if (type === "reply") return `[回复:${seg.id || ""}]`
+  if (type === "face") return `[表情:${seg.id || ""}]`
+  if (type === "image") {
+    const summary = decodeEntities(seg.summary || "").replace(/^\[|\]$/g, "")
+    return summary ? `[图片:${summary}]` : "[图片]"
+  }
+  if (type === "file") return `[文件:${seg.file || seg.name || ""}]`
+  if (type === "video") return "[视频]"
+  if (type === "record") return "[语音]"
+  if (type === "json" || type === "xml" || type === "markdown") return `[${type}消息]`
+  if (type === "notice") return decodeEntities(seg.text || "[群通知]")
+  return `[${type}消息]`
+}
+
+function renderReadableMessage(record = {}) {
+  if (Array.isArray(record.message) && record.message.length) {
+    const text = record.message.map(renderSegment).join("").trim()
+    if (text) return text
+  }
+  return decodeEntities(record.raw_message || "")
+    .replace(/\[CQ:reply,id=([^\],]+)[^\]]*\]/g, "[回复:$1]")
+    .replace(/\[CQ:at,qq=([^\],]+)[^\]]*\]/g, "@$1")
+    .replace(/\[CQ:image(?:,[^\]]*summary=([^,\]]+))?[^\]]*\]/g, (_, summary) => summary ? `[图片:${decodeEntities(summary)}]` : "[图片]")
+    .replace(/\[CQ:face,id=([^\],]+)[^\]]*\]/g, "[表情:$1]")
+    .replace(/\[CQ:record[^\]]*\]/g, "[语音]")
+    .replace(/\[CQ:video[^\]]*\]/g, "[视频]")
+    .replace(/\[CQ:json[^\]]*\]/g, "[json消息]")
+    .replace(/\[CQ:xml[^\]]*\]/g, "[xml消息]")
+    .trim()
+}
+
 export class MessageArchiveManager {
   constructor({ cwd = process.cwd(), logger = globalThis.logger, redis = globalThis.redis } = {}) {
     this.cwd = cwd
@@ -313,7 +358,7 @@ export class MessageArchiveManager {
     if (!around) return matches.slice(-limit).map(item => item.record)
 
     const picked = new Map()
-    for (const item of matches.slice(-Math.max(1, Number(options.matchLimit || 5)))) {
+    for (const item of matches.slice(-Math.max(1, Number(options.matchLimit || 1)))) {
       const start = Math.max(0, item.index - around)
       const end = Math.min(records.length - 1, item.index + around)
       for (let i = start; i <= end; i++) picked.set(i, records[i])
@@ -376,10 +421,7 @@ export class MessageArchiveManager {
     const name = record.archive_kind === "notice"
       ? "群通知"
       : record.sender?.card || record.sender?.nickname || "未知"
-    let text = String(record.raw_message || "").replace(/\r/g, "")
-    if (!text && Array.isArray(record.message)) {
-      text = record.message.map(seg => seg.text || `[${seg.type || "消息"}]`).join("")
-    }
+    let text = renderReadableMessage(record).replace(/\r/g, "")
     if (text.length > maxTextLength) text = `${text.slice(0, maxTextLength)}...`
     return `[${record.time}] ${name}(${record.user_id})${record.message_id ? ` [${record.message_id}]` : ""}\n${text || "[非文本消息]"}`
   }
