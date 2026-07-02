@@ -72,7 +72,8 @@ export class MessageRecordPlugin extends plugin {
             [/(?:qq|QQ|用户|用户QQ)[=:：]\s*(\d+)/, "qq"],
             [/(?:关键词|关键字|kw|keyword)[=:：]\s*("[^"]+"|'[^']+'|\S+)/, "keyword"],
             [/(?:正则|regex)[=:：]\s*("[^"]+"|'[^']+'|\S+)/, "regex"],
-            [/(?:前后|上下文|around)[=:：]?\s*(\d+)/, "around"],
+            [/(?:上下文|周围|context|around)[=:：]?\s*(\d+)/, "contextAround"],
+            [/(?:前后|最近)[=:：]?\s*(\d+)/, "around"],
             [/(?:数量|条数|limit)[=:：]?\s*(\d+)/, "limit"],
             [/(?:消息|message_id|mid)[=:：]\s*(\d+)/, "messageId"]
         ];
@@ -88,7 +89,13 @@ export class MessageRecordPlugin extends plugin {
             const keywordMatch = text.match(/(?:关键词|关键字)\s+(.+?)(?:\s+(?:前后|数量|条数|群|qq|QQ)[=:：]|\s*$)/);
             if (keywordMatch) opts.keyword = keywordMatch[1].trim();
         }
+        opts.contextAround = Math.min(50, Math.max(0, Number(opts.contextAround) || 0));
         opts.around = Math.min(50, Math.max(0, Number(opts.around) || 0));
+        if (opts.qq && opts.around && !opts.contextAround) {
+            opts.limit = opts.limit === 30 ? opts.around : opts.limit;
+            opts.around = 0;
+        }
+        if (opts.contextAround) opts.around = opts.contextAround;
         opts.limit = Math.min(100, Math.max(1, Number(opts.limit) || 30));
         if (!opts.qq && !opts.keyword && !opts.regex && !opts.messageId) {
             opts.limit = Math.min(opts.limit, 20);
@@ -96,12 +103,8 @@ export class MessageRecordPlugin extends plugin {
         return opts;
     }
 
-    buildArchiveForwardMessages(records = [], title = "聊天记录查询结果") {
-        const messages = [{
-            user_id: Bot.uin,
-            nickname: Bot.nickname,
-            message: title
-        }];
+    buildArchiveForwardMessages(records = []) {
+        const messages = [];
         for (const record of records) {
             messages.push({
                 user_id: record.user_id || record.sender?.user_id || Bot.uin,
@@ -133,10 +136,11 @@ export class MessageRecordPlugin extends plugin {
                 opts.qq ? `QQ=${opts.qq}` : "",
                 opts.keyword ? `关键词=${opts.keyword}` : "",
                 opts.regex ? `正则=${opts.regex}` : "",
-                opts.around ? `前后=${opts.around}` : "",
+                opts.contextAround ? `上下文=${opts.contextAround}` : "",
                 `共 ${records.length} 条`
             ].filter(Boolean).join(" | ");
-            const forwardMsgs = this.buildArchiveForwardMessages(records, title);
+            logger.info(`[MessageArchive] ${title}`);
+            const forwardMsgs = this.buildArchiveForwardMessages(records);
             const summary = e.group?.makeForwardMsg
                 ? await e.group.makeForwardMsg(forwardMsgs)
                 : forwardMsgs.map(item => item.message).join("\n\n");
