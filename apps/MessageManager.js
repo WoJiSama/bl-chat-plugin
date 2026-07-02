@@ -1,4 +1,5 @@
 import { MessageManager } from '../utils/MessageManager.js'
+import { messageArchiveManager } from '../utils/MessageArchiveManager.js'
 import { emojiPackManager } from '../utils/EmojiPackManager.js'
 import fs from 'fs';
 import YAML from 'yaml';
@@ -25,6 +26,14 @@ export class MessageRecordPlugin extends plugin {
                     fnc: 'clearHistory'
                 },
                 {
+                    reg: '^#?(查|搜索)(聊天|群聊)记录[\\s\\S]*',
+                    fnc: 'searchArchive'
+                },
+                {
+                    reg: '^#?聊天记录管理员(添加|删除)[\\s\\S]*',
+                    fnc: 'manageArchiveAdmin'
+                },
+                {
                     reg: '.*',
                     fnc: 'onMessage',
                     log: false
@@ -38,12 +47,147 @@ export class MessageRecordPlugin extends plugin {
         });
         this.configPath = './plugins/bl-chat-plugin/config/message.yaml';
         this.messageManager = new MessageManager();
+        this.archiveManager = messageArchiveManager;
     }
 
     async onMessage(e) {
         await this.messageManager.recordMessage(e);
+        this.archiveManager.recordMessage(e).catch(error => {
+            logger.warn(`[MessageArchive] 后台归档失败: ${error.message}`);
+        });
         emojiPackManager.maybeAutoCollect(e).catch(() => {});
         return false;
+    }
+
+    parseArchiveSearch(msg = "", e = {}) {
+        const text = String(msg || "").replace(/^#?(查|搜索)(聊天|群聊)记录\s*/, "").trim();
+        const opts = {
+            type: "group",
+            groupId: e.group_id ? String(e.group_id) : "",
+            limit: 30,
+            around: 0
+        };
+        const pairs = [
+            [/群(?:号)?[=:：]\s*(\d+)/, "groupId"],
+            [/(?:qq|QQ|用户|用户QQ)[=:：]\s*(\d+)/, "qq"],
+            [/(?:关键词|关键字|kw|keyword)[=:：]\s*("[^"]+"|'[^']+'|\S+)/, "keyword"],
+            [/(?:正则|regex)[=:：]\s*("[^"]+"|'[^']+'|\S+)/, "regex"],
+            [/(?:前后|上下文|around)[=:：]?\s*(\d+)/, "around"],
+            [/(?:数量|条数|limit)[=:：]?\s*(\d+)/, "limit"],
+            [/(?:消息|message_id|mid)[=:：]\s*(\d+)/, "messageId"]
+        ];
+        for (const [pattern, key] of pairs) {
+            const match = text.match(pattern);
+            if (match) opts[key] = String(match[1]).replace(/^["']|["']$/g, "");
+        }
+        const positionalGroup = text.match(/(?:^|\s)(\d{6,12})(?:\s|$)/);
+        if (positionalGroup && !/qq|用户|消息|mid/i.test(text.slice(Math.max(0, positionalGroup.index - 8), positionalGroup.index))) {
+            opts.groupId = positionalGroup[1];
+        }
+        if (!opts.keyword) {
+            const keywordMatch = text.match(/(?:关键词|关键字)\s+(.+?)(?:\s+(?:前后|数量|条数|群|qq|QQ)[=:：]|\s*$)/);
+            if (keywordMatch) opts.keyword = keywordMatch[1].trim();
+        }
+        opts.around = Math.min(50, Math.max(0, Number(opts.around) || 0));
+        opts.limit = Math.min(100, Math.max(1, Number(opts.limit) || 30));
+        if (!opts.qq && !opts.keyword && !opts.regex && !opts.messageId) {
+            opts.limit = Math.min(opts.limit, 20);
+        }
+        return opts;
+    }
+
+    buildArchiveForwardMessages(records = [], title = "聊天记录查询结果") {
+        const messages = [{
+            user_id: Bot.uin,
+            nickname: Bot.nickname,
+            message: title
+        }];
+        for (const record of records) {
+            messages.push({
+                user_id: record.user_id || record.sender?.user_id || Bot.uin,
+                nickname: record.sender?.card || record.sender?.nickname || String(record.user_id || "未知"),
+                message: this.archiveManager.formatRecord(record)
+            });
+        }
+        return messages;
+    }
+
+    async searchArchive(e) {
+        const opts = this.parseArchiveSearch(e.msg, e);
+        if (!opts.groupId) {
+            await e.reply("请提供群号，例如：#查聊天记录 群=953676639 关键词=奶龙 前后=10");
+            return true;
+        }
+        if (!this.archiveManager.canQuery(e, opts.groupId)) {
+            await e.reply("只有主人、该群群主或被授权的聊天记录管理员可以查询这个群的记录");
+            return true;
+        }
+        try {
+            const records = await this.archiveManager.query(opts);
+            if (!records.length) {
+                await e.reply("没有查到匹配的聊天记录");
+                return true;
+            }
+            const title = [
+                `聊天记录查询：群 ${opts.groupId}`,
+                opts.qq ? `QQ=${opts.qq}` : "",
+                opts.keyword ? `关键词=${opts.keyword}` : "",
+                opts.regex ? `正则=${opts.regex}` : "",
+                opts.around ? `前后=${opts.around}` : "",
+                `共 ${records.length} 条`
+            ].filter(Boolean).join(" | ");
+            const forwardMsgs = this.buildArchiveForwardMessages(records, title);
+            const summary = e.group?.makeForwardMsg
+                ? await e.group.makeForwardMsg(forwardMsgs)
+                : forwardMsgs.map(item => item.message).join("\n\n");
+            await e.reply(summary);
+        } catch (error) {
+            logger.error(`[MessageArchive] 查询失败: ${error.stack || error.message}`);
+            await e.reply(`查询失败：${error.message}`);
+        }
+        return true;
+    }
+
+    async manageArchiveAdmin(e) {
+        const action = e.msg.includes("删除") ? "delete" : "add";
+        const ids = [...String(e.msg || "").matchAll(/\b\d{5,12}\b/g)].map(match => match[0]);
+        const groupId = e.group_id ? String(e.group_id) : ids.shift();
+        const admins = ids.filter(id => id !== groupId);
+        if (!groupId || !admins.length) {
+            await e.reply("格式：#聊天记录管理员添加 QQ号（需在群内由群主/主人操作）");
+            return true;
+        }
+        if (!this.archiveManager.canManageGroupAdmins(e, groupId)) {
+            await e.reply("只有主人或该群群主可以配置本群聊天记录管理员");
+            return true;
+        }
+        const config = await this.readConfig();
+        if (!config) {
+            await e.reply("读取配置失败");
+            return true;
+        }
+        const archive = config.pluginSettings.messageArchive ||= {};
+        const list = Array.isArray(archive.groupAdmins) ? archive.groupAdmins : [];
+        let item = list.find(entry => String(entry.groupId) === String(groupId));
+        if (!item) {
+            item = { groupId: String(groupId), admins: [] };
+            list.push(item);
+        }
+        item.admins = Array.isArray(item.admins) ? item.admins.map(String) : [];
+        if (action === "add") {
+            for (const admin of admins) {
+                if (!item.admins.includes(String(admin))) item.admins.push(String(admin));
+            }
+        } else {
+            item.admins = item.admins.filter(admin => !admins.includes(String(admin)));
+        }
+        archive.groupAdmins = list.filter(entry => Array.isArray(entry.admins) && entry.admins.length);
+        if (await this.saveConfig(config)) {
+            await e.reply(`已${action === "add" ? "添加" : "删除"}本群聊天记录管理员：${admins.join("、")}`);
+        } else {
+            await e.reply("保存配置失败");
+        }
+        return true;
     }
 
     async showHistory(e) {

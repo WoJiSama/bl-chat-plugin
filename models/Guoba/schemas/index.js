@@ -8,6 +8,7 @@ import basic from "./basic.js"
 import permission from "./permission.js"
 import groupGuard from "./groupGuard.js"
 import groupNotice from "./groupNotice.js"
+import messageArchive from "./messageArchive.js"
 import persona from "./persona.js"
 import aiCore from "./aiCore.js"
 import tracking from "./tracking.js"
@@ -28,6 +29,7 @@ export const schemas = [
   persona,
   groupGuard,
   groupNotice,
+  messageArchive,
   tracking,
   aiModels,
   emotion,
