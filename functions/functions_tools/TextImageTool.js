@@ -725,22 +725,22 @@ function buildDocumentHtml(text = "") {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     * { box-sizing: border-box; }
-    html, body { margin: 0; padding: 0; background: #f3f5f8; color: #1f2937; }
+    html, body { margin: 0; padding: 0; background: #e8edf3; color: #1f2937; }
     body {
       width: 980px;
-      padding: 28px;
+      padding: 20px;
       font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif;
       letter-spacing: 0;
     }
     .document {
-      width: 924px;
-      padding: 42px 48px;
-      background: #ffffff;
-      border: 1px solid #d9dee7;
+      width: 940px;
+      padding: 34px 42px;
+      background: #f8fafc;
+      border: 1px solid #cfd7e3;
       border-radius: 8px;
-      box-shadow: 0 18px 38px rgba(27, 39, 63, 0.14);
+      box-shadow: 0 14px 30px rgba(27, 39, 63, 0.12);
     }
-    .content { font-size: 26px; line-height: 1.68; }
+    .content { font-size: 25px; line-height: 1.62; }
     h1, h2, h3 {
       margin: 0 0 18px;
       color: #111827;
@@ -748,17 +748,17 @@ function buildDocumentHtml(text = "") {
       font-weight: 800;
       letter-spacing: 0;
     }
-    h1 { font-size: 34px; padding-bottom: 16px; border-bottom: 2px solid #e6eaf1; }
-    h2 { margin-top: 30px; font-size: 31px; }
-    h3 { margin-top: 24px; font-size: 28px; }
-    p { margin: 0 0 20px; white-space: normal; overflow-wrap: anywhere; }
-    ul { margin: 0 0 22px; padding-left: 32px; }
-    li { margin: 0 0 10px; padding-left: 4px; overflow-wrap: anywhere; }
+    h1 { font-size: 34px; padding-bottom: 14px; border-bottom: 2px solid #dde4ee; }
+    h2 { margin-top: 26px; font-size: 31px; }
+    h3 { margin-top: 22px; font-size: 28px; }
+    p { margin: 0 0 16px; white-space: normal; overflow-wrap: anywhere; }
+    ul { margin: 0 0 18px; padding-left: 32px; }
+    li { margin: 0 0 8px; padding-left: 4px; overflow-wrap: anywhere; }
     blockquote {
-      margin: 4px 0 22px;
+      margin: 4px 0 18px;
       padding: 14px 18px;
       color: #4b5563;
-      background: #f7f9fc;
+      background: #eef3f8;
       border-left: 5px solid #74849a;
       border-radius: 6px;
       overflow-wrap: anywhere;
@@ -774,7 +774,7 @@ function buildDocumentHtml(text = "") {
     }
     .code-block {
       position: relative;
-      margin: 8px 0 24px;
+      margin: 8px 0 18px;
       padding: 44px 20px 18px;
       overflow: hidden;
       border-radius: 8px;
@@ -899,7 +899,12 @@ export class TextImageTool extends AbstractTool {
       const page = await browser.newPage()
       await page.setViewport({ width: 980, height: 1200, deviceScaleFactor: 2 })
       await page.setContent(buildDocumentHtml(text), { waitUntil: "networkidle0", timeout: 60000 })
-      await page.screenshot({ path: outputPath, fullPage: true, type: "png" })
+      const clip = await page.evaluate(() => {
+        const body = document.body
+        const height = Math.ceil(body.getBoundingClientRect().height)
+        return { x: 0, y: 0, width: 980, height: Math.max(1, height) }
+      })
+      await page.screenshot({ path: outputPath, clip, type: "png" })
       await page.close()
       return outputPath
     } catch (error) {

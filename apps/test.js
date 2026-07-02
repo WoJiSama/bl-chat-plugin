@@ -189,6 +189,11 @@ const DRAW_TASK_STATUS_PATTERNS = [
   /(?:图|图片|画|出图).{0,12}(?:呢|好了没|好了吗|画好|生成好|出来|进度|到哪|还在|卡住|是不是忘|忘了)/i,
   /(?:是不是|不会是|你是不是).{0,8}(?:忘了|忘记).{0,12}(?:我的|那张|刚才|图|画|图片)/i
 ]
+const DRAW_CONTEXT_CONTINUATION_PATTERNS = [
+  /(?:人物|角色|形象|造型|画面|构图|场景|背景|风格|表情|动作|姿势|细节).{0,18}(?:调整|改|修改|换|加|补|优化|重画|重新画|再画|继续)/i,
+  /(?:调整|改|修改|换|加|补|优化|重画|重新画|再画|继续).{0,40}(?:人物|角色|形象|造型|画面|构图|场景|背景|风格|表情|动作|姿势|细节|这个|那张|刚才|刚刚|上一张)/i,
+  /(?:全都要|都要|全部要|都加上|全加上|就按这个|就这样|按你说的|照你说的|继续画|接着画|那就画|画完整|重画一张|再来一张)/i
+]
 const SEMANTIC_TOOL_INTENTS = new Set(["chat", "image_generate", "image_edit", "image_analysis", "search"])
 const SEMANTIC_TOOL_INTENT_MIN_CONFIDENCE = 0.7
 const SEMANTIC_TOOL_INTENT_TIMEOUT_MS = 8000
@@ -1517,6 +1522,13 @@ function isDrawTaskStatusInquiry(text = "") {
   return DRAW_TASK_STATUS_PATTERNS.some(pattern => pattern.test(content))
 }
 
+function isDrawContextContinuationRequest(text = "") {
+  const content = normalizeIntentText(text)
+  if (!content) return false
+  if (isImageGenerationRequest(content) || isImageEditRequest(content)) return false
+  return DRAW_CONTEXT_CONTINUATION_PATTERNS.some(pattern => pattern.test(content))
+}
+
 function containsInternalStatusLeak(text = "") {
   const content = String(text || "")
   if (!content.trim()) return false
@@ -1850,6 +1862,7 @@ export class ExamplePlugin extends plugin {
     durableToolRecoveryStarted = true
 
     const recover = async () => {
+      await this.markStaleToolTasksFailed()
       const recoverableTools = Object.values(this.toolInstances || {})
         .filter(tool => typeof tool?.recoverDurableJobs === "function")
       for (const tool of recoverableTools) {
@@ -1949,6 +1962,53 @@ export class ExamplePlugin extends plugin {
     if (!fs.existsSync(this.messageHistoriesDir)) {
       fs.mkdirSync(this.messageHistoriesDir, { recursive: true })
     }
+  }
+
+  async markStaleToolTasksFailed() {
+    const ttlMs = Math.max(60_000, Number(this.config?.longRunningToolStaleMinutes || 8) * 60_000)
+    const now = Date.now()
+    const patterns = [
+      `${this.TASK_STATUS_PREFIX}*`,
+      `${this.ACTIVE_TOOL_TASK_PREFIX}*`
+    ]
+    let checked = 0
+    let marked = 0
+
+    for (const pattern of patterns) {
+      let cursor = "0"
+      do {
+        const reply = await redis.scan(cursor, { MATCH: pattern, COUNT: 200 })
+        cursor = String(reply?.cursor ?? reply?.[0] ?? "0")
+        const keys = reply?.keys ?? reply?.[1] ?? []
+        for (const key of keys) {
+          checked++
+          try {
+            const raw = await redis.get(key)
+            if (!raw) continue
+            const record = JSON.parse(raw)
+            if (!["processing", "tool_running", "running", "queued"].includes(record?.status)) continue
+            const updatedAt = Number(record.updatedAt || record.startedAt || 0)
+            if (updatedAt && now - updatedAt < ttlMs) continue
+
+            const next = {
+              ...record,
+              status: "tool_failed",
+              error: "服务重启或进程退出导致任务中断，请重新发起",
+              updatedAt: now
+            }
+            await redis.set(key, JSON.stringify(next), { EX: this.getTaskStatusTtlSeconds() })
+            marked++
+            if (record?.groupId && record?.messageId) {
+              taskStatusCache.set(this.getTaskStatusCacheKey(record.groupId, record.messageId), next)
+            }
+          } catch (error) {
+            logger.warn(`[持久任务] 清理残留状态失败 key=${key}: ${error.message}`)
+          }
+        }
+      } while (cursor !== "0")
+    }
+
+    if (marked) logger.warn(`[持久任务] 已将 ${marked}/${checked} 个残留运行中任务标记为失败`)
   }
 
   initScheduledTasks() {
@@ -4997,6 +5057,30 @@ ${mcpPrompts}
         }
 
         const imageGenerationReferenceImages = this.getImageGenerationReferenceImages(images, session)
+        const contextualDrawCall = toolChoice === "auto"
+          ? this.resolveContextualDrawGeneration({
+              e,
+              args,
+              msg,
+              images: imageGenerationReferenceImages,
+              currentIntentText,
+              userContent,
+              groupUserMessages: session.groupUserMessages,
+              avatarDrawReference: session.avatarDrawReference
+            })
+          : null
+        if (contextualDrawCall) {
+          session.tools = this.getToolsByName(["bananaTool"])
+          if (session.tools?.length) {
+            toolChoice = { type: "function", function: { name: "bananaTool" } }
+            forcedToolCall = this.buildForcedToolCall("bananaTool", {
+              prompt: contextualDrawCall.prompt,
+              images: imageGenerationReferenceImages
+            })
+            logger.info(`[工具选择] group=${groupId} 上下文衔接使用 bananaTool reason=${contextualDrawCall.reason}`)
+          }
+        }
+
         const semanticDecision = toolChoice === "auto"
           ? await this.classifySemanticToolIntent({
               e,
@@ -5358,6 +5442,85 @@ ${mcpPrompts}
 
     const recent = lines.slice(-8)
     return recent.length ? compactDrawPromptText(recent.join("\n"), maxLength) : ""
+  }
+
+  getRecentDrawContextText(messages = [], currentUserContent = "", maxLength = 1200) {
+    if (!Array.isArray(messages) || !messages.length) return ""
+
+    const current = normalizeForContainment(currentUserContent)
+    const lines = []
+    for (const message of messages) {
+      if (!message || message.role === "system") continue
+      const content = String(message.content || "")
+      if (!content || content.startsWith("【系统提示】")) continue
+
+      for (const rawLine of content.split(/\r?\n/)) {
+        const line = rawLine
+          .replace(/\[CQ:[^\]]+\]/g, " ")
+          .replace(/https?:\/\/\S+/g, "[图片/链接]")
+          .replace(/\s+/g, " ")
+          .trim()
+        if (!line) continue
+        if (/此处为调用工具的结果|调用工具|当前QQ群.*群聊历史记录|系统提示/.test(line)) continue
+        if (/^\[历史处理标记/.test(line)) continue
+        if (current && normalizeForContainment(line).includes(current.slice(0, 32))) continue
+
+        const normalized = normalizeIntentText(line)
+        const looksLikeDrawRequest = isImageGenerationRequest(normalized) ||
+          /(?:画|绘制|生成|出图|做图|捏).{0,80}(?:图|图片|照片|照|插画|角色|人物|场景|完整|出来)/i.test(normalized) ||
+          hasToolCommitmentText(normalized) && /(?:画|生成|出图|做图|捏)/i.test(normalized)
+        if (looksLikeDrawRequest) lines.push(line.slice(0, 220))
+      }
+    }
+
+    const recent = lines.slice(-6)
+    return recent.length ? compactDrawPromptText(recent.join("\n"), maxLength) : ""
+  }
+
+  resolveContextualDrawGeneration(context = {}) {
+    const currentIntentText = String(context.currentIntentText || context.args || context.msg || "").trim()
+    const normalized = normalizeIntentText(currentIntentText)
+    if (!normalized) return null
+    if (isImageGenerationRequest(normalized) || isImageEditRequest(normalized)) return null
+
+    const isStatusInquiry = isDrawTaskStatusInquiry(normalized)
+    const isContinuation = isDrawContextContinuationRequest(normalized)
+    if (!isStatusInquiry && !isContinuation && !context.modelCommittedToDraw) return null
+
+    const quotedContext = this.getQuotedPromptContextText(context.e, context.userContent)
+    const recentContext = this.getRecentDrawContextText(
+      context.groupUserMessages || context.messages || [],
+      context.userContent || currentIntentText,
+      1200
+    )
+    if (isStatusInquiry && !quotedContext && !/(?:我|希洛|好嘞|马上|开始|这就|帮你|给你|那就).{0,40}(?:画|生成|出图|做图|捏)/i.test(recentContext)) {
+      return null
+    }
+    const drawContext = [quotedContext, recentContext].filter(Boolean).join("\n")
+    if (!drawContext) return null
+
+    const headline = isStatusInquiry
+      ? "用户在追问刚才承诺的画图任务，请不要把追问本身画进画面，而是继续完成上下文里的真实画图目标。"
+      : "用户在延续上一轮画图需求，请把本轮补充和上下文合并成新的画面需求。"
+    const supplement = isStatusInquiry ? "" : `用户本轮补充：${currentIntentText}`
+    const rawPrompt = compactDrawPromptText([
+      headline,
+      supplement,
+      "可继承的画图上下文：",
+      drawContext
+    ].filter(Boolean).join("\n"), 2600)
+
+    return {
+      prompt: this.buildImageGenerationPrompt({
+        ...context,
+        prompt: rawPrompt,
+        currentIntentText,
+        userContent: context.userContent,
+        groupUserMessages: context.groupUserMessages
+      }),
+      rawPrompt,
+      reason: isStatusInquiry ? "draw_status_context_recovery" : "draw_context_continuation"
+    }
   }
 
   getUnderstandingEnhancementConfig() {
@@ -5760,6 +5923,16 @@ ${mcpPrompts}
     const userRequestedSearch = isRealtimeInfoRequest(currentIntentText) || isExplicitSearchRequest(currentIntentText)
     const userRequestedImageAnalysis = images.length && isImageAnalysisRequest(currentIntentText)
     const modelCommitted = hasToolCommitmentText(content)
+    const contextualDrawCall = modelCommitted
+      ? this.resolveContextualDrawGeneration({
+          ...context,
+          images,
+          args,
+          msg,
+          currentIntentText,
+          modelCommittedToDraw: /(?:画|生成|出图|做图|捏|绘制)/i.test(normalizeIntentText(content))
+        })
+      : null
 
     if (!modelCommitted && !userRequestedImageEdit && !userRequestedImageGeneration && !userRequestedSearch && !userRequestedImageAnalysis) return null
 
@@ -5791,19 +5964,20 @@ ${mcpPrompts}
         }
       })
     }
-    if (userRequestedImageGeneration || isImageGenerationRequest(combinedText)) {
+    if (contextualDrawCall || userRequestedImageGeneration || isImageGenerationRequest(combinedText)) {
       candidates.push({
         toolName: "bananaTool",
-        reason: "commitment_image_generation",
+        reason: contextualDrawCall?.reason || "commitment_image_generation",
         params: {
-          prompt: this.buildImageGenerationPrompt({
-            e: context.e,
-            args,
-            msg,
-            currentIntentText,
-            userContent: context.userContent,
-            images
-          }),
+          prompt: contextualDrawCall?.prompt || this.buildImageGenerationPrompt({
+              e: context.e,
+              args,
+              msg,
+              currentIntentText,
+              userContent: context.userContent,
+              images,
+              groupUserMessages: context.groupUserMessages
+            }),
           images
         }
       })
