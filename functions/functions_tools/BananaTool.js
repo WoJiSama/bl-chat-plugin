@@ -470,8 +470,8 @@ export class BananaTool extends AbstractTool {
       await this.sendProgress(e, progressMessage);
     }
     const optimizedPrompt = await this.optimizePrompt(config, safeInputPrompt, { hasReferenceImages: images.length > 0 });
-    const finalPrompt = this.sanitizePromptForImageGeneration(optimizedPrompt);
-    const imgurls = await this.buildImageMessages(finalPrompt, images);
+    const finalPrompt = this.sanitizePromptForImageGeneration(optimizedPrompt) || safeInputPrompt || String(prompt || "").trim();
+    if (!finalPrompt) return { error: '图片生成失败: 绘图提示词为空' };
 
     try {
       if (!images.length && imageGenerationConfigs.length) {
@@ -483,6 +483,18 @@ export class BananaTool extends AbstractTool {
       const { imageEditApiUrl: apiUrl, imageEditApiKey: apiKey, imageEditApiModel: model } =
         config.imageEditAiConfig || {};
 
+      if (this.isImagesEditEndpoint(apiUrl)) {
+        const editedImage = await this.generateImageEdit({
+          apiUrl,
+          apiKey,
+          model,
+          size: config.imageEditAiConfig?.imageEditSize || config.imageGenerationAiConfig?.imageGenerationSize || "1024x1024"
+        }, finalPrompt, images);
+        await this.replyImageToRequester(e, editedImage);
+        return '图片编辑成功';
+      }
+
+      const imgurls = await this.buildImageMessages(finalPrompt, images);
       const response = await fetch(apiUrl || DEFAULT_CHAT_IMAGE_URL, {
         method: "POST",
         headers: {
@@ -793,6 +805,72 @@ export class BananaTool extends AbstractTool {
     };
     if (responseFormat) payload.response_format = responseFormat;
     return payload;
+  }
+
+  isImagesEditEndpoint(apiUrl = "") {
+    return /\/images\/edits\/?$/i.test(String(apiUrl || ""));
+  }
+
+  dataUriToBlob(dataUri = "") {
+    const match = String(dataUri || "").match(/^data:([^;,]+);base64,(.+)$/);
+    if (!match) throw new Error("参考图片转换失败");
+    const [, mimeType, base64] = match;
+    return new Blob([Buffer.from(base64, "base64")], { type: mimeType });
+  }
+
+  async buildImageEditFormData(imageEditConfig, prompt, images, responseFormat = "") {
+    const form = new FormData();
+    form.append("model", imageEditConfig.model || "gpt-image-2");
+    form.append("prompt", prompt);
+    form.append("n", "1");
+    if (imageEditConfig.size) form.append("size", imageEditConfig.size);
+    if (responseFormat) form.append("response_format", responseFormat);
+
+    let imageCount = 0;
+    for (const url of images) {
+      if (!url) continue;
+      const imgData = await getBase64Image(url, `reference-${imageCount + 1}.png`);
+      if (imgData.includes("该图片链接已过期") || imgData.includes("无效的图片下载链接") || imgData.includes("无效的图片格式")) {
+        throw new Error(imgData);
+      }
+      const blob = this.dataUriToBlob(imgData);
+      form.append("image", blob, `reference-${imageCount + 1}.png`);
+      imageCount++;
+    }
+
+    if (!imageCount) throw new Error("没有可用的参考图片");
+    return form;
+  }
+
+  async requestImageEdit(imageEditConfig, prompt, images, responseFormat = "") {
+    const form = await this.buildImageEditFormData(imageEditConfig, prompt, images, responseFormat);
+    return await this.fetchWithTimeout(imageEditConfig.apiUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${imageEditConfig.apiKey || 'sk-xxxxxx'}`,
+      },
+      body: form,
+    }, IMAGE_GENERATION_TIMEOUT_MS);
+  }
+
+  async generateImageEdit(imageEditConfig, prompt, images) {
+    try {
+      let result = await this.parseImageGenerationResponse(
+        await this.requestImageEdit(imageEditConfig, prompt, images, "url")
+      );
+
+      if (!result.ok && this.shouldRetryWithoutUrlResponseFormat(result.errorMessage)) {
+        this.logInfo("[图片编辑] 上游不支持 response_format=url，退回默认返回格式");
+        result = await this.parseImageGenerationResponse(
+          await this.requestImageEdit(imageEditConfig, prompt, images)
+        );
+      }
+
+      if (result.ok) return result.image;
+      throw new Error(result.errorMessage || "未接收到有效图片");
+    } catch (error) {
+      throw new Error(error?.message || String(error));
+    }
   }
 
   async requestImageGeneration(imageGenerationConfig, prompt, responseFormat = "") {

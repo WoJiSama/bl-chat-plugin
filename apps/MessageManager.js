@@ -30,8 +30,16 @@ export class MessageRecordPlugin extends plugin {
                     fnc: 'searchArchive'
                 },
                 {
+                    reg: '^[.。]群聊天记录\\s+管理员(添加|删除)[\\s\\S]*',
+                    fnc: 'manageArchiveAdmin'
+                },
+                {
                     reg: '^#?聊天记录管理员(添加|删除)[\\s\\S]*',
                     fnc: 'manageArchiveAdmin'
+                },
+                {
+                    reg: '^[.。]群聊天记录[\\s\\S]*',
+                    fnc: 'searchArchive'
                 },
                 {
                     reg: '.*',
@@ -60,7 +68,10 @@ export class MessageRecordPlugin extends plugin {
     }
 
     parseArchiveSearch(msg = "", e = {}) {
-        const text = String(msg || "").replace(/^#?(查|搜索)(聊天|群聊)记录\s*/, "").trim();
+        const text = String(msg || "")
+            .replace(/^[.。]群聊天记录\s*/, "")
+            .replace(/^#?(查|搜索)(聊天|群聊)记录\s*/, "")
+            .trim();
         const opts = {
             type: "group",
             groupId: e.group_id ? String(e.group_id) : "",
@@ -70,7 +81,7 @@ export class MessageRecordPlugin extends plugin {
         const pairs = [
             [/群(?:号)?[=:：]\s*(\d+)/, "groupId"],
             [/(?:qq|QQ|用户|用户QQ)[=:：]\s*(\d+)/, "qq"],
-            [/(?:关键词|关键字|kw|keyword)[=:：]\s*("[^"]+"|'[^']+'|\S+)/, "keyword"],
+            [/(?:关键词|关键字|key|kw|keyword)[=:：]\s*("[^"]+"|'[^']+'|\S+)/, "keyword"],
             [/(?:正则|regex)[=:：]\s*("[^"]+"|'[^']+'|\S+)/, "regex"],
             [/(?:上下文|周围|context|around)[=:：]?\s*(\d+)/, "contextAround"],
             [/(?:前后|最近)[=:：]?\s*(\d+)/, "around"],
@@ -103,6 +114,15 @@ export class MessageRecordPlugin extends plugin {
         return opts;
     }
 
+    buildArchiveHelp(e = {}) {
+        const groupHint = e.group_id ? `群=${e.group_id}` : "群=953676639";
+        return [
+            "用法：.群聊天记录 " + groupHint + " [QQ=123456] [key=关键词] [前后=10] [数量=30]",
+            "字段：群=群号，QQ=用户QQ，key/关键词=搜索词，前后=最近条数，上下文=带出前后聊天，数量=最多返回条数",
+            "管理：.群聊天记录 管理员添加 QQ号 / .群聊天记录 管理员删除 QQ号"
+        ].join("\n");
+    }
+
     buildArchiveForwardMessages(records = []) {
         const messages = [];
         for (const record of records) {
@@ -116,9 +136,13 @@ export class MessageRecordPlugin extends plugin {
     }
 
     async searchArchive(e) {
+        if (/^[.。]群聊天记录\s*$/i.test(String(e.msg || ""))) {
+            await e.reply(this.buildArchiveHelp(e));
+            return true;
+        }
         const opts = this.parseArchiveSearch(e.msg, e);
         if (!opts.groupId) {
-            await e.reply("请提供群号，例如：#查聊天记录 群=953676639 关键词=奶龙 前后=10");
+            await e.reply(this.buildArchiveHelp(e));
             return true;
         }
         if (!this.archiveManager.canQuery(e, opts.groupId)) {
