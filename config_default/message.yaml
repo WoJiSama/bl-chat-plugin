@@ -31,6 +31,17 @@ pluginSettings:
     downloadMedia: false
     baseDir: data/message_archive
     cleanupIntervalHours: 6
+  umaRace:
+    enabled: true
+    minPlayers: 2
+    maxPlayers: 12
+    lobbySeconds: 60
+    cooldownSeconds: 30
+    winPoints: 5
+    secondPoints: 2
+    thirdPoints: 1
+    rankLimit: 10
+    baseDir: data/uma_race
   maxToolRounds: 2
   conversationTrackingEnabled: false
   conversationTrackingTimeout: 2
