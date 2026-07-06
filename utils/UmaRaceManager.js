@@ -578,10 +578,15 @@ export class UmaRaceManager {
     }
     this.rooms.set(groupId, room)
     this.joinRace(e)
+    const starter = room.participants.get(this.getUserId(e))
+    const starterLine = starter
+      ? `已自动报名：${starter.nickname}「${starter.umaName}」`
+      : "已自动报名开局者"
 
     return [
       "赛马娘小游戏开局啦。",
       this.formatTrack(room.track),
+      starterLine,
       `报名：.赛马娘 加入 [策略]`,
       this.formatStrategyTips(),
       `开跑：.赛马娘 开跑`,
