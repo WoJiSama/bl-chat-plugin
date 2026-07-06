@@ -81,6 +81,7 @@ const TRAINING_TYPES = {
     decay: 0.008,
     minRate: 0.55,
     gain: 1,
+    maxTargetValue: 19,
     pity: 3,
     failPenaltyCount: 1,
     failPenaltyChance: 0.25
@@ -660,6 +661,16 @@ export class UmaRaceManager {
         `${parsed.attribute.label}已经到上限 ${ATTRIBUTE_MAX}，这次不用训练。`
       ].join("\n")
     }
+    if (parsed.type.maxTargetValue && currentValue > parsed.type.maxTargetValue) {
+      return [
+        `${uma.name} 当前属性：`,
+        this.formatTrainingAttributes(uma.attributes),
+        `当前积分：${currentPoints}`,
+        "",
+        `${parsed.attribute.label}已经达到 ${currentValue}，基础训练不能继续提升这个属性。`,
+        "可以改用：.赛马娘 训练 强化 [属性] 或 .赛马娘 训练 赌狗 [属性]"
+      ].join("\n")
+    }
 
     const successRate = this.getTrainingSuccessRate(parsed.type, currentValue)
     const pityBefore = this.getTrainingPity(record, parsed.type.key, parsed.attribute.key)
@@ -751,7 +762,7 @@ export class UmaRaceManager {
       `当前积分：${Number(record.points) || 0}`,
       "",
       "训练方式：",
-      ".赛马娘 训练 基础 [属性] - 消耗 2 积分，稳一点",
+      ".赛马娘 训练 基础 [属性] - 消耗 2 积分，单项 20 后不可用",
       ".赛马娘 训练 强化 [属性] - 消耗 5 积分，提升更多但有风险",
       ".赛马娘 训练 赌狗 [属性] - 消耗 8 积分，波动最大",
       "",
