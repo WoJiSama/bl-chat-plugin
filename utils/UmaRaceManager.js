@@ -137,6 +137,53 @@ const TRACKS = [
   }
 ]
 
+const RACE_TWISTS = [
+  {
+    name: "慢节奏",
+    description: "前半程没人愿意带速度，后半段才突然开始提速。",
+    fit: { conserve: 6, steady: 4, burst: -3, inside: -2, normal: 1 },
+    event: "{name} 被慢节奏拖住了一会儿，最后才找到加速窗口。"
+  },
+  {
+    name: "突然提速",
+    description: "中段有人强行拉速度，比赛节奏被提前点燃。",
+    fit: { burst: 8, inside: 4, conserve: -6, steady: -1, normal: 1 },
+    event: "{name} 正好接住了中段提速，位置一下子变得有威胁。"
+  },
+  {
+    name: "位置混战",
+    description: "前排互相卡位，抢线和避让都变得更重要。",
+    fit: { inside: 7, steady: 5, burst: -4, conserve: -2, normal: 0 },
+    event: "{name} 在混战里一直找缝，几次差点被挤出路线。"
+  },
+  {
+    name: "外道顺风",
+    description: "外侧风向很好，后排和外侧冲刺更容易打开空间。",
+    fit: { burst: 5, conserve: 5, inside: -6, steady: 0, normal: 2 },
+    event: "{name} 从外侧借到顺风，最后一段速度明显起来了。"
+  },
+  {
+    name: "节奏很乱",
+    description: "全程几次变速，稳定和运气都会被放大。",
+    fit: { steady: 5, normal: 4, burst: -2, conserve: -2, inside: -1 },
+    event: "{name} 在乱节奏里没有慌，几次变速都跟得还算稳。"
+  },
+  {
+    name: "终点前逆风",
+    description: "最后直线逆风明显，太早冲刺的人容易被反噬。",
+    fit: { steady: 5, conserve: 4, burst: -8, inside: 1, normal: 2 },
+    event: "{name} 顶着逆风往前压，冲刺没有想象中那么轻松。"
+  }
+]
+
+const CONDITION_EVENTS = [
+  { min: 8, text: "{name} 今天状态很好，脚步明显比平时轻。" },
+  { min: 4, text: "{name} 热身感觉不错，中段还多留了一点余力。" },
+  { min: -3, text: "{name} 状态普通，基本按自己的节奏在跑。" },
+  { min: -7, text: "{name} 今天状态有点紧，前半段没完全放开。" },
+  { min: -99, text: "{name} 起跑前就有点不在状态，只能边跑边找感觉。" }
+]
+
 function nowIso() {
   return new Date().toISOString()
 }
@@ -243,6 +290,10 @@ export class UmaRaceManager {
 
   pickTrack() {
     return pick(TRACKS)
+  }
+
+  pickTwist() {
+    return pick(RACE_TWISTS)
   }
 
   parseStrategy(input = "") {
@@ -376,7 +427,7 @@ export class UmaRaceManager {
     this.rooms.delete(groupId)
     this.lastRaceAt.set(groupId, Date.now())
 
-    const result = this.simulateRace(players, room.track)
+    const result = this.simulateRace(players, room.track, this.pickTwist())
     const awards = this.getAwards(config)
     const awardLines = await this.applyAwards(result.ranking, awards, config)
     return this.formatRaceResult(result, awardLines)
@@ -403,7 +454,8 @@ export class UmaRaceManager {
     return available.length ? pick(available) : `临时选手${usedNames.size + 1}`
   }
 
-  simulateRace(players, track = pick(TRACKS)) {
+  simulateRace(players, track = pick(TRACKS), twist = pick(RACE_TWISTS)) {
+    const strategyCounts = this.countStrategies(players)
     const runners = players.map(player => {
       const speed = 70 + Math.random() * 35
       const stamina = 70 + Math.random() * 35
@@ -418,17 +470,23 @@ export class UmaRaceManager {
         luck: (track.weights.luck + strategy.weights.luck) / 2
       }
       const fitBonus = Number(track.fit?.[strategyKey]) || 0
+      const twistBonus = Number(twist.fit?.[strategyKey]) || 0
       const riskPenalty = Math.random() < strategy.risk ? randomBetween(10, 24) : 0
       const insideCrowdPenalty = strategyKey === "inside" && players.length >= 7 ? randomBetween(0, 10) : 0
+      const strategyCrowdPenalty = this.getStrategyCrowdPenalty(strategyKey, strategyCounts, players.length)
+      const conditionBonus = randomBetween(-9, 10)
       const variance = randomBetween(-strategy.variance, strategy.variance)
       const score = speed * weights.speed +
         stamina * weights.stamina +
         focus * weights.focus +
         luck * weights.luck +
         fitBonus +
+        twistBonus +
+        conditionBonus +
         variance -
         riskPenalty -
-        insideCrowdPenalty
+        insideCrowdPenalty -
+        strategyCrowdPenalty
       return {
         ...player,
         speed,
@@ -438,24 +496,63 @@ export class UmaRaceManager {
         strategyKey,
         strategyLabel: strategy.label,
         fitBonus,
+        twistBonus,
+        conditionBonus,
         riskPenalty,
         insideCrowdPenalty,
+        strategyCrowdPenalty,
         score,
-        event: this.buildRunnerEvent(player.nickname, strategy, track, { fitBonus, riskPenalty, insideCrowdPenalty })
+        event: this.buildRunnerEvent(player.nickname, strategy, track, twist, {
+          fitBonus,
+          twistBonus,
+          conditionBonus,
+          riskPenalty,
+          insideCrowdPenalty,
+          strategyCrowdPenalty
+        })
       }
     })
 
     runners.sort((a, b) => b.score - a.score)
-    const highlights = this.buildRaceHighlights(runners, track)
-    return { ranking: runners, highlights, track }
+    const highlights = this.buildRaceHighlights(runners, track, twist)
+    return { ranking: runners, highlights, track, twist }
   }
 
-  buildRunnerEvent(name, strategy, track, details = {}) {
+  countStrategies(players) {
+    const counts = new Map()
+    for (const player of players) {
+      const key = player.strategyKey && STRATEGIES[player.strategyKey] ? player.strategyKey : "normal"
+      counts.set(key, (counts.get(key) || 0) + 1)
+    }
+    return counts
+  }
+
+  getStrategyCrowdPenalty(strategyKey, strategyCounts, totalPlayers) {
+    const count = strategyCounts.get(strategyKey) || 0
+    if (count <= 1 || totalPlayers <= 2) return 0
+    const crowdedRatio = count / totalPlayers
+    if (crowdedRatio < 0.45) return 0
+    return randomBetween(2, Math.min(14, 2 + (count - 1) * 4))
+  }
+
+  buildRunnerEvent(name, strategy, track, twist, details = {}) {
     if (details.riskPenalty > 0) {
       return `${name} 选择${strategy.label}，但这次有点用力过猛，节奏被打乱了一段。`
     }
     if (details.insideCrowdPenalty > 0) {
       return `${name} 选择抢内道，可这局人太多，刚进弯道就被堵了一下。`
+    }
+    if (details.strategyCrowdPenalty > 0) {
+      return `${name} 也选了${strategy.label}，但同策略的人太多，节奏互相挤在一起。`
+    }
+    if (details.twistBonus >= 6) {
+      return (twist.event || "{name} 抓住了临场变化。").replace("{name}", name)
+    }
+    if (details.twistBonus <= -6) {
+      return `${name} 选择${strategy.label}，但临场变化是${twist.name}，这次有点被克到了。`
+    }
+    if (Math.abs(details.conditionBonus) >= 4) {
+      return this.formatConditionEvent(name, details.conditionBonus)
     }
     if (details.fitBonus >= 8) {
       return `${name} 选择${strategy.label}，刚好很适合${track.name}，优势越跑越明显。`
@@ -466,15 +563,21 @@ export class UmaRaceManager {
     return strategy.event.replace("{name}", name)
   }
 
-  buildRaceHighlights(runners, track) {
+  formatConditionEvent(name, conditionBonus) {
+    const item = CONDITION_EVENTS.find(event => conditionBonus >= event.min) || CONDITION_EVENTS[CONDITION_EVENTS.length - 1]
+    return item.text.replace("{name}", name)
+  }
+
+  buildRaceHighlights(runners, track, twist) {
     const top = runners.slice(0, Math.min(4, runners.length))
     const highlightSet = new Set()
+    highlightSet.add(`临场变化：${twist.name} - ${twist.description}`)
     highlightSet.add(pick(track.events).replace("{name}", top[0]?.nickname || "前排"))
     for (const runner of top) {
       if (runner?.event) highlightSet.add(runner.event)
-      if (highlightSet.size >= 4) break
+      if (highlightSet.size >= 5) break
     }
-    return [...highlightSet].slice(0, 4)
+    return [...highlightSet].slice(0, 5)
   }
 
   getAwards(config) {
