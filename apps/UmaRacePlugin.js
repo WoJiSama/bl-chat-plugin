@@ -10,6 +10,9 @@ export class UmaRacePlugin extends plugin {
       rule: [
         { reg: "^[.。]赛马娘\\s*$", fnc: "showHelp" },
         { reg: "^[.。]赛马娘\\s*(帮助|help)\\s*$", fnc: "showHelp" },
+        { reg: "^[.。]赛马娘\\s*(领养|创建|注册)\\s+[\\s\\S]+$", fnc: "adoptUma" },
+        { reg: "^[.。]赛马娘\\s*重新领养\\s+[\\s\\S]+$", fnc: "readoptUma" },
+        { reg: "^[.。]赛马娘\\s*(我的赛马娘|赛马娘信息|属性|六维)\\s*$", fnc: "showUma" },
         { reg: "^[.。]赛马娘\\s*(开始|开局|创建)\\s*$", fnc: "startRace" },
         { reg: "^[.。]赛马娘\\s*(加入|参加|上马|报名)([\\s\\S]*)$", fnc: "joinRace" },
         { reg: "^[.。]赛马娘\\s*(开跑|开赛|比赛|冲|跑)\\s*$", fnc: "runRace" },
@@ -27,6 +30,21 @@ export class UmaRacePlugin extends plugin {
 
   async startRace(e) {
     await e.reply(umaRaceManager.startRace(e))
+    return true
+  }
+
+  async adoptUma(e) {
+    await e.reply(await umaRaceManager.adoptUma(e))
+    return true
+  }
+
+  async readoptUma(e) {
+    await e.reply(await umaRaceManager.adoptUma(e, { overwrite: true }))
+    return true
+  }
+
+  async showUma(e) {
+    await e.reply(umaRaceManager.showUma(e))
     return true
   }
 

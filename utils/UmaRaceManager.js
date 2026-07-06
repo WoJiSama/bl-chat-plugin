@@ -26,6 +26,28 @@ const NPC_NAMES = [
   "夜樱步"
 ]
 
+const ATTRIBUTE_DEFS = [
+  { key: "speed", label: "速度" },
+  { key: "stamina", label: "耐力" },
+  { key: "power", label: "爆发" },
+  { key: "focus", label: "稳定" },
+  { key: "wisdom", label: "判断" },
+  { key: "luck", label: "运气" }
+]
+
+const ATTRIBUTE_TOTAL = 40
+
+const PERSONALITY_ATTRIBUTE_RULES = [
+  { pattern: /温柔|体贴|照顾|可靠|沉稳|稳重|安静|冷静|害羞|内向/, add: { focus: 3, wisdom: 2, stamina: 1 } },
+  { pattern: /活泼|元气|开朗|外向|吵闹|调皮|快乐|阳光/, add: { speed: 3, luck: 2, power: 1 } },
+  { pattern: /不服输|热血|胜负欲|骄傲|倔强|拼命|冲动|莽|强势/, add: { power: 4, speed: 2 } },
+  { pattern: /聪明|机灵|冷静|理性|策略|观察|判断|腹黑|狡猾/, add: { wisdom: 4, focus: 2 } },
+  { pattern: /耐心|坚韧|努力|认真|持久|长跑|能忍|执着/, add: { stamina: 4, focus: 2 } },
+  { pattern: /幸运|随缘|玄学|天选|欧皇|奇迹/, add: { luck: 5, speed: 1 } },
+  { pattern: /自由|飘忽|神秘|浪漫|梦幻|天然|迷糊/, add: { luck: 3, wisdom: 2, speed: 1 } },
+  { pattern: /优雅|高贵|大小姐|端庄|自信|从容/, add: { wisdom: 3, focus: 2, power: 1 } }
+]
+
 const STRATEGIES = {
   normal: {
     label: "正常跑",
@@ -214,6 +236,25 @@ function formatDuration(seconds) {
   return `${Math.max(1, Math.round(seconds))} 秒`
 }
 
+function hashString(text = "") {
+  let hash = 2166136261
+  for (const char of String(text)) {
+    hash ^= char.charCodeAt(0)
+    hash = Math.imul(hash, 16777619)
+  }
+  return hash >>> 0
+}
+
+function seededRandom(seed) {
+  let state = seed >>> 0
+  return () => {
+    state = Math.imul(state + 0x6D2B79F5, 0x85EBCA6B) >>> 0
+    state ^= state >>> 13
+    state = Math.imul(state, 0xC2B2AE35) >>> 0
+    return ((state ^ (state >>> 16)) >>> 0) / 4294967296
+  }
+}
+
 export class UmaRaceManager {
   constructor({ cwd = process.cwd(), logger = globalThis.logger } = {}) {
     this.cwd = cwd
@@ -280,6 +321,165 @@ export class UmaRaceManager {
     return this.writeChain
   }
 
+  getUserId(e) {
+    return String(e?.user_id || e?.sender?.user_id || "")
+  }
+
+  getPlayerRecord(userId, config = this.getConfig()) {
+    if (!userId) return null
+    const data = this.readPoints(config)
+    return data.players?.[String(userId)] || null
+  }
+
+  getPlayerUma(userId, config = this.getConfig()) {
+    const record = this.getPlayerRecord(userId, config)
+    return record?.uma && this.isValidAttributes(record.uma.attributes) ? record.uma : null
+  }
+
+  isValidAttributes(attributes = {}) {
+    return ATTRIBUTE_DEFS.every(def => Number.isFinite(Number(attributes[def.key])))
+  }
+
+  parseAdoptionInput(msg = "") {
+    const text = String(msg || "")
+      .replace(/^[.。]赛马娘\s*(重新领养|领养|创建|注册)\s*/u, "")
+      .trim()
+    if (!text) return null
+    const [name = "", ...rest] = text.split(/\s+/)
+    const personality = rest.join(" ").trim()
+    return {
+      name: escapeName(name).slice(0, 12),
+      personality: personality.slice(0, 120)
+    }
+  }
+
+  buildAttributeScores(personality = "") {
+    const scores = Object.fromEntries(ATTRIBUTE_DEFS.map(def => [def.key, 1]))
+    for (const rule of PERSONALITY_ATTRIBUTE_RULES) {
+      if (!rule.pattern.test(personality)) continue
+      for (const [key, value] of Object.entries(rule.add || {})) {
+        scores[key] = (scores[key] || 1) + value
+      }
+    }
+    return scores
+  }
+
+  generateAttributes(name = "", personality = "") {
+    const base = Object.fromEntries(ATTRIBUTE_DEFS.map(def => [def.key, 4]))
+    const extraPoints = ATTRIBUTE_TOTAL - ATTRIBUTE_DEFS.length * 4
+    let remaining = extraPoints
+    const scores = this.buildAttributeScores(`${name} ${personality}`)
+    const totalScore = ATTRIBUTE_DEFS.reduce((sum, def) => sum + (scores[def.key] || 1), 0)
+    const fractional = []
+
+    for (const def of ATTRIBUTE_DEFS) {
+      const exact = extraPoints * (scores[def.key] || 1) / totalScore
+      const add = Math.floor(exact)
+      base[def.key] += add
+      fractional.push({ key: def.key, rest: exact - add })
+      remaining -= add
+    }
+
+    const random = seededRandom(hashString(`${name}|${personality}`))
+    fractional.sort((a, b) => b.rest - a.rest || random() - 0.5)
+    for (let index = 0; index < remaining; index++) {
+      base[fractional[index % fractional.length].key] += 1
+    }
+
+    this.normalizeAttributeTotal(base)
+    return base
+  }
+
+  normalizeAttributeTotal(attributes) {
+    let total = this.sumAttributes(attributes)
+    const order = [...ATTRIBUTE_DEFS].sort((a, b) => Number(attributes[b.key]) - Number(attributes[a.key]))
+    while (total > ATTRIBUTE_TOTAL) {
+      const target = order.find(def => attributes[def.key] > 1)
+      if (!target) break
+      attributes[target.key] -= 1
+      total--
+    }
+    let addIndex = 0
+    while (total < ATTRIBUTE_TOTAL) {
+      attributes[ATTRIBUTE_DEFS[addIndex % ATTRIBUTE_DEFS.length].key] += 1
+      addIndex++
+      total++
+    }
+  }
+
+  sumAttributes(attributes = {}) {
+    return ATTRIBUTE_DEFS.reduce((sum, def) => sum + (Number(attributes[def.key]) || 0), 0)
+  }
+
+  formatAttributes(attributes = {}) {
+    return ATTRIBUTE_DEFS
+      .map(def => `${def.label}${Number(attributes[def.key]) || 0}`)
+      .join(" / ")
+  }
+
+  async adoptUma(e, { overwrite = false } = {}) {
+    const config = this.getConfig()
+    if (!config.enabled) return "赛马娘小游戏现在没开。"
+    const userId = this.getUserId(e)
+    if (!userId) return "没拿到你的 QQ 号，领养失败。"
+    const parsed = this.parseAdoptionInput(e?.msg)
+    if (!parsed?.name) {
+      return "格式：.赛马娘 领养 名字 性格描述\n例如：.赛马娘 领养 小春 温柔但不服输，关键时刻会拼一把"
+    }
+    if (!parsed.personality) {
+      return "还需要写一点期待的性格描述，例如：温柔但不服输。"
+    }
+
+    const data = this.readPoints(config)
+    const record = data.players[userId] || {
+      userId,
+      nickname: this.getDisplayName(e),
+      points: 0,
+      wins: 0,
+      races: 0,
+      podiums: 0,
+      updatedAt: nowIso()
+    }
+    if (record.uma && !overwrite) {
+      return `你已经领养了「${record.uma.name}」。如果要重建，使用：.赛马娘 重新领养 名字 性格描述`
+    }
+
+    const uma = {
+      name: parsed.name,
+      personality: parsed.personality,
+      attributes: this.generateAttributes(parsed.name, parsed.personality),
+      total: ATTRIBUTE_TOTAL,
+      createdAt: nowIso()
+    }
+    record.nickname = this.getDisplayName(e)
+    record.uma = uma
+    record.updatedAt = nowIso()
+    data.players[userId] = record
+    await this.writePoints(data, config)
+
+    return [
+      `领养成功：${uma.name}`,
+      `性格：${uma.personality}`,
+      `六维：${this.formatAttributes(uma.attributes)}`,
+      `初始总点数：${this.sumAttributes(uma.attributes)}`
+    ].join("\n")
+  }
+
+  showUma(e) {
+    const userId = this.getUserId(e)
+    if (!userId) return "没拿到你的 QQ 号。"
+    const record = this.getPlayerRecord(userId)
+    const uma = record?.uma
+    if (!uma) return "你还没有领养赛马娘。格式：.赛马娘 领养 名字 性格描述"
+    return [
+      `你的赛马娘：${uma.name}`,
+      `性格：${uma.personality || "未记录"}`,
+      `六维：${this.formatAttributes(uma.attributes)}`,
+      `初始总点数：${this.sumAttributes(uma.attributes)}`,
+      `积分：${Number(record.points) || 0}，胜场：${Number(record.wins) || 0}，参赛：${Number(record.races) || 0}`
+    ].join("\n")
+  }
+
   getRoom(groupId) {
     return this.rooms.get(String(groupId || ""))
   }
@@ -320,6 +520,9 @@ export class UmaRaceManager {
     const config = this.getConfig()
     if (!config.enabled) return "赛马娘小游戏现在没开。"
     if (!e?.group_id) return "这个小游戏要在群里玩。"
+    if (!this.getPlayerUma(this.getUserId(e), config)) {
+      return "你还没有领养自己的赛马娘。先用：.赛马娘 领养 名字 性格描述"
+    }
 
     const groupId = String(e.group_id)
     const existing = this.getRoom(groupId)
@@ -373,6 +576,8 @@ export class UmaRaceManager {
 
     const userId = String(e.user_id || e.sender?.user_id || "")
     if (!userId) return "没拿到你的 QQ 号，报名失败。"
+    const uma = this.getPlayerUma(userId, config)
+    if (!uma) return "你还没有领养自己的赛马娘。先用：.赛马娘 领养 名字 性格描述"
     const strategy = this.parseStrategy(strategyText)
     if (room.participants.has(userId)) {
       const player = room.participants.get(userId)
@@ -385,11 +590,13 @@ export class UmaRaceManager {
     room.participants.set(userId, {
       userId,
       nickname: this.getDisplayName(e),
+      umaName: uma.name,
+      attributes: uma.attributes,
       strategyKey: this.getStrategyKey(strategy),
       strategyLabel: strategy.label,
       joinedAt: Date.now()
     })
-    return `报名成功：${this.getDisplayName(e)}，策略：${strategy.label}（${room.participants.size}/${config.maxPlayers}）`
+    return `报名成功：${this.getDisplayName(e)} 的「${uma.name}」，策略：${strategy.label}（${room.participants.size}/${config.maxPlayers}）`
   }
 
   getStrategyKey(strategy) {
@@ -442,6 +649,8 @@ export class UmaRaceManager {
       players.push({
         userId: `npc:${Date.now()}:${index}`,
         nickname: name,
+        umaName: name,
+        attributes: this.generateAttributes(name, pick(["稳重可靠", "活泼开朗", "不服输", "聪明冷静", "耐心坚韧", "幸运自由"])),
         strategyKey: pick(["normal", "steady", "burst", "conserve", "inside"]),
         isNpc: true,
         joinedAt: Date.now()
@@ -457,10 +666,15 @@ export class UmaRaceManager {
   simulateRace(players, track = pick(TRACKS), twist = pick(RACE_TWISTS)) {
     const strategyCounts = this.countStrategies(players)
     const runners = players.map(player => {
-      const speed = 70 + Math.random() * 35
-      const stamina = 70 + Math.random() * 35
-      const focus = 70 + Math.random() * 35
-      const luck = 60 + Math.random() * 45
+      const attributes = this.isValidAttributes(player.attributes)
+        ? player.attributes
+        : this.generateAttributes(player.umaName || player.nickname, "均衡")
+      const speed = this.rollAttributeValue(attributes.speed)
+      const stamina = this.rollAttributeValue(attributes.stamina)
+      const power = this.rollAttributeValue(attributes.power)
+      const focus = this.rollAttributeValue(attributes.focus)
+      const wisdom = this.rollAttributeValue(attributes.wisdom)
+      const luck = this.rollAttributeValue(attributes.luck, 50, 6)
       const strategyKey = player.strategyKey && STRATEGIES[player.strategyKey] ? player.strategyKey : "normal"
       const strategy = STRATEGIES[strategyKey]
       const weights = {
@@ -480,6 +694,8 @@ export class UmaRaceManager {
         stamina * weights.stamina +
         focus * weights.focus +
         luck * weights.luck +
+        power * 0.16 +
+        wisdom * 0.13 +
         fitBonus +
         twistBonus +
         conditionBonus +
@@ -491,8 +707,11 @@ export class UmaRaceManager {
         ...player,
         speed,
         stamina,
+        power,
         focus,
+        wisdom,
         luck,
+        attributes,
         strategyKey,
         strategyLabel: strategy.label,
         fitBonus,
@@ -525,6 +744,10 @@ export class UmaRaceManager {
       counts.set(key, (counts.get(key) || 0) + 1)
     }
     return counts
+  }
+
+  rollAttributeValue(attribute, base = 48, scale = 5) {
+    return base + (Number(attribute) || 0) * scale + randomBetween(0, 18)
   }
 
   getStrategyCrowdPenalty(strategyKey, strategyCounts, totalPlayers) {
@@ -621,7 +844,7 @@ export class UmaRaceManager {
 
   formatRaceResult(result, awardLines) {
     const rankingLines = result.ranking.slice(0, 8).map((runner, index) =>
-      `${index + 1}. ${runner.nickname}${runner.isNpc ? "（NPC）" : ""}（${runner.strategyLabel || "正常跑"}）`
+      `${index + 1}. ${this.formatRunnerName(runner)}（${runner.strategyLabel || "正常跑"}）`
     )
     return [
       "赛马结果出炉：",
@@ -633,6 +856,12 @@ export class UmaRaceManager {
       "",
       awardLines.length ? `积分：\n${awardLines.join("\n")}` : "积分：本局无人获得积分"
     ].join("\n")
+  }
+
+  formatRunnerName(runner) {
+    const name = runner.umaName || runner.nickname
+    if (runner.isNpc) return `${name}（NPC）`
+    return `${runner.nickname}「${name}」`
   }
 
   showScore(e) {
@@ -667,6 +896,8 @@ export class UmaRaceManager {
   showHelp() {
     return [
       "赛马娘小游戏：",
+      ".赛马娘 领养 名字 性格描述 - 创建自己的赛马娘",
+      ".赛马娘 我的赛马娘 - 查看六维属性",
       ".赛马娘 开始 - 开一局",
       ".赛马娘 加入 [策略] - 报名，可选策略",
       "策略：稳一点 / 拼一把 / 留体力 / 抢内道；不填就是正常跑",
