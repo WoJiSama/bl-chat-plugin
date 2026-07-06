@@ -2122,6 +2122,57 @@ export class UmaRaceManager {
     ].join("\n")
   }
 
+  parseScoreAdjustInput(msg = "") {
+    const text = String(msg || "")
+      .replace(/^[.。]赛马娘\s*(加积分|改积分|调整积分)\s*/u, "")
+      .trim()
+    const qq = text.match(/\b\d{5,12}\b/)?.[0]
+    const numberMatches = [...text.matchAll(/[+-]?\d+/g)].map(match => match[0])
+    const amountText = numberMatches.find(value => value !== qq)
+    const amount = Number(amountText)
+    if (!qq || !Number.isFinite(amount)) return null
+    return { userId: qq, amount }
+  }
+
+  async adjustScore(e) {
+    if (!e?.isMaster) return "只有主人可以调整赛马娘积分。"
+    const parsed = this.parseScoreAdjustInput(e?.msg)
+    if (!parsed) {
+      return [
+        "格式：.赛马娘 加积分 QQ 分数",
+        "例：.赛马娘 加积分 123456789 10",
+        "扣分也可以用负数：.赛马娘 加积分 123456789 -5"
+      ].join("\n")
+    }
+
+    const config = this.getConfig()
+    const data = this.readPoints(config)
+    const existing = data.players?.[parsed.userId]
+    const before = Number(existing?.points) || 0
+    const after = before + parsed.amount
+    const record = existing || {
+      userId: parsed.userId,
+      nickname: parsed.userId,
+      points: 0,
+      wins: 0,
+      races: 0,
+      podiums: 0,
+      updatedAt: nowIso()
+    }
+
+    record.points = after
+    record.updatedAt = nowIso()
+    data.players[parsed.userId] = record
+    await this.writePoints(data, config)
+
+    return [
+      "赛马娘积分已调整。",
+      `QQ：${parsed.userId}`,
+      `变动：${parsed.amount >= 0 ? "+" : ""}${parsed.amount}`,
+      `积分：${before} -> ${after}`
+    ].join("\n")
+  }
+
   showRank(limit) {
     const config = this.getConfig()
     const finalLimit = safeNumber(limit, config.rankLimit, 3, 50)

@@ -21,6 +21,7 @@ export class UmaRacePlugin extends plugin {
         { reg: "^[.。]赛马娘\\s*(决策|选择|行动)\\s+[\\s\\S]+$", fnc: "raceDecision" },
         { reg: "^[.。]赛马娘\\s*(开跑|开赛|比赛|冲|跑)\\s*$", fnc: "runRace" },
         { reg: "^[.。]赛马娘\\s*(取消|关闭|结束)\\s*$", fnc: "cancelRace" },
+        { reg: "^[.。]赛马娘\\s*(加积分|改积分|调整积分)\\s+[\\s\\S]+$", fnc: "adjustScore" },
         { reg: "^[.。]赛马娘\\s*(积分|分数|我的积分)\\s*$", fnc: "showScore" },
         { reg: "^[.。]赛马娘\\s*(排行|排行榜|排名)(\\s+\\d+)?\\s*$", fnc: "showRank" }
       ]
@@ -90,6 +91,11 @@ export class UmaRacePlugin extends plugin {
 
   async showScore(e) {
     await e.reply(umaRaceManager.showScore(e))
+    return true
+  }
+
+  async adjustScore(e) {
+    await e.reply(await umaRaceManager.adjustScore(e))
     return true
   }
 
