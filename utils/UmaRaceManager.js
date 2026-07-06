@@ -126,6 +126,60 @@ const PERSONALITY_ATTRIBUTE_RULES = [
   { pattern: /优雅|高贵|大小姐|端庄|自信|从容/, add: { wisdom: 3, focus: 2, power: 1 } }
 ]
 
+const PERSONALITY_TRAITS = [
+  {
+    key: "gentle",
+    label: "温柔可靠",
+    pattern: /温柔|体贴|照顾|可靠|沉稳|稳重|安静|害羞|内向/,
+    fit: { steady: 5, conserve: 3, burst: -2 },
+    sceneFit: { rain_mud: 4, night_race: 3 },
+    description: "复杂赛况下更稳，保守策略更容易发挥。"
+  },
+  {
+    key: "competitive",
+    label: "不服输",
+    pattern: /不服输|热血|胜负欲|骄傲|倔强|拼命|冲动|莽|强势/,
+    fit: { burst: 6, inside: 2, conserve: -3 },
+    sceneFit: { long_straight: 4, uphill_finish: 3, endurance: -3 },
+    riskAdjust: 0.04,
+    description: "冲刺和对抗更强，但激进策略更容易出风险。"
+  },
+  {
+    key: "calm",
+    label: "冷静策略",
+    pattern: /聪明|机灵|冷静|理性|策略|观察|判断|腹黑|狡猾/,
+    fit: { steady: 4, normal: 4, inside: 2 },
+    sceneFit: { many_corners: 4, downhill_corner: 4, night_race: 3 },
+    description: "复杂路线和变化节奏里更容易做出正确判断。"
+  },
+  {
+    key: "patient",
+    label: "耐心坚韧",
+    pattern: /耐心|坚韧|努力|认真|持久|长跑|能忍|执着/,
+    fit: { conserve: 6, steady: 3, burst: -2 },
+    sceneFit: { endurance: 5, uphill_finish: 4, sand_track: 3 },
+    description: "长距离、重场地和后半段更有优势。"
+  },
+  {
+    key: "lucky",
+    label: "天然幸运",
+    pattern: /幸运|随缘|玄学|天选|欧皇|奇迹|自由|飘忽|神秘|浪漫|梦幻|天然|迷糊/,
+    fit: { normal: 3, burst: 2, inside: 1 },
+    sceneFit: { short_sprint: 2 },
+    varianceBonus: 8,
+    luckBonus: 8,
+    description: "随机波动更大，运气好的时候能突然翻盘。"
+  },
+  {
+    key: "elegant",
+    label: "优雅从容",
+    pattern: /优雅|高贵|大小姐|端庄|自信|从容/,
+    fit: { normal: 4, steady: 3, inside: 2 },
+    sceneFit: { night_race: 4, long_straight: 2 },
+    description: "节奏稳定，越是需要姿态和判断的赛况越舒服。"
+  }
+]
+
 const STRATEGIES = {
   normal: {
     label: "正常跑",
@@ -489,6 +543,22 @@ export class UmaRaceManager {
     return record?.uma && this.isValidAttributes(record.uma.attributes) ? record.uma : null
   }
 
+  async ensurePlayerUmaTrait(userId, config = this.getConfig()) {
+    if (!userId) return null
+    const data = this.readPoints(config)
+    const record = data.players?.[String(userId)]
+    const uma = record?.uma
+    if (!uma || !this.isValidAttributes(uma.attributes)) return null
+    const previousKey = uma.trait?.key
+    const trait = this.normalizeUmaTrait(uma)
+    if (uma.trait?.key !== previousKey) {
+      record.updatedAt = nowIso()
+      data.players[String(userId)] = record
+      await this.writePoints(data, config)
+    }
+    return { uma, trait }
+  }
+
   isValidAttributes(attributes = {}) {
     return ATTRIBUTE_DEFS.every(def => Number.isFinite(Number(attributes[def.key])))
   }
@@ -542,6 +612,29 @@ export class UmaRaceManager {
 
     this.normalizeAttributeTotal(base, targetTotal)
     return base
+  }
+
+  inferPersonalityTrait(name = "", personality = "") {
+    const text = `${name} ${personality}`
+    return PERSONALITY_TRAITS.find(trait => trait.pattern.test(text)) || {
+      key: "balanced",
+      label: "均衡适应",
+      fit: { normal: 3, steady: 1, conserve: 1, burst: 1, inside: 1 },
+      sceneFit: {},
+      description: "没有明显偏科，什么场景都能按自己的节奏跑。"
+    }
+  }
+
+  normalizeUmaTrait(uma = {}) {
+    const trait = this.inferPersonalityTrait(uma.name, uma.personality)
+    if (!uma.trait || uma.trait.key !== trait.key) {
+      uma.trait = {
+        key: trait.key,
+        label: trait.label,
+        description: trait.description
+      }
+    }
+    return trait
   }
 
   normalizeAttributeTargetTotal(total) {
@@ -618,6 +711,7 @@ export class UmaRaceManager {
       total: ATTRIBUTE_TOTAL,
       createdAt: nowIso()
     }
+    this.normalizeUmaTrait(uma)
     record.nickname = this.getDisplayName(e)
     record.uma = uma
     record.updatedAt = nowIso()
@@ -627,6 +721,7 @@ export class UmaRaceManager {
     return [
       `领养成功：${uma.name}`,
       `性格：${uma.personality}`,
+      `特质：${uma.trait.label} - ${uma.trait.description}`,
       `六维：${this.formatAttributes(uma.attributes)}`,
       `初始总点数：${this.sumAttributes(uma.attributes)}`
     ].join("\n")
@@ -638,9 +733,11 @@ export class UmaRaceManager {
     const record = this.getPlayerRecord(userId)
     const uma = record?.uma
     if (!uma) return "你还没有领养赛马娘。格式：.赛马娘 领养 名字 性格描述"
+    const trait = this.normalizeUmaTrait(uma)
     return [
       `你的赛马娘：${uma.name}`,
       `性格：${uma.personality || "未记录"}`,
+      `特质：${trait.label} - ${trait.description}`,
       `六维：${this.formatAttributes(uma.attributes)}`,
       `初始总点数：${this.sumAttributes(uma.attributes)}`,
       `积分：${Number(record.points) || 0}，胜场：${Number(record.wins) || 0}，参赛：${Number(record.races) || 0}`
@@ -922,7 +1019,7 @@ export class UmaRaceManager {
     return `本局赛道：${track.name} - ${track.description}`
   }
 
-  startRace(e) {
+  async startRace(e) {
     const config = this.getConfig()
     if (!config.enabled) return "赛马娘小游戏现在没开。"
     if (!e?.group_id) return "这个小游戏要在群里玩。"
@@ -955,7 +1052,7 @@ export class UmaRaceManager {
       timer: null
     }
     this.rooms.set(groupId, room)
-    this.joinRace(e)
+    await this.joinRace(e)
     const starter = room.participants.get(this.getUserId(e))
     const starterLine = starter
       ? `已自动报名：${starter.nickname}「${starter.umaName}」`
@@ -972,7 +1069,7 @@ export class UmaRaceManager {
     ].join("\n")
   }
 
-  joinRace(e, strategyText = "") {
+  async joinRace(e, strategyText = "") {
     const config = this.getConfig()
     if (!config.enabled) return "赛马娘小游戏现在没开。"
     if (!e?.group_id) return "这个小游戏要在群里玩。"
@@ -982,8 +1079,9 @@ export class UmaRaceManager {
     let createdByJoin = false
     const userId = String(e.user_id || e.sender?.user_id || "")
     if (!userId) return "没拿到你的 QQ 号，报名失败。"
-    const uma = this.getPlayerUma(userId, config)
-    if (!uma) return "你还没有领养自己的赛马娘。先用：.赛马娘 领养 名字 性格描述"
+    const owned = await this.ensurePlayerUmaTrait(userId, config)
+    if (!owned?.uma) return "你还没有领养自己的赛马娘。先用：.赛马娘 领养 名字 性格描述"
+    const { uma, trait } = owned
 
     if (!room) {
       const lastAt = this.lastRaceAt.get(groupId) || 0
@@ -1041,6 +1139,9 @@ export class UmaRaceManager {
       nickname: this.getDisplayName(e),
       umaName: uma.name,
       attributes: uma.attributes,
+      personality: uma.personality,
+      traitKey: trait.key,
+      traitLabel: trait.label,
       strategyKey: this.getStrategyKey(strategy),
       strategyLabel: strategy.label,
       joinedAt: Date.now()
@@ -1159,6 +1260,9 @@ export class UmaRaceManager {
         nickname: name,
         umaName,
         attributes: this.generateAttributes(umaName, personality, total),
+        personality,
+        traitKey: this.inferPersonalityTrait(umaName, personality).key,
+        traitLabel: this.inferPersonalityTrait(umaName, personality).label,
         strategyKey: pick(["normal", "steady", "burst", "conserve", "inside"]),
         isNpc: true,
         joinedAt: Date.now()
@@ -1205,9 +1309,10 @@ export class UmaRaceManager {
       const power = this.rollAttributeValue(attributes.power)
       const focus = this.rollAttributeValue(attributes.focus)
       const wisdom = this.rollAttributeValue(attributes.wisdom)
-      const luck = this.rollAttributeValue(attributes.luck, 50, 6)
       const strategyKey = player.strategyKey && STRATEGIES[player.strategyKey] ? player.strategyKey : "normal"
       const strategy = STRATEGIES[strategyKey]
+      const trait = this.getRaceTrait(player)
+      const luck = this.rollAttributeValue(attributes.luck, 50 + (trait.luckBonus || 0), 6)
       const weights = {
         speed: (track.weights.speed + strategy.weights.speed) / 2,
         stamina: (track.weights.stamina + strategy.weights.stamina) / 2,
@@ -1217,11 +1322,13 @@ export class UmaRaceManager {
       const fitBonus = Number(track.fit?.[strategyKey]) || 0
       const twistBonus = Number(twist.fit?.[strategyKey]) || 0
       const sceneBonus = Number(scene.fit?.[strategyKey]) || 0
-      const riskPenalty = Math.random() < strategy.risk ? randomBetween(10, 24) : 0
+      const traitBonus = this.getTraitBonus(trait, strategyKey, track.id)
+      const riskRate = Math.max(0, (Number(strategy.risk) || 0) + (Number(trait.riskAdjust) || 0))
+      const riskPenalty = Math.random() < riskRate ? randomBetween(10, 24) : 0
       const insideCrowdPenalty = strategyKey === "inside" && players.length >= 7 ? randomBetween(0, 10) : 0
       const strategyCrowdPenalty = this.getStrategyCrowdPenalty(strategyKey, strategyCounts, players.length)
       const conditionBonus = randomBetween(-9, 10)
-      const variance = randomBetween(-strategy.variance, strategy.variance)
+      const variance = randomBetween(-strategy.variance - (trait.varianceBonus || 0), strategy.variance + (trait.varianceBonus || 0))
       const score = speed * weights.speed +
         stamina * weights.stamina +
         focus * weights.focus +
@@ -1231,6 +1338,7 @@ export class UmaRaceManager {
         fitBonus +
         twistBonus +
         sceneBonus +
+        traitBonus +
         conditionBonus +
         variance -
         riskPenalty -
@@ -1247,9 +1355,13 @@ export class UmaRaceManager {
         attributes,
         strategyKey,
         strategyLabel: strategy.label,
+        traitKey: trait.key,
+        traitLabel: trait.label,
         fitBonus,
         twistBonus,
         sceneBonus,
+        traitBonus,
+        riskRate,
         conditionBonus,
         riskPenalty,
         insideCrowdPenalty,
@@ -1259,6 +1371,9 @@ export class UmaRaceManager {
           fitBonus,
           twistBonus,
           sceneBonus,
+          traitBonus,
+          traitLabel: trait.label,
+          riskRate,
           conditionBonus,
           riskPenalty,
           insideCrowdPenalty,
@@ -1279,6 +1394,15 @@ export class UmaRaceManager {
       counts.set(key, (counts.get(key) || 0) + 1)
     }
     return counts
+  }
+
+  getRaceTrait(player = {}) {
+    return PERSONALITY_TRAITS.find(trait => trait.key === player.traitKey) ||
+      this.inferPersonalityTrait(player.umaName || player.nickname, player.personality || "")
+  }
+
+  getTraitBonus(trait, strategyKey, trackId) {
+    return (Number(trait?.fit?.[strategyKey]) || 0) + (Number(trait?.sceneFit?.[trackId]) || 0)
   }
 
   rollAttributeValue(attribute, base = 48, scale = 5) {
@@ -1314,6 +1438,9 @@ export class UmaRaceManager {
     }
     if (details.sceneBonus <= -6) {
       return `${name} 选择${strategy.label}，但赛况是${scene.name}，这次处理起来很别扭。`
+    }
+    if (details.traitBonus >= 7) {
+      return `${name} 的${details.traitLabel || "性格"}刚好适合这一局，跑法明显更顺。`
     }
     if (Math.abs(details.conditionBonus) >= 4) {
       return this.formatConditionEvent(name, details.conditionBonus)

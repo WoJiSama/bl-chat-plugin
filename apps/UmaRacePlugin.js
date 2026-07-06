@@ -32,7 +32,7 @@ export class UmaRacePlugin extends plugin {
   }
 
   async startRace(e) {
-    await e.reply(umaRaceManager.startRace(e))
+    await e.reply(await umaRaceManager.startRace(e))
     return true
   }
 
