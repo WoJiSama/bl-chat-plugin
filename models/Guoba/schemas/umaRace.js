@@ -11,21 +11,23 @@ export default [
   },
   {
     field: "umaRace.minPlayers",
-    label: "最少开跑人数",
+    label: "固定开跑人数",
     component: "InputNumber",
-    componentProps: { min: 1, max: 20, step: 1, placeholder: "2" }
+    bottomHelpMessage: "赛马娘当前固定 8 人一局，不足会自动补 NPC。",
+    componentProps: { min: 8, max: 8, step: 1, placeholder: "8" }
   },
   {
     field: "umaRace.maxPlayers",
-    label: "单局最多人数",
+    label: "报名人数上限",
     component: "InputNumber",
-    componentProps: { min: 2, max: 30, step: 1, placeholder: "12" }
+    bottomHelpMessage: "赛马娘当前固定最多 8 名真实玩家报名。",
+    componentProps: { min: 8, max: 8, step: 1, placeholder: "8" }
   },
   {
     field: "umaRace.lobbySeconds",
     label: "报名超时（秒）",
     component: "InputNumber",
-    bottomHelpMessage: "超过这个时间未开跑，本局自动作废；有人加入或更新策略会刷新计时",
+    bottomHelpMessage: "超过这个时间未手动开跑会自动开赛；有人加入或更新策略会刷新计时",
     componentProps: { min: 10, max: 300, step: 10, placeholder: "300" }
   },
   {

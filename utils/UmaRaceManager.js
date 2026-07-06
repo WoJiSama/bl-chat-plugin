@@ -4,8 +4,8 @@ import yaml from "js-yaml"
 
 const DEFAULT_CONFIG = {
   enabled: true,
-  minPlayers: 2,
-  maxPlayers: 12,
+  minPlayers: 8,
+  maxPlayers: 8,
   lobbySeconds: 300,
   cooldownSeconds: 30,
   winPoints: 5,
@@ -14,6 +14,8 @@ const DEFAULT_CONFIG = {
   rankLimit: 10,
   baseDir: "data/uma_race"
 }
+
+const RACE_SIZE = 8
 
 const NPC_NAMES = [
   "晨间训练员",
@@ -58,6 +60,58 @@ const ATTRIBUTE_DEFS = [
 ]
 
 const ATTRIBUTE_TOTAL = 40
+const ATTRIBUTE_MAX = 50
+const ATTRIBUTE_MIN = 1
+
+const ATTRIBUTE_ALIASES = {
+  speed: ["速度", "速"],
+  stamina: ["耐力", "体力"],
+  power: ["爆发", "力量", "冲刺"],
+  focus: ["稳定", "稳"],
+  wisdom: ["判断", "智力", "策略"],
+  luck: ["运气", "幸运"]
+}
+
+const TRAINING_TYPES = {
+  basic: {
+    label: "基础训练",
+    aliases: ["基础", "普通", "基础训练"],
+    cost: 2,
+    baseRate: 0.9,
+    decay: 0.008,
+    minRate: 0.35,
+    gain: 1,
+    pity: 3,
+    failPenaltyCount: 1,
+    failPenaltyChance: 0.35
+  },
+  hard: {
+    label: "强化训练",
+    aliases: ["强化", "强训", "强化训练"],
+    cost: 5,
+    baseRate: 0.75,
+    decay: 0.01,
+    minRate: 0.2,
+    gain: 2,
+    pity: 4,
+    failPenaltyCount: 1,
+    failPenaltyChance: 1
+  },
+  gamble: {
+    label: "赌狗训练",
+    aliases: ["赌狗", "赌博", "赌", "搏一把", "赌狗训练"],
+    cost: 10,
+    baseRate: 0.55,
+    decay: 0.011,
+    minRate: 0.08,
+    gain: 3,
+    critGain: 4,
+    critRate: 0.15,
+    pity: 5,
+    failPenaltyCount: 2,
+    failPenaltyChance: 1
+  }
+}
 
 const PERSONALITY_ATTRIBUTE_RULES = [
   { pattern: /温柔|体贴|照顾|可靠|沉稳|稳重|安静|冷静|害羞|内向/, add: { focus: 3, wisdom: 2, stamina: 1 } },
@@ -299,8 +353,8 @@ export class UmaRaceManager {
     return {
       ...DEFAULT_CONFIG,
       ...raw,
-      minPlayers: safeNumber(raw.minPlayers, DEFAULT_CONFIG.minPlayers, 1, 20),
-      maxPlayers: safeNumber(raw.maxPlayers, DEFAULT_CONFIG.maxPlayers, 2, 30),
+      minPlayers: RACE_SIZE,
+      maxPlayers: RACE_SIZE,
       lobbySeconds: safeNumber(raw.lobbySeconds, DEFAULT_CONFIG.lobbySeconds, 10, 300),
       cooldownSeconds: safeNumber(raw.cooldownSeconds, DEFAULT_CONFIG.cooldownSeconds, 0, 3600),
       winPoints: safeNumber(raw.winPoints, DEFAULT_CONFIG.winPoints, 0, 100000),
@@ -447,6 +501,12 @@ export class UmaRaceManager {
       .join(" / ")
   }
 
+  formatTrainingAttributes(attributes = {}) {
+    return ATTRIBUTE_DEFS
+      .map(def => `${def.label}${Number(attributes[def.key]) || 0}/${ATTRIBUTE_MAX}`)
+      .join(" / ")
+  }
+
   async adoptUma(e, { overwrite = false } = {}) {
     const config = this.getConfig()
     if (!config.enabled) return "赛马娘小游戏现在没开。"
@@ -507,6 +567,188 @@ export class UmaRaceManager {
       `六维：${this.formatAttributes(uma.attributes)}`,
       `初始总点数：${this.sumAttributes(uma.attributes)}`,
       `积分：${Number(record.points) || 0}，胜场：${Number(record.wins) || 0}，参赛：${Number(record.races) || 0}`
+    ].join("\n")
+  }
+
+  parseTrainingInput(msg = "") {
+    const text = String(msg || "")
+      .replace(/^[.。]赛马娘\s*训练\s*/u, "")
+      .trim()
+    if (!text) return null
+    const parts = text.split(/\s+/).filter(Boolean)
+    return {
+      type: this.resolveTrainingType(parts[0] || text),
+      attribute: this.resolveAttribute(parts.slice(1).join(" ") || parts[1] || text),
+      raw: text
+    }
+  }
+
+  resolveTrainingType(text = "") {
+    const normalized = String(text || "").trim()
+    for (const [key, type] of Object.entries(TRAINING_TYPES)) {
+      if (type.aliases.some(alias => normalized.includes(alias))) return { key, ...type }
+    }
+    return null
+  }
+
+  resolveAttribute(text = "") {
+    const normalized = String(text || "").trim()
+    for (const def of ATTRIBUTE_DEFS) {
+      const aliases = ATTRIBUTE_ALIASES[def.key] || [def.label]
+      if (aliases.some(alias => normalized.includes(alias))) return def
+    }
+    return null
+  }
+
+  getTrainingPity(record, typeKey, attrKey) {
+    return Number(record?.trainingPity?.[typeKey]?.[attrKey]) || 0
+  }
+
+  setTrainingPity(record, typeKey, attrKey, value) {
+    if (!record.trainingPity || typeof record.trainingPity !== "object") record.trainingPity = {}
+    if (!record.trainingPity[typeKey] || typeof record.trainingPity[typeKey] !== "object") record.trainingPity[typeKey] = {}
+    record.trainingPity[typeKey][attrKey] = Math.max(0, Math.floor(Number(value) || 0))
+  }
+
+  getTrainingSuccessRate(type, currentValue) {
+    const value = Math.max(ATTRIBUTE_MIN, Number(currentValue) || ATTRIBUTE_MIN)
+    return Math.max(type.minRate, type.baseRate - value * type.decay)
+  }
+
+  async trainUma(e) {
+    const config = this.getConfig()
+    if (!config.enabled) return "赛马娘小游戏现在没开。"
+    const userId = this.getUserId(e)
+    if (!userId) return "没拿到你的 QQ 号，训练失败。"
+
+    const parsed = this.parseTrainingInput(e?.msg)
+    if (!parsed?.type || !parsed?.attribute) {
+      return [
+        "格式：.赛马娘 训练 基础 速度",
+        "训练类型：基础 / 强化 / 赌狗",
+        "属性：速度 / 耐力 / 爆发 / 稳定 / 判断 / 运气"
+      ].join("\n")
+    }
+
+    const data = this.readPoints(config)
+    const record = data.players?.[userId]
+    const uma = record?.uma
+    if (!uma || !this.isValidAttributes(uma.attributes)) {
+      return "你还没有领养赛马娘。先用：.赛马娘 领养 名字 性格描述"
+    }
+
+    const currentPoints = Number(record.points) || 0
+    if (currentPoints < parsed.type.cost) {
+      return [
+        `${uma.name} 当前属性：`,
+        this.formatTrainingAttributes(uma.attributes),
+        `当前积分：${currentPoints}`,
+        "",
+        `${parsed.type.label}需要 ${parsed.type.cost} 积分，积分不够。`
+      ].join("\n")
+    }
+
+    const beforeAttributes = { ...uma.attributes }
+    const currentValue = Number(uma.attributes[parsed.attribute.key]) || ATTRIBUTE_MIN
+    if (currentValue >= ATTRIBUTE_MAX) {
+      return [
+        `${uma.name} 当前属性：`,
+        this.formatTrainingAttributes(uma.attributes),
+        `当前积分：${currentPoints}`,
+        "",
+        `${parsed.attribute.label}已经到上限 ${ATTRIBUTE_MAX}，这次不用训练。`
+      ].join("\n")
+    }
+
+    const successRate = this.getTrainingSuccessRate(parsed.type, currentValue)
+    const pityBefore = this.getTrainingPity(record, parsed.type.key, parsed.attribute.key)
+    const forcedByPity = pityBefore >= parsed.type.pity
+    const success = forcedByPity || Math.random() < successRate
+    const resultLines = []
+    let actualGain = 0
+    let penaltyLines = []
+
+    record.points = currentPoints - parsed.type.cost
+    if (success) {
+      const gain = parsed.type.critGain && !forcedByPity && Math.random() < parsed.type.critRate
+        ? parsed.type.critGain
+        : parsed.type.gain
+      const before = Number(uma.attributes[parsed.attribute.key]) || ATTRIBUTE_MIN
+      const after = Math.min(ATTRIBUTE_MAX, before + gain)
+      actualGain = after - before
+      uma.attributes[parsed.attribute.key] = after
+      this.setTrainingPity(record, parsed.type.key, parsed.attribute.key, 0)
+      resultLines.push("结果：成功")
+      resultLines.push(actualGain > 0
+        ? `${parsed.attribute.label} +${actualGain}`
+        : `${parsed.attribute.label} 已到上限 ${ATTRIBUTE_MAX}`)
+    } else {
+      this.setTrainingPity(record, parsed.type.key, parsed.attribute.key, pityBefore + 1)
+      penaltyLines = this.applyTrainingPenalty(uma.attributes, parsed.attribute.key, parsed.type)
+      resultLines.push("结果：失败")
+      resultLines.push(penaltyLines.length ? penaltyLines.join("，") : "没有额外掉属性")
+    }
+
+    uma.total = this.sumAttributes(uma.attributes)
+    record.nickname = this.getDisplayName(e)
+    record.updatedAt = nowIso()
+    data.players[userId] = record
+    await this.writePoints(data, config)
+
+    return [
+      `${uma.name} 当前属性：`,
+      this.formatTrainingAttributes(beforeAttributes),
+      `当前积分：${currentPoints}`,
+      "",
+      `训练：${parsed.type.label} - ${parsed.attribute.label}`,
+      `消耗：${parsed.type.cost} 积分`,
+      "",
+      ...resultLines,
+      "",
+      "训练后：",
+      this.formatTrainingAttributes(uma.attributes),
+      `剩余积分：${record.points}`
+    ].join("\n")
+  }
+
+  applyTrainingPenalty(attributes, targetKey, type) {
+    if (Math.random() >= type.failPenaltyChance) return []
+    const keys = ATTRIBUTE_DEFS
+      .map(def => def.key)
+      .filter(key => key !== targetKey && (Number(attributes[key]) || ATTRIBUTE_MIN) > ATTRIBUTE_MIN)
+    const lines = []
+    for (let index = 0; index < type.failPenaltyCount && keys.length; index++) {
+      const key = keys.splice(Math.floor(Math.random() * keys.length), 1)[0]
+      const def = ATTRIBUTE_DEFS.find(item => item.key === key)
+      const before = Number(attributes[key]) || ATTRIBUTE_MIN
+      const after = Math.max(ATTRIBUTE_MIN, before - 1)
+      attributes[key] = after
+      if (after < before) lines.push(`${def?.label || key} -1`)
+    }
+    return lines
+  }
+
+  showTrainingStatus(e) {
+    const userId = this.getUserId(e)
+    if (!userId) return "没拿到你的 QQ 号。"
+    const record = this.getPlayerRecord(userId)
+    const uma = record?.uma
+    if (!uma || !this.isValidAttributes(uma.attributes)) {
+      return "你还没有领养赛马娘。先用：.赛马娘 领养 名字 性格描述"
+    }
+    return [
+      "赛马娘训练：",
+      `${uma.name} 当前属性：`,
+      this.formatTrainingAttributes(uma.attributes),
+      `当前积分：${Number(record.points) || 0}`,
+      "",
+      "训练方式：",
+      ".赛马娘 训练 基础 [属性] - 消耗 2 积分，稳一点",
+      ".赛马娘 训练 强化 [属性] - 消耗 5 积分，提升更多但有风险",
+      ".赛马娘 训练 赌狗 [属性] - 消耗 10 积分，波动最大",
+      "",
+      "属性：速度 / 耐力 / 爆发 / 稳定 / 判断 / 运气",
+      "满值：每项 50"
     ].join("\n")
   }
 
@@ -628,7 +870,7 @@ export class UmaRaceManager {
       `报名：.赛马娘 加入 [策略]`,
       this.formatStrategyTips(),
       `开跑：.赛马娘 开跑`,
-      `人数：${room.participants.size}/${config.maxPlayers}，至少 ${config.minPlayers} 人，不够会补 NPC`
+      `人数：${room.participants.size}/${RACE_SIZE}，开跑不够 ${RACE_SIZE} 人会补 NPC`
     ].join("\n")
   }
 
@@ -744,8 +986,8 @@ export class UmaRaceManager {
     if (!room) return "现在没有赛马局。先发：.赛马娘 开始"
 
     const players = [...room.participants.values()]
-    if (players.length < config.minPlayers) {
-      this.fillNpcPlayers(players, config.minPlayers)
+    if (players.length < RACE_SIZE) {
+      this.fillNpcPlayers(players, RACE_SIZE)
     }
 
     this.clearAutoStart(room)
@@ -1046,6 +1288,7 @@ export class UmaRaceManager {
       ".赛马娘 领养 名字 性格描述 - 创建自己的赛马娘",
       ".赛马娘 我的赛马娘 - 查看六维属性",
       ".赛马娘 弃养 - 删除当前小马档案，保留积分",
+      ".赛马娘 训练 - 进入训练页面",
       ".赛马娘 开始 - 开一局",
       ".赛马娘 加入 [策略] - 报名，可选策略",
       "策略：稳一点 / 拼一把 / 留体力 / 抢内道；不填就是正常跑",

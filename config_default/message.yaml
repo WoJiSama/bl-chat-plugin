@@ -33,8 +33,8 @@ pluginSettings:
     cleanupIntervalHours: 6
   umaRace:
     enabled: true
-    minPlayers: 2
-    maxPlayers: 12
+    minPlayers: 8
+    maxPlayers: 8
     lobbySeconds: 300
     cooldownSeconds: 30
     winPoints: 5
