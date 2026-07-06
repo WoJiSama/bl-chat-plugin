@@ -1130,7 +1130,7 @@ export class UmaRaceManager {
       room.createdAt = Date.now()
       room.event = e
       this.scheduleAutoStart(room, config)
-      return `${this.getDisplayName(e)} 已更新策略：${strategy.label}`
+      return `${this.getDisplayName(e)} 选择了${strategy.label}，已更新策略。`
     }
     if (room.participants.size >= config.maxPlayers) return "这局人满了，下一局再来。"
 
@@ -1153,14 +1153,18 @@ export class UmaRaceManager {
       return [
         "赛马娘小游戏开局啦。",
         this.formatTrack(room.track),
-        `报名成功：${this.getDisplayName(e)} 的「${uma.name}」，策略：${strategy.label}`,
+        `报名成功：${this.getDisplayName(e)} 的「${uma.name}」`,
+        `${this.getDisplayName(e)} 选择了${strategy.label}`,
         `报名：.赛马娘 加入 [策略]`,
         this.formatStrategyTips(),
         `开跑：.赛马娘 开跑`,
         `人数：${room.participants.size}/${RACE_SIZE}，开跑不够 ${RACE_SIZE} 人会补 NPC`
       ].join("\n")
     }
-    return `报名成功：${this.getDisplayName(e)} 的「${uma.name}」，策略：${strategy.label}（${room.participants.size}/${config.maxPlayers}）`
+    return [
+      `报名成功：${this.getDisplayName(e)} 的「${uma.name}」（${room.participants.size}/${config.maxPlayers}）`,
+      `${this.getDisplayName(e)} 选择了${strategy.label}`
+    ].join("\n")
   }
 
   scheduleAutoStart(room, config = this.getConfig()) {
