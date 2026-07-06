@@ -16,14 +16,36 @@ const DEFAULT_CONFIG = {
 }
 
 const NPC_NAMES = [
-  "栗毛流星",
-  "晨风铃",
-  "青叶疾驰",
-  "星砂步",
-  "白露弯道",
-  "红茶终线",
-  "薄荷影",
-  "夜樱步"
+  "晨间训练员",
+  "栗色围巾",
+  "弯道观察员",
+  "终点裁判",
+  "薄荷汽水",
+  "夜樱看台",
+  "红茶加冰",
+  "星砂领航"
+]
+
+const NPC_UMA_PREFIXES = [
+  "栗毛",
+  "晨风",
+  "青叶",
+  "星砂",
+  "白露",
+  "红茶",
+  "薄荷",
+  "夜樱"
+]
+
+const NPC_UMA_SUFFIXES = [
+  "流星",
+  "疾驰",
+  "弯道",
+  "终线",
+  "小步",
+  "追光",
+  "回响",
+  "闪击"
 ]
 
 const ATTRIBUTE_DEFS = [
@@ -364,9 +386,10 @@ export class UmaRaceManager {
     return scores
   }
 
-  generateAttributes(name = "", personality = "") {
+  generateAttributes(name = "", personality = "", total = ATTRIBUTE_TOTAL) {
+    const targetTotal = this.normalizeAttributeTargetTotal(total)
     const base = Object.fromEntries(ATTRIBUTE_DEFS.map(def => [def.key, 4]))
-    const extraPoints = ATTRIBUTE_TOTAL - ATTRIBUTE_DEFS.length * 4
+    const extraPoints = targetTotal - ATTRIBUTE_DEFS.length * 4
     let remaining = extraPoints
     const scores = this.buildAttributeScores(`${name} ${personality}`)
     const totalScore = ATTRIBUTE_DEFS.reduce((sum, def) => sum + (scores[def.key] || 1), 0)
@@ -386,21 +409,28 @@ export class UmaRaceManager {
       base[fractional[index % fractional.length].key] += 1
     }
 
-    this.normalizeAttributeTotal(base)
+    this.normalizeAttributeTotal(base, targetTotal)
     return base
   }
 
-  normalizeAttributeTotal(attributes) {
+  normalizeAttributeTargetTotal(total) {
+    const minTotal = ATTRIBUTE_DEFS.length * 4
+    const value = Math.round(Number(total) || ATTRIBUTE_TOTAL)
+    return Math.max(minTotal, value)
+  }
+
+  normalizeAttributeTotal(attributes, targetTotal = ATTRIBUTE_TOTAL) {
+    targetTotal = this.normalizeAttributeTargetTotal(targetTotal)
     let total = this.sumAttributes(attributes)
     const order = [...ATTRIBUTE_DEFS].sort((a, b) => Number(attributes[b.key]) - Number(attributes[a.key]))
-    while (total > ATTRIBUTE_TOTAL) {
+    while (total > targetTotal) {
       const target = order.find(def => attributes[def.key] > 1)
       if (!target) break
       attributes[target.key] -= 1
       total--
     }
     let addIndex = 0
-    while (total < ATTRIBUTE_TOTAL) {
+    while (total < targetTotal) {
       attributes[ATTRIBUTE_DEFS[addIndex % ATTRIBUTE_DEFS.length].key] += 1
       addIndex++
       total++
@@ -643,14 +673,20 @@ export class UmaRaceManager {
   fillNpcPlayers(players, minPlayers) {
     const need = Math.max(0, Number(minPlayers) - players.length)
     const usedNames = new Set(players.map(player => player.nickname))
+    const usedUmaNames = new Set(players.map(player => player.umaName || player.nickname))
+    const baseTotal = this.getNpcBaseAttributeTotal(players)
     for (let index = 0; index < need; index++) {
       const name = this.pickNpcName(usedNames)
+      const umaName = this.pickNpcUmaName(usedUmaNames)
+      const personality = pick(["稳重可靠", "活泼开朗", "不服输", "聪明冷静", "耐心坚韧", "幸运自由"])
+      const total = this.pickNpcAttributeTotal(baseTotal)
       usedNames.add(name)
+      usedUmaNames.add(umaName)
       players.push({
         userId: `npc:${Date.now()}:${index}`,
         nickname: name,
-        umaName: name,
-        attributes: this.generateAttributes(name, pick(["稳重可靠", "活泼开朗", "不服输", "聪明冷静", "耐心坚韧", "幸运自由"])),
+        umaName,
+        attributes: this.generateAttributes(umaName, personality, total),
         strategyKey: pick(["normal", "steady", "burst", "conserve", "inside"]),
         isNpc: true,
         joinedAt: Date.now()
@@ -661,6 +697,29 @@ export class UmaRaceManager {
   pickNpcName(usedNames) {
     const available = NPC_NAMES.filter(name => !usedNames.has(name))
     return available.length ? pick(available) : `临时选手${usedNames.size + 1}`
+  }
+
+  pickNpcUmaName(usedNames) {
+    for (let attempt = 0; attempt < 30; attempt++) {
+      const name = `${pick(NPC_UMA_PREFIXES)}${pick(NPC_UMA_SUFFIXES)}`
+      if (!usedNames.has(name)) return name
+    }
+    return `临时赛马娘${usedNames.size + 1}`
+  }
+
+  getNpcBaseAttributeTotal(players = []) {
+    const totals = players
+      .filter(player => !player.isNpc && this.isValidAttributes(player.attributes))
+      .map(player => this.sumAttributes(player.attributes))
+      .filter(total => Number.isFinite(total) && total > 0)
+    if (!totals.length) return ATTRIBUTE_TOTAL
+    return totals.reduce((sum, total) => sum + total, 0) / totals.length
+  }
+
+  pickNpcAttributeTotal(baseTotal = ATTRIBUTE_TOTAL) {
+    const min = Math.max(ATTRIBUTE_DEFS.length * 4, Math.floor(baseTotal * 0.9))
+    const max = Math.max(min, Math.ceil(baseTotal * 1.1))
+    return Math.floor(randomBetween(min, max + 1))
   }
 
   simulateRace(players, track = pick(TRACKS), twist = pick(RACE_TWISTS)) {
@@ -860,7 +919,7 @@ export class UmaRaceManager {
 
   formatRunnerName(runner) {
     const name = runner.umaName || runner.nickname
-    if (runner.isNpc) return `${name}（NPC）`
+    if (runner.isNpc) return `${runner.nickname}「${name}」（NPC）`
     return `${runner.nickname}「${name}」`
   }
 
