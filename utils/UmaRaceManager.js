@@ -108,8 +108,9 @@ const TRAINING_TYPES = {
     critGain: 4,
     critRate: 0.15,
     pity: 5,
-    failPenaltyCount: 2,
-    failPenaltyChance: 1
+    failPenaltyCount: 3,
+    failPenaltyChance: 1,
+    failTargetPenaltyChance: 0.45
   }
 }
 
@@ -717,6 +718,13 @@ export class UmaRaceManager {
       .map(def => def.key)
       .filter(key => key !== targetKey && (Number(attributes[key]) || ATTRIBUTE_MIN) > ATTRIBUTE_MIN)
     const lines = []
+    const targetDef = ATTRIBUTE_DEFS.find(item => item.key === targetKey)
+    if (type.failTargetPenaltyChance && Math.random() < type.failTargetPenaltyChance) {
+      const before = Number(attributes[targetKey]) || ATTRIBUTE_MIN
+      const after = Math.max(ATTRIBUTE_MIN, before - 1)
+      attributes[targetKey] = after
+      if (after < before) lines.push(`${targetDef?.label || targetKey} -1`)
+    }
     for (let index = 0; index < type.failPenaltyCount && keys.length; index++) {
       const key = keys.splice(Math.floor(Math.random() * keys.length), 1)[0]
       const def = ATTRIBUTE_DEFS.find(item => item.key === key)
