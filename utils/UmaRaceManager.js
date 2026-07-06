@@ -888,19 +888,52 @@ export class UmaRaceManager {
     if (!e?.group_id) return "这个小游戏要在群里玩。"
 
     const groupId = String(e.group_id)
-    const room = this.getRoom(groupId)
-    if (!room) return "现在没有赛马局。先发：.赛马娘 开始"
-
-    const elapsed = Math.floor((Date.now() - room.createdAt) / 1000)
-    if (elapsed > config.lobbySeconds) {
-      this.rooms.delete(groupId)
-      return "这局报名超时了，重新开一局吧：.赛马娘 开始"
-    }
-
+    let room = this.getRoom(groupId)
+    let createdByJoin = false
     const userId = String(e.user_id || e.sender?.user_id || "")
     if (!userId) return "没拿到你的 QQ 号，报名失败。"
     const uma = this.getPlayerUma(userId, config)
     if (!uma) return "你还没有领养自己的赛马娘。先用：.赛马娘 领养 名字 性格描述"
+
+    if (!room) {
+      const lastAt = this.lastRaceAt.get(groupId) || 0
+      const remain = config.cooldownSeconds - Math.floor((Date.now() - lastAt) / 1000)
+      if (remain > 0) return `刚跑完一局，先歇 ${formatDuration(remain)} 再开。`
+
+      room = {
+        groupId,
+        starterId: userId,
+        createdAt: Date.now(),
+        track: this.pickTrack(),
+        participants: new Map(),
+        event: e,
+        timer: null
+      }
+      this.rooms.set(groupId, room)
+      createdByJoin = true
+    }
+
+    const elapsed = Math.floor((Date.now() - room.createdAt) / 1000)
+    if (elapsed > config.lobbySeconds) {
+      this.clearAutoStart(room)
+      this.rooms.delete(groupId)
+      const lastAt = this.lastRaceAt.get(groupId) || 0
+      const remain = config.cooldownSeconds - Math.floor((Date.now() - lastAt) / 1000)
+      if (remain > 0) return `上一局报名超时了，刚跑完一局，先歇 ${formatDuration(remain)} 再开。`
+
+      room = {
+        groupId,
+        starterId: userId,
+        createdAt: Date.now(),
+        track: this.pickTrack(),
+        participants: new Map(),
+        event: e,
+        timer: null
+      }
+      this.rooms.set(groupId, room)
+      createdByJoin = true
+    }
+
     const strategy = this.parseStrategy(strategyText)
     if (room.participants.has(userId)) {
       const player = room.participants.get(userId)
@@ -925,6 +958,17 @@ export class UmaRaceManager {
     room.createdAt = Date.now()
     room.event = e
     this.scheduleAutoStart(room, config)
+    if (createdByJoin) {
+      return [
+        "赛马娘小游戏开局啦。",
+        this.formatTrack(room.track),
+        `报名成功：${this.getDisplayName(e)} 的「${uma.name}」，策略：${strategy.label}`,
+        `报名：.赛马娘 加入 [策略]`,
+        this.formatStrategyTips(),
+        `开跑：.赛马娘 开跑`,
+        `人数：${room.participants.size}/${RACE_SIZE}，开跑不够 ${RACE_SIZE} 人会补 NPC`
+      ].join("\n")
+    }
     return `报名成功：${this.getDisplayName(e)} 的「${uma.name}」，策略：${strategy.label}（${room.participants.size}/${config.maxPlayers}）`
   }
 
