@@ -610,7 +610,9 @@ export class UmaRaceManager {
       starterId: String(e.user_id || e.sender?.user_id || ""),
       createdAt: Date.now(),
       track: this.pickTrack(),
-      participants: new Map()
+      participants: new Map(),
+      event: e,
+      timer: null
     }
     this.rooms.set(groupId, room)
     this.joinRace(e)
@@ -655,6 +657,8 @@ export class UmaRaceManager {
       player.strategyKey = this.getStrategyKey(strategy)
       player.strategyLabel = strategy.label
       room.createdAt = Date.now()
+      room.event = e
+      this.scheduleAutoStart(room, config)
       return `${this.getDisplayName(e)} 已更新策略：${strategy.label}`
     }
     if (room.participants.size >= config.maxPlayers) return "这局人满了，下一局再来。"
@@ -669,7 +673,46 @@ export class UmaRaceManager {
       joinedAt: Date.now()
     })
     room.createdAt = Date.now()
+    room.event = e
+    this.scheduleAutoStart(room, config)
     return `报名成功：${this.getDisplayName(e)} 的「${uma.name}」，策略：${strategy.label}（${room.participants.size}/${config.maxPlayers}）`
+  }
+
+  scheduleAutoStart(room, config = this.getConfig()) {
+    if (!room) return
+    this.clearAutoStart(room)
+    const delayMs = Math.max(1, Number(config.lobbySeconds) || DEFAULT_CONFIG.lobbySeconds) * 1000
+    room.timer = setTimeout(() => {
+      this.autoStartRace(room.groupId).catch(error => {
+        this.logger?.warn?.(`[赛马娘小游戏] 自动开赛失败: ${error.message}`)
+      })
+    }, delayMs)
+    room.timer.unref?.()
+  }
+
+  clearAutoStart(room) {
+    if (room?.timer) {
+      clearTimeout(room.timer)
+      room.timer = null
+    }
+  }
+
+  async autoStartRace(groupId) {
+    const room = this.getRoom(groupId)
+    if (!room) return
+    const event = room.event
+    if (!event?.reply) {
+      this.rooms.delete(String(groupId || ""))
+      return
+    }
+    if (!room.participants?.size) {
+      this.clearAutoStart(room)
+      this.rooms.delete(String(groupId || ""))
+      await event.reply("报名时间到了，但没有参赛者，本局赛马取消。")
+      return
+    }
+    const result = await this.runRace(event)
+    await event.reply(`报名时间到了，自动开赛。\n${result}`)
   }
 
   getStrategyKey(strategy) {
@@ -686,6 +729,7 @@ export class UmaRaceManager {
     if (!room) return "现在没有赛马局。"
     const userId = String(e.user_id || e.sender?.user_id || "")
     if (!e.isMaster && userId !== room.starterId) return "只有开局的人或主人可以取消这一局。"
+    this.clearAutoStart(room)
     this.rooms.delete(groupId)
     return "这局赛马已经取消。"
   }
@@ -704,6 +748,7 @@ export class UmaRaceManager {
       this.fillNpcPlayers(players, config.minPlayers)
     }
 
+    this.clearAutoStart(room)
     this.rooms.delete(groupId)
     this.lastRaceAt.set(groupId, Date.now())
 
