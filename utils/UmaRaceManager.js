@@ -15,22 +15,115 @@ const DEFAULT_CONFIG = {
   baseDir: "data/uma_race"
 }
 
-const NPC_NAMES = [
-  "栗毛流星",
-  "晨风铃",
-  "青叶疾驰",
-  "星砂步",
-  "白露弯道",
-  "红茶终线"
-]
+const STRATEGIES = {
+  normal: {
+    label: "正常跑",
+    aliases: ["默认", "均衡", "正常", "随便", "普通"],
+    description: "没有短板，什么赛道都能跑",
+    event: "{name} 选择正常跑，节奏很均衡，没有急着把体力交出去。",
+    weights: { speed: 0.35, stamina: 0.28, focus: 0.22, luck: 0.15 },
+    variance: 14,
+    risk: 0.04
+  },
+  steady: {
+    label: "稳一点",
+    aliases: ["稳", "稳一点", "保守", "别浪", "稳住"],
+    description: "失误少，雨天、泥地、弯道多时更舒服",
+    event: "{name} 选择稳一点，前半程没有硬冲，复杂赛道反而处理得很干净。",
+    weights: { speed: 0.24, stamina: 0.30, focus: 0.34, luck: 0.12 },
+    variance: 8,
+    risk: 0.01
+  },
+  burst: {
+    label: "拼一把",
+    aliases: ["拼", "拼一把", "冲", "赌", "莽", "全力"],
+    description: "上限高，短距离和长直线更强，但可能失误",
+    event: "{name} 选择拼一把，起步就把速度拉满，场面一下子紧张起来。",
+    weights: { speed: 0.48, stamina: 0.18, focus: 0.14, luck: 0.20 },
+    variance: 24,
+    risk: 0.13
+  },
+  conserve: {
+    label: "留体力",
+    aliases: ["留体力", "后劲", "省体力", "耐力", "苟住"],
+    description: "前半段不抢，长距离和最后直线更容易追回来",
+    event: "{name} 选择留体力，前面看起来不急，最后直线才开始慢慢咬上来。",
+    weights: { speed: 0.24, stamina: 0.42, focus: 0.20, luck: 0.14 },
+    variance: 12,
+    risk: 0.05
+  },
+  inside: {
+    label: "抢内道",
+    aliases: ["抢内道", "内道", "贴内", "卡位", "抢位"],
+    description: "起跑和弯道有优势，人多时容易被堵",
+    event: "{name} 选择抢内道，开局直接往里切，位置抢得很凶。",
+    weights: { speed: 0.34, stamina: 0.22, focus: 0.30, luck: 0.14 },
+    variance: 18,
+    risk: 0.08
+  }
+}
 
-const TRACK_EVENTS = [
-  "{name} 出闸很稳，贴着内道往前压。",
-  "{name} 在中段突然提速，差点把节奏带乱。",
-  "{name} 过弯很漂亮，身位一下子追回来了。",
-  "{name} 被前方挡了一下，但马上从外侧绕出。",
-  "{name} 最后直线开始冲刺，气势很凶。",
-  "{name} 留了一口气，终点前还在加速。"
+const TRACKS = [
+  {
+    id: "rain_mud",
+    name: "雨天泥地",
+    description: "路面很滑，稳住比硬冲更重要。",
+    fit: { steady: 14, conserve: 4, burst: -10, inside: -4 },
+    weights: { speed: 0.26, stamina: 0.28, focus: 0.34, luck: 0.12 },
+    events: [
+      "{name} 过弯时压住了节奏，没有被湿滑路面带偏。",
+      "{name} 起步很凶，但泥地反作用太大，节奏被迫慢了一拍。",
+      "{name} 在雨里一路贴住前排，最后才开始往外拉。"
+    ]
+  },
+  {
+    id: "long_straight",
+    name: "长直线",
+    description: "终点前有很长一段冲刺区，爆发力会被放大。",
+    fit: { burst: 12, conserve: 7, steady: -2, inside: 2 },
+    weights: { speed: 0.42, stamina: 0.22, focus: 0.18, luck: 0.18 },
+    events: [
+      "{name} 进最后直线后突然提速，身位开始一点点追回来。",
+      "{name} 前面忍了很久，直线区终于把速度放出来了。",
+      "{name} 冲刺很早，但后半段还能不能撑住就有点悬了。"
+    ]
+  },
+  {
+    id: "many_corners",
+    name: "弯道很多",
+    description: "卡位和节奏很关键，乱冲很容易损失速度。",
+    fit: { steady: 8, inside: 11, burst: -7, conserve: 2 },
+    weights: { speed: 0.28, stamina: 0.23, focus: 0.36, luck: 0.13 },
+    events: [
+      "{name} 在连续弯道里卡住了好位置，没给后面太多空间。",
+      "{name} 过弯时被挤了一下，只能先收住速度。",
+      "{name} 沿着内侧一路省距离，位置看起来很漂亮。"
+    ]
+  },
+  {
+    id: "short_sprint",
+    name: "短距离冲刺",
+    description: "没有太多调整时间，开局和爆发最重要。",
+    fit: { burst: 13, inside: 6, conserve: -8, steady: -3 },
+    weights: { speed: 0.48, stamina: 0.16, focus: 0.18, luck: 0.18 },
+    events: [
+      "{name} 出闸就开始抢速度，短途局面一下子被拉开。",
+      "{name} 想留体力，但这局距离太短，能追回来的时间不多。",
+      "{name} 在前半段就完成卡位，后面的人只能硬追。"
+    ]
+  },
+  {
+    id: "endurance",
+    name: "耐力赛",
+    description: "距离很长，前面太急的人可能会在后段掉速。",
+    fit: { conserve: 14, steady: 5, burst: -9, inside: -1 },
+    weights: { speed: 0.24, stamina: 0.44, focus: 0.20, luck: 0.12 },
+    events: [
+      "{name} 前半段不急不躁，后半程体力优势开始显出来。",
+      "{name} 一开始冲得很猛，但长距离让体力消耗变得明显。",
+      "{name} 一直咬在中段，等别人掉速才慢慢往前挤。"
+    ]
+  }
 ]
 
 function nowIso() {
@@ -53,6 +146,10 @@ function escapeName(name) {
 
 function pick(array) {
   return array[Math.floor(Math.random() * array.length)]
+}
+
+function randomBetween(min, max) {
+  return min + Math.random() * (max - min)
 }
 
 function formatDuration(seconds) {
@@ -133,6 +230,30 @@ export class UmaRaceManager {
     return escapeName(e?.sender?.card || e?.sender?.nickname || e?.nickname || e?.user_id)
   }
 
+  pickTrack() {
+    return pick(TRACKS)
+  }
+
+  parseStrategy(input = "") {
+    const text = String(input || "")
+      .replace(/^[.。]赛马娘\s*(加入|参加|上马|报名)\s*/u, "")
+      .trim()
+    if (!text) return STRATEGIES.normal
+
+    for (const strategy of Object.values(STRATEGIES)) {
+      if (strategy.aliases.some(alias => text.includes(alias))) return strategy
+    }
+    return STRATEGIES.normal
+  }
+
+  formatStrategyTips() {
+    return "策略：稳一点 / 拼一把 / 留体力 / 抢内道；不填就是正常跑"
+  }
+
+  formatTrack(track) {
+    return `本局赛道：${track.name} - ${track.description}`
+  }
+
   startRace(e) {
     const config = this.getConfig()
     if (!config.enabled) return "赛马娘小游戏现在没开。"
@@ -141,7 +262,12 @@ export class UmaRaceManager {
     const groupId = String(e.group_id)
     const existing = this.getRoom(groupId)
     if (existing) {
-      return `这一局已经开了，当前 ${existing.participants.size} 人。想参加发：.赛马娘 加入`
+      return [
+        `这一局已经开了，当前 ${existing.participants.size} 人。`,
+        this.formatTrack(existing.track),
+        "想参加发：.赛马娘 加入 稳一点",
+        this.formatStrategyTips()
+      ].join("\n")
     }
 
     const lastAt = this.lastRaceAt.get(groupId) || 0
@@ -152,6 +278,7 @@ export class UmaRaceManager {
       groupId,
       starterId: String(e.user_id || e.sender?.user_id || ""),
       createdAt: Date.now(),
+      track: this.pickTrack(),
       participants: new Map()
     }
     this.rooms.set(groupId, room)
@@ -159,13 +286,15 @@ export class UmaRaceManager {
 
     return [
       "赛马娘小游戏开局啦。",
-      `报名：.赛马娘 加入`,
+      this.formatTrack(room.track),
+      `报名：.赛马娘 加入 稳一点`,
+      this.formatStrategyTips(),
       `开跑：.赛马娘 开跑`,
       `人数：${room.participants.size}/${config.maxPlayers}，至少 ${config.minPlayers} 人`
     ].join("\n")
   }
 
-  joinRace(e) {
+  joinRace(e, strategyText = "") {
     const config = this.getConfig()
     if (!config.enabled) return "赛马娘小游戏现在没开。"
     if (!e?.group_id) return "这个小游戏要在群里玩。"
@@ -182,15 +311,30 @@ export class UmaRaceManager {
 
     const userId = String(e.user_id || e.sender?.user_id || "")
     if (!userId) return "没拿到你的 QQ 号，报名失败。"
-    if (room.participants.has(userId)) return `${this.getDisplayName(e)} 已经在赛道上了。`
+    const strategy = this.parseStrategy(strategyText)
+    if (room.participants.has(userId)) {
+      const player = room.participants.get(userId)
+      player.strategyKey = this.getStrategyKey(strategy)
+      player.strategyLabel = strategy.label
+      return `${this.getDisplayName(e)} 已更新策略：${strategy.label}`
+    }
     if (room.participants.size >= config.maxPlayers) return "这局人满了，下一局再来。"
 
     room.participants.set(userId, {
       userId,
       nickname: this.getDisplayName(e),
+      strategyKey: this.getStrategyKey(strategy),
+      strategyLabel: strategy.label,
       joinedAt: Date.now()
     })
-    return `报名成功：${this.getDisplayName(e)}（${room.participants.size}/${config.maxPlayers}）`
+    return `报名成功：${this.getDisplayName(e)}，策略：${strategy.label}（${room.participants.size}/${config.maxPlayers}）`
+  }
+
+  getStrategyKey(strategy) {
+    for (const [key, value] of Object.entries(STRATEGIES)) {
+      if (value === strategy) return key
+    }
+    return "normal"
   }
 
   cancelRace(e) {
@@ -221,34 +365,84 @@ export class UmaRaceManager {
     this.rooms.delete(groupId)
     this.lastRaceAt.set(groupId, Date.now())
 
-    const result = this.simulateRace(players)
+    const result = this.simulateRace(players, room.track)
     const awards = this.getAwards(config)
     const awardLines = await this.applyAwards(result.ranking, awards, config)
     return this.formatRaceResult(result, awardLines)
   }
 
-  simulateRace(players) {
+  simulateRace(players, track = pick(TRACKS)) {
     const runners = players.map(player => {
       const speed = 70 + Math.random() * 35
       const stamina = 70 + Math.random() * 35
-      const guts = 70 + Math.random() * 35
-      const luck = Math.random() * 30
-      const lateBoost = Math.random() * guts
-      const score = speed * 0.46 + stamina * 0.24 + guts * 0.18 + luck + lateBoost * 0.12
+      const focus = 70 + Math.random() * 35
+      const luck = 60 + Math.random() * 45
+      const strategyKey = player.strategyKey && STRATEGIES[player.strategyKey] ? player.strategyKey : "normal"
+      const strategy = STRATEGIES[strategyKey]
+      const weights = {
+        speed: (track.weights.speed + strategy.weights.speed) / 2,
+        stamina: (track.weights.stamina + strategy.weights.stamina) / 2,
+        focus: (track.weights.focus + strategy.weights.focus) / 2,
+        luck: (track.weights.luck + strategy.weights.luck) / 2
+      }
+      const fitBonus = Number(track.fit?.[strategyKey]) || 0
+      const riskPenalty = Math.random() < strategy.risk ? randomBetween(10, 24) : 0
+      const insideCrowdPenalty = strategyKey === "inside" && players.length >= 7 ? randomBetween(0, 10) : 0
+      const variance = randomBetween(-strategy.variance, strategy.variance)
+      const score = speed * weights.speed +
+        stamina * weights.stamina +
+        focus * weights.focus +
+        luck * weights.luck +
+        fitBonus +
+        variance -
+        riskPenalty -
+        insideCrowdPenalty
       return {
         ...player,
         speed,
         stamina,
-        guts,
-        score
+        focus,
+        luck,
+        strategyKey,
+        strategyLabel: strategy.label,
+        fitBonus,
+        riskPenalty,
+        insideCrowdPenalty,
+        score,
+        event: this.buildRunnerEvent(player.nickname, strategy, track, { fitBonus, riskPenalty, insideCrowdPenalty })
       }
     })
 
     runners.sort((a, b) => b.score - a.score)
-    const highlights = runners.slice(0, Math.min(3, runners.length)).map(runner =>
-      pick(TRACK_EVENTS).replace("{name}", runner.nickname)
-    )
-    return { ranking: runners, highlights }
+    const highlights = this.buildRaceHighlights(runners, track)
+    return { ranking: runners, highlights, track }
+  }
+
+  buildRunnerEvent(name, strategy, track, details = {}) {
+    if (details.riskPenalty > 0) {
+      return `${name} 选择${strategy.label}，但这次有点用力过猛，节奏被打乱了一段。`
+    }
+    if (details.insideCrowdPenalty > 0) {
+      return `${name} 选择抢内道，可这局人太多，刚进弯道就被堵了一下。`
+    }
+    if (details.fitBonus >= 8) {
+      return `${name} 选择${strategy.label}，刚好很适合${track.name}，优势越跑越明显。`
+    }
+    if (details.fitBonus <= -7) {
+      return `${name} 选择${strategy.label}，但和${track.name}不太合拍，中段有点吃亏。`
+    }
+    return strategy.event.replace("{name}", name)
+  }
+
+  buildRaceHighlights(runners, track) {
+    const top = runners.slice(0, Math.min(4, runners.length))
+    const highlightSet = new Set()
+    highlightSet.add(pick(track.events).replace("{name}", top[0]?.nickname || "前排"))
+    for (const runner of top) {
+      if (runner?.event) highlightSet.add(runner.event)
+      if (highlightSet.size >= 4) break
+    }
+    return [...highlightSet].slice(0, 4)
   }
 
   getAwards(config) {
@@ -288,10 +482,11 @@ export class UmaRaceManager {
 
   formatRaceResult(result, awardLines) {
     const rankingLines = result.ranking.slice(0, 8).map((runner, index) =>
-      `${index + 1}. ${runner.nickname}`
+      `${index + 1}. ${runner.nickname}（${runner.strategyLabel || "正常跑"}）`
     )
     return [
       "赛马结果出炉：",
+      this.formatTrack(result.track),
       ...result.highlights.map(line => `- ${line}`),
       "",
       "名次：",
@@ -334,7 +529,8 @@ export class UmaRaceManager {
     return [
       "赛马娘小游戏：",
       ".赛马娘 开始 - 开一局",
-      ".赛马娘 加入 - 报名",
+      ".赛马娘 加入 稳一点 - 报名，可选策略",
+      "策略：稳一点 / 拼一把 / 留体力 / 抢内道；不填就是正常跑",
       ".赛马娘 开跑 - 结算比赛",
       ".赛马娘 积分 - 查看自己的全群互通积分",
       ".赛马娘 排行 - 查看全局排行"
