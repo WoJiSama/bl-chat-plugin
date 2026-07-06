@@ -234,6 +234,54 @@ const TRACKS = [
       "{name} 一开始冲得很猛，但长距离让体力消耗变得明显。",
       "{name} 一直咬在中段，等别人掉速才慢慢往前挤。"
     ]
+  },
+  {
+    id: "uphill_finish",
+    name: "上坡终点",
+    description: "最后一段是明显上坡，耐力和爆发缺一不可。",
+    fit: { conserve: 8, burst: 6, steady: 3, inside: -3 },
+    weights: { speed: 0.28, stamina: 0.36, focus: 0.18, luck: 0.18 },
+    events: [
+      "{name} 进上坡后还在顶着往前压，后劲开始变得关键。",
+      "{name} 提前冲上坡，速度很漂亮，但体力消耗也很明显。",
+      "{name} 在坡道前留了一口气，最后几步反而越跑越稳。"
+    ]
+  },
+  {
+    id: "downhill_corner",
+    name: "下坡弯道",
+    description: "下坡接连续弯，速度容易起来，失误也会被放大。",
+    fit: { steady: 8, inside: 7, normal: 2, burst: -5 },
+    weights: { speed: 0.32, stamina: 0.18, focus: 0.38, luck: 0.12 },
+    events: [
+      "{name} 下坡进弯时收得很准，没有被速度拖出路线。",
+      "{name} 借下坡把速度带起来，但弯道里每一步都很考验控制。",
+      "{name} 贴着内侧过弯，距离省得漂亮，位置也抢住了。"
+    ]
+  },
+  {
+    id: "sand_track",
+    name: "沙地赛道",
+    description: "脚下阻力很重，力量和耐力会比纯速度更重要。",
+    fit: { conserve: 8, steady: 5, burst: -4, inside: -5 },
+    weights: { speed: 0.22, stamina: 0.34, focus: 0.26, luck: 0.18 },
+    events: [
+      "{name} 在沙地里步幅很稳，没有被厚重阻力拖散节奏。",
+      "{name} 起步很快，但沙地吃力，后面能不能撑住还不好说。",
+      "{name} 沿着较硬的路线往前挤，速度没有掉得太难看。"
+    ]
+  },
+  {
+    id: "night_race",
+    name: "夜间赛",
+    description: "视野和判断更重要，临场稳定性会被放大。",
+    fit: { steady: 7, normal: 5, inside: 2, burst: -3 },
+    weights: { speed: 0.30, stamina: 0.22, focus: 0.32, luck: 0.16 },
+    events: [
+      "{name} 在夜色里判断路线很冷静，没有被前排动作带乱。",
+      "{name} 借着灯光找到空档，一点点把位置挤了出来。",
+      "{name} 夜间节奏有点微妙，但脚步还算稳。"
+    ]
   }
 ]
 
@@ -273,6 +321,33 @@ const RACE_TWISTS = [
     description: "最后直线逆风明显，太早冲刺的人容易被反噬。",
     fit: { steady: 5, conserve: 4, burst: -8, inside: 1, normal: 2 },
     event: "{name} 顶着逆风往前压，冲刺没有想象中那么轻松。"
+  }
+]
+
+const RACE_SCENES = [
+  {
+    name: "大雨突袭",
+    description: "比赛中突然下起大雨，稳定处理和保守节奏更吃香。",
+    fit: { steady: 8, conserve: 4, normal: 1, burst: -7, inside: -3 },
+    event: "{name} 顶着突然变大的雨势稳住步伐，没有被路面变化带乱。"
+  },
+  {
+    name: "观众欢呼",
+    description: "看台声浪很大，爆发和运气的波动都会变强。",
+    fit: { burst: 7, normal: 3, inside: 2, steady: -1, conserve: -2 },
+    event: "{name} 被看台声浪带起了气势，冲刺动作突然变得更果断。"
+  },
+  {
+    name: "起跑失误",
+    description: "起跑区出现小混乱，太激进的策略更容易吃亏。",
+    fit: { steady: 7, normal: 4, conserve: 2, burst: -8, inside: -5 },
+    event: "{name} 起跑阶段被小混乱影响了一下，但很快把节奏找了回来。"
+  },
+  {
+    name: "最后弯道堵车",
+    description: "终点前的弯道挤成一团，抢内道可能大赚也可能被堵死。",
+    fit: { inside: 5, steady: 4, burst: -4, conserve: -1, normal: 1 },
+    event: "{name} 在最后弯道里找缝钻出，差一点就被前排完全堵住。"
   }
 ]
 
@@ -823,6 +898,10 @@ export class UmaRaceManager {
     return pick(RACE_TWISTS)
   }
 
+  pickScene() {
+    return pick(RACE_SCENES)
+  }
+
   parseStrategy(input = "") {
     const text = String(input || "")
       .replace(/^[.。]赛马娘\s*(加入|参加|上马|报名)\s*/u, "")
@@ -1057,7 +1136,7 @@ export class UmaRaceManager {
     this.rooms.delete(groupId)
     this.lastRaceAt.set(groupId, Date.now())
 
-    const result = this.simulateRace(players, room.track, this.pickTwist())
+    const result = this.simulateRace(players, room.track, this.pickTwist(), this.pickScene())
     const awards = this.getAwards(config)
     const awardLines = await this.applyAwards(result.ranking, awards, config)
     return this.formatRaceResult(result, awardLines)
@@ -1115,7 +1194,7 @@ export class UmaRaceManager {
     return Math.floor(randomBetween(min, max + 1))
   }
 
-  simulateRace(players, track = pick(TRACKS), twist = pick(RACE_TWISTS)) {
+  simulateRace(players, track = pick(TRACKS), twist = pick(RACE_TWISTS), scene = pick(RACE_SCENES)) {
     const strategyCounts = this.countStrategies(players)
     const runners = players.map(player => {
       const attributes = this.isValidAttributes(player.attributes)
@@ -1137,6 +1216,7 @@ export class UmaRaceManager {
       }
       const fitBonus = Number(track.fit?.[strategyKey]) || 0
       const twistBonus = Number(twist.fit?.[strategyKey]) || 0
+      const sceneBonus = Number(scene.fit?.[strategyKey]) || 0
       const riskPenalty = Math.random() < strategy.risk ? randomBetween(10, 24) : 0
       const insideCrowdPenalty = strategyKey === "inside" && players.length >= 7 ? randomBetween(0, 10) : 0
       const strategyCrowdPenalty = this.getStrategyCrowdPenalty(strategyKey, strategyCounts, players.length)
@@ -1150,6 +1230,7 @@ export class UmaRaceManager {
         wisdom * 0.13 +
         fitBonus +
         twistBonus +
+        sceneBonus +
         conditionBonus +
         variance -
         riskPenalty -
@@ -1168,14 +1249,16 @@ export class UmaRaceManager {
         strategyLabel: strategy.label,
         fitBonus,
         twistBonus,
+        sceneBonus,
         conditionBonus,
         riskPenalty,
         insideCrowdPenalty,
         strategyCrowdPenalty,
         score,
-        event: this.buildRunnerEvent(player.nickname, strategy, track, twist, {
+        event: this.buildRunnerEvent(player.nickname, strategy, track, twist, scene, {
           fitBonus,
           twistBonus,
+          sceneBonus,
           conditionBonus,
           riskPenalty,
           insideCrowdPenalty,
@@ -1185,8 +1268,8 @@ export class UmaRaceManager {
     })
 
     runners.sort((a, b) => b.score - a.score)
-    const highlights = this.buildRaceHighlights(runners, track, twist)
-    return { ranking: runners, highlights, track, twist }
+    const highlights = this.buildRaceHighlights(runners, track, twist, scene)
+    return { ranking: runners, highlights, track, twist, scene }
   }
 
   countStrategies(players) {
@@ -1210,7 +1293,7 @@ export class UmaRaceManager {
     return randomBetween(2, Math.min(14, 2 + (count - 1) * 4))
   }
 
-  buildRunnerEvent(name, strategy, track, twist, details = {}) {
+  buildRunnerEvent(name, strategy, track, twist, scene, details = {}) {
     if (details.riskPenalty > 0) {
       return `${name} 选择${strategy.label}，但这次有点用力过猛，节奏被打乱了一段。`
     }
@@ -1225,6 +1308,12 @@ export class UmaRaceManager {
     }
     if (details.twistBonus <= -6) {
       return `${name} 选择${strategy.label}，但临场变化是${twist.name}，这次有点被克到了。`
+    }
+    if (details.sceneBonus >= 6) {
+      return (scene.event || "{name} 抓住了赛况变化。").replace("{name}", name)
+    }
+    if (details.sceneBonus <= -6) {
+      return `${name} 选择${strategy.label}，但赛况是${scene.name}，这次处理起来很别扭。`
     }
     if (Math.abs(details.conditionBonus) >= 4) {
       return this.formatConditionEvent(name, details.conditionBonus)
@@ -1243,10 +1332,11 @@ export class UmaRaceManager {
     return item.text.replace("{name}", name)
   }
 
-  buildRaceHighlights(runners, track, twist) {
+  buildRaceHighlights(runners, track, twist, scene) {
     const top = runners.slice(0, Math.min(4, runners.length))
     const highlightSet = new Set()
     highlightSet.add(`临场变化：${twist.name} - ${twist.description}`)
+    highlightSet.add(`赛况事件：${scene.name} - ${scene.description}`)
     highlightSet.add(pick(track.events).replace("{name}", top[0]?.nickname || "前排"))
     for (const runner of top) {
       if (runner?.event) highlightSet.add(runner.event)
@@ -1301,6 +1391,7 @@ export class UmaRaceManager {
     return [
       "赛马结果出炉：",
       this.formatTrack(result.track),
+      `复合场景：${result.track.name} + ${result.twist.name} + ${result.scene.name}`,
       ...result.highlights.map(line => `- ${line}`),
       "",
       "名次：",
