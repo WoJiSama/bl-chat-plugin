@@ -6,7 +6,7 @@ const DEFAULT_CONFIG = {
   enabled: true,
   minPlayers: 2,
   maxPlayers: 12,
-  lobbySeconds: 60,
+  lobbySeconds: 300,
   cooldownSeconds: 30,
   winPoints: 5,
   secondPoints: 2,
@@ -654,6 +654,7 @@ export class UmaRaceManager {
       const player = room.participants.get(userId)
       player.strategyKey = this.getStrategyKey(strategy)
       player.strategyLabel = strategy.label
+      room.createdAt = Date.now()
       return `${this.getDisplayName(e)} 已更新策略：${strategy.label}`
     }
     if (room.participants.size >= config.maxPlayers) return "这局人满了，下一局再来。"
@@ -667,6 +668,7 @@ export class UmaRaceManager {
       strategyLabel: strategy.label,
       joinedAt: Date.now()
     })
+    room.createdAt = Date.now()
     return `报名成功：${this.getDisplayName(e)} 的「${uma.name}」，策略：${strategy.label}（${room.participants.size}/${config.maxPlayers}）`
   }
 

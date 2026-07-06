@@ -35,7 +35,7 @@ pluginSettings:
     enabled: true
     minPlayers: 2
     maxPlayers: 12
-    lobbySeconds: 60
+    lobbySeconds: 300
     cooldownSeconds: 30
     winPoints: 5
     secondPoints: 2

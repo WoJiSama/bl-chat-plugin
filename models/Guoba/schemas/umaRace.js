@@ -25,8 +25,8 @@ export default [
     field: "umaRace.lobbySeconds",
     label: "报名超时（秒）",
     component: "InputNumber",
-    bottomHelpMessage: "超过这个时间未开跑，本局自动作废",
-    componentProps: { min: 10, max: 300, step: 10, placeholder: "60" }
+    bottomHelpMessage: "超过这个时间未开跑，本局自动作废；有人加入或更新策略会刷新计时",
+    componentProps: { min: 10, max: 300, step: 10, placeholder: "300" }
   },
   {
     field: "umaRace.cooldownSeconds",
