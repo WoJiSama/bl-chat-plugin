@@ -170,6 +170,27 @@ export default [
     bottomHelpMessage: "开启后使用 toolsAiConfig 对疑似内容做语义复核，会增加模型调用量"
   },
   {
+    field: "groupModeration.adTemplates",
+    label: "广告判重模板",
+    component: "GTags",
+    bottomHelpMessage: "把漏判广告的核心话术填进来；系统会做去符号、去联系方式后的相似匹配",
+    componentProps: { allowAdd: true, allowDel: true }
+  },
+  {
+    field: "groupModeration.adTemplateSimilarityThreshold",
+    label: "模板相似阈值",
+    component: "InputNumber",
+    bottomHelpMessage: "越低越容易命中相似广告，默认 0.58",
+    componentProps: { min: 0, max: 1, step: 0.01, placeholder: "0.58" }
+  },
+  {
+    field: "groupModeration.adTemplateWeight",
+    label: "模板命中加权",
+    component: "InputNumber",
+    bottomHelpMessage: "命中广告模板后增加的置信度，默认 0.55",
+    componentProps: { min: 0, max: 1, step: 0.01, placeholder: "0.55" }
+  },
+  {
     field: "groupModeration.thresholds.report",
     label: "提醒阈值",
     component: "InputNumber",

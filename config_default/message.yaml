@@ -172,6 +172,10 @@ pluginSettings:
     evidenceMaxChars: 1200
     modelReviewEnabled: false
     modelThreshold: 0.55
+    adTemplateSimilarityThreshold: 0.58
+    adTemplateWeight: 0.55
+    adTemplates:
+      - "AI 培训公司 需要 软件工程师 线上培训讲课 要求 6年以上代码经验 前端 后端 晚上时间 在家即可上课 无需外出 保障收益 加创始人微信"
     thresholds:
       report: 0.70
       recall: 0.85

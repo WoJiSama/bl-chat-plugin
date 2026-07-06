@@ -10,6 +10,11 @@ export const DEFAULT_GROUP_MODERATION_CONFIG = {
   evidenceMaxChars: 1200,
   modelReviewEnabled: false,
   modelThreshold: 0.55,
+  adTemplateSimilarityThreshold: 0.58,
+  adTemplateWeight: 0.55,
+  adTemplates: [
+    "AI 培训公司 需要 软件工程师 线上培训讲课 要求 6年以上代码经验 前端 后端 晚上时间 在家即可上课 无需外出 保障收益 加创始人微信"
+  ],
   thresholds: {
     report: 0.7,
     recall: 0.85,
@@ -63,6 +68,56 @@ const RULE_DEFINITIONS = [
   }
 ]
 
+function normalizeAdTemplateText(text = "") {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/\[cq:[^\]]+\]/gi, " ")
+    .replace(/https?:\/\/\S+|www\.\S+/gi, " 链接 ")
+    .replace(/(?:微信|vx|v信|薇信|qq|电话|手机号|联系)[:：\s-]*[a-z0-9_-]{4,}/gi, " 联系方式 ")
+    .replace(/\d{5,}/g, " 数字 ")
+    .replace(/[^\p{Script=Han}a-z0-9]+/gu, "")
+}
+
+function buildCharNgrams(text = "", size = 2) {
+  const normalized = normalizeAdTemplateText(text)
+  if (!normalized) return new Set()
+  if (normalized.length <= size) return new Set([normalized])
+  const grams = new Set()
+  for (let index = 0; index <= normalized.length - size; index++) {
+    grams.add(normalized.slice(index, index + size))
+  }
+  return grams
+}
+
+function jaccardSimilarity(a, b) {
+  if (!a.size || !b.size) return 0
+  let intersection = 0
+  for (const item of a) {
+    if (b.has(item)) intersection++
+  }
+  return intersection / (a.size + b.size - intersection)
+}
+
+export function findAdTemplateMatch(text = "", config = DEFAULT_GROUP_MODERATION_CONFIG) {
+  const source = normalizeAdTemplateText(text)
+  if (source.length < 12) return null
+  const sourceGrams = buildCharNgrams(source)
+  const threshold = normalizeNumber(config.adTemplateSimilarityThreshold, DEFAULT_GROUP_MODERATION_CONFIG.adTemplateSimilarityThreshold, 0, 1)
+  let best = null
+  for (const template of normalizeStringList(config.adTemplates)) {
+    const normalizedTemplate = normalizeAdTemplateText(template)
+    if (normalizedTemplate.length < 12) continue
+    const templateGrams = buildCharNgrams(normalizedTemplate)
+    const similarity = jaccardSimilarity(sourceGrams, templateGrams)
+    const contains = source.includes(normalizedTemplate) || normalizedTemplate.includes(source)
+    const score = contains ? Math.max(similarity, 0.96) : similarity
+    if (!best || score > best.score) {
+      best = { score, template: String(template).slice(0, 80) }
+    }
+  }
+  return best && best.score >= threshold ? best : null
+}
+
 export function normalizeStringList(value) {
   if (!Array.isArray(value)) return []
   return value.map(item => String(item).trim()).filter(Boolean)
@@ -103,6 +158,9 @@ export function normalizeGroupModerationConfig(raw = {}) {
   config.minActiveLevel = normalizeNumber(config.minActiveLevel, DEFAULT_GROUP_MODERATION_CONFIG.minActiveLevel, 0, 100)
   config.evidenceMaxChars = Math.floor(normalizeNumber(config.evidenceMaxChars, DEFAULT_GROUP_MODERATION_CONFIG.evidenceMaxChars, 200, 5000))
   config.modelThreshold = normalizeNumber(config.modelThreshold, DEFAULT_GROUP_MODERATION_CONFIG.modelThreshold, 0, 1)
+  config.adTemplateSimilarityThreshold = normalizeNumber(config.adTemplateSimilarityThreshold, DEFAULT_GROUP_MODERATION_CONFIG.adTemplateSimilarityThreshold, 0, 1)
+  config.adTemplateWeight = normalizeNumber(config.adTemplateWeight, DEFAULT_GROUP_MODERATION_CONFIG.adTemplateWeight, 0, 1)
+  config.adTemplates = normalizeStringList(config.adTemplates)
   config.thresholds.report = normalizeNumber(config.thresholds.report, 0.7, 0, 1)
   config.thresholds.recall = normalizeNumber(config.thresholds.recall, 0.85, 0, 1)
   config.thresholds.mute = normalizeNumber(config.thresholds.mute, 0.9, 0, 1)
@@ -162,6 +220,12 @@ export function analyzeModerationRules({ text = "", memberLevel, imageCount = 0,
       rules.push(rule.name)
       confidence += rule.weight
     }
+  }
+
+  const templateMatch = findAdTemplateMatch(text, config)
+  if (templateMatch) {
+    rules.push("命中广告模板")
+    confidence += config.adTemplateWeight
   }
 
   if (rules.includes("低活跃等级") && rules.length >= 3) confidence += 0.12
