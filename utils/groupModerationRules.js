@@ -62,6 +62,11 @@ const RULE_DEFINITIONS = [
     test: (_text, context) => Number(context.imageCount || 0) > 0 && context.textLength <= 20
   },
   {
+    name: "低活跃合并转发",
+    weight: 0.18,
+    test: (_text, context) => Number(context.forwardCount || 0) > 0 && Number(context.memberLevel) <= Number(context.minActiveLevel)
+  },
+  {
     name: "频繁艾特",
     weight: 0.12,
     test: (_text, context) => Number(context.atCount || 0) >= 3
@@ -200,7 +205,7 @@ export function buildModerationReport(result, config = DEFAULT_GROUP_MODERATION_
     .trim()
 }
 
-export function analyzeModerationRules({ text = "", memberLevel, imageCount = 0, atCount = 0 } = {}, config = DEFAULT_GROUP_MODERATION_CONFIG) {
+export function analyzeModerationRules({ text = "", memberLevel, imageCount = 0, atCount = 0, forwardCount = 0 } = {}, config = DEFAULT_GROUP_MODERATION_CONFIG) {
   const rules = []
   let confidence = 0
   const levelNumber = Number(memberLevel)
@@ -212,6 +217,9 @@ export function analyzeModerationRules({ text = "", memberLevel, imageCount = 0,
   const context = {
     imageCount,
     atCount,
+    forwardCount,
+    memberLevel: levelNumber,
+    minActiveLevel: config.minActiveLevel,
     textLength: String(text || "").trim().length
   }
 

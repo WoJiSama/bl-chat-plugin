@@ -302,13 +302,14 @@ class GroupModerationManager {
     if (config.inspectLowLevelOnly && Number.isFinite(level) && level > config.minActiveLevel) return false
 
     const content = await this.extractContent(e, config)
-    if (!content.text && !content.imageCount) return false
+    if (!content.text && !content.imageCount && !content.forwardCount) return false
 
     const base = analyzeModerationRules({
       text: content.text,
       memberLevel: member?.level,
       imageCount: content.imageCount,
-      atCount: content.atCount
+      atCount: content.atCount,
+      forwardCount: content.forwardCount
     }, config)
 
     let rules = base.rules

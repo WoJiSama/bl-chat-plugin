@@ -60,9 +60,6 @@ export class MessageRecordPlugin extends plugin {
 
     async onMessage(e) {
         await this.messageManager.recordMessage(e);
-        this.archiveManager.recordMessage(e).catch(error => {
-            logger.warn(`[MessageArchive] 后台归档失败: ${error.message}`);
-        });
         emojiPackManager.maybeAutoCollect(e).catch(() => {});
         return false;
     }
