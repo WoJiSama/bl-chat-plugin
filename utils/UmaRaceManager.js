@@ -1,6 +1,7 @@
 import fs from "fs"
 import path from "path"
 import yaml from "js-yaml"
+import { renderUmaRaceReport } from "./UmaRaceReportRenderer.js"
 
 const DEFAULT_CONFIG = {
   enabled: true,
@@ -1363,7 +1364,7 @@ export class UmaRaceManager {
     return this.formatRaceStage(room, { opening: true })
   }
 
-  raceDecision(e) {
+  async raceDecision(e) {
     if (!e?.group_id) return "这个小游戏要在群里玩。"
     const groupId = String(e.group_id)
     const room = this.getRoom(groupId)
@@ -1391,9 +1392,21 @@ export class UmaRaceManager {
     }
     const previous = stageDecisions.get(userId)
     stageDecisions.set(userId, action.key)
+    room.event = e
+
+    if (this.areAllHumanPlayersDecided(room, stageDecisions)) {
+      await this.advanceRaceStage(groupId)
+      return ""
+    }
+
     return previous && previous !== action.key
       ? `${runner.nickname} 把${stage.label}决策改成了：${action.label}`
       : `${runner.nickname} 的${stage.label}决策：${action.label}`
+  }
+
+  areAllHumanPlayersDecided(room, stageDecisions) {
+    const humans = (room.runners || []).filter(runner => !runner.isNpc)
+    return humans.length > 0 && humans.every(runner => stageDecisions.has(String(runner.userId)))
   }
 
   parseRaceAction(msg = "") {
@@ -1478,25 +1491,39 @@ export class UmaRaceManager {
   async advanceRaceStage(groupId) {
     const room = this.getRoom(groupId)
     if (!room || room.phase !== "race") return
+    if (room.advancing) return
+    room.advancing = true
     this.clearStageTimer(room)
-    const stage = RACE_STAGES[room.stageIndex] || RACE_STAGES[0]
-    const lines = this.resolveRaceStage(room, stage)
-    room.history.push({ stage: stage.key, lines })
+    try {
+      const stage = RACE_STAGES[room.stageIndex] || RACE_STAGES[0]
+      const lines = this.resolveRaceStage(room, stage)
+      room.history.push({ stage: stage.key, lines })
 
-    if (room.stageIndex >= RACE_STAGES.length - 1) {
-      const finalText = await this.finishStagedRace(room)
-      await room.event?.reply?.(finalText)
-      return
+      if (room.stageIndex >= RACE_STAGES.length - 1) {
+        const finalMessage = await this.finishStagedRace(room)
+        await room.event?.reply?.(finalMessage)
+        return
+      }
+
+      const previousStage = stage
+      room.stageIndex += 1
+      room.advancing = false
+      this.scheduleStageAdvance(room)
+      const fallbackText = [
+        `${stage.label}结束：`,
+        ...lines,
+        "",
+        this.formatRaceStage(room)
+      ].join("\n")
+      const message = await this.renderRaceReportOrFallback(
+        room.event,
+        this.buildStageRaceReport(room, previousStage, lines),
+        fallbackText
+      )
+      await room.event?.reply?.(this.appendMessageText(message, `请使用：.赛马娘 决策 [行动]\n行动：提速 / 减速 / 稳住 / 抢位 / 爆发 / 赌一把 / 跟跑 / 压节奏`))
+    } finally {
+      if (this.getRoom(groupId) === room) room.advancing = false
     }
-
-    room.stageIndex += 1
-    this.scheduleStageAdvance(room)
-    await room.event?.reply?.([
-      `${stage.label}结束：`,
-      ...lines,
-      "",
-      this.formatRaceStage(room)
-    ].join("\n"))
   }
 
   resolveRaceStage(room, stage) {
@@ -1702,6 +1729,73 @@ export class UmaRaceManager {
     return `${breath}，${rhythm}，${route}，${burst}`
   }
 
+  async renderRaceReportOrFallback(e, report, fallbackText) {
+    try {
+      const image = await renderUmaRaceReport(e, report)
+      if (!image) throw new Error("empty render result")
+      return image
+    } catch (error) {
+      this.logger?.warn?.(`[赛马娘小游戏] 渲染比赛报告失败: ${error.message}`)
+      return fallbackText
+    }
+  }
+
+  appendMessageText(message, text) {
+    if (!text) return message
+    if (typeof message === "string") return `${message}\n\n${text}`
+    if (Array.isArray(message)) return [...message, `\n${text}`]
+    return [message, `\n${text}`]
+  }
+
+  buildStageRaceReport(room, previousStage, lines = []) {
+    const currentStage = RACE_STAGES[room.stageIndex] || RACE_STAGES[0]
+    return {
+      type: "stage",
+      title: `${previousStage.label}结束`,
+      subtitle: `进入${currentStage.label}：${currentStage.prompt}`,
+      scene: `${room.track.name} / ${room.twist.name} / ${room.scene.name}`,
+      generatedAt: this.formatReportTime(),
+      prompt: "当前队形已更新，下一段可以调整跑法。",
+      ranking: this.buildRaceReportRanking(room.runners),
+      highlights: lines.slice(0, 5)
+    }
+  }
+
+  buildFinalRaceReport(result, awardLines = []) {
+    return {
+      type: "final",
+      title: "赛马结果出炉",
+      subtitle: this.formatTrack(result.track).replace(/^本局赛道：/, ""),
+      scene: `${result.track.name} / ${result.twist.name} / ${result.scene.name}`,
+      generatedAt: this.formatReportTime(),
+      prompt: "前三名获得全群互通积分。",
+      ranking: this.buildRaceReportRanking(result.ranking),
+      highlights: (result.highlights || []).slice(0, 5),
+      awards: awardLines.length ? awardLines : ["本局无人获得积分"]
+    }
+  }
+
+  buildRaceReportRanking(runners = []) {
+    return this.rankRunners(runners).slice(0, RACE_SIZE).map((runner, index) => ({
+      rank: index + 1,
+      name: this.formatRunnerName(runner),
+      meta: runner.traitLabel ? `特质：${runner.traitLabel}` : "",
+      strategy: runner.strategyLabel || "正常跑",
+      state: this.describeRunnerState(runner)
+    }))
+  }
+
+  formatReportTime() {
+    return new Date().toLocaleString("zh-CN", {
+      timeZone: "Asia/Shanghai",
+      hour12: false,
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit"
+    })
+  }
+
   async finishStagedRace(room) {
     this.clearStageTimer(room)
     const ranking = this.rankRunners(room.runners)
@@ -1718,7 +1812,11 @@ export class UmaRaceManager {
         pick(room.track.events).replace("{name}", ranking[0]?.nickname || "前排")
       ].slice(0, 5)
     }
-    return this.formatRaceResult(result, awardLines)
+    return this.renderRaceReportOrFallback(
+      room.event,
+      this.buildFinalRaceReport(result, awardLines),
+      this.formatRaceResult(result, awardLines)
+    )
   }
 
   fillNpcPlayers(players, minPlayers) {

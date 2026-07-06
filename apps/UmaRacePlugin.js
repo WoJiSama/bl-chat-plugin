@@ -73,7 +73,8 @@ export class UmaRacePlugin extends plugin {
   }
 
   async raceDecision(e) {
-    await e.reply(umaRaceManager.raceDecision(e))
+    const result = await umaRaceManager.raceDecision(e)
+    if (result) await e.reply(result)
     return true
   }
 
