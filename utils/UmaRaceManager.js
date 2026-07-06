@@ -15,6 +15,17 @@ const DEFAULT_CONFIG = {
   baseDir: "data/uma_race"
 }
 
+const NPC_NAMES = [
+  "栗毛流星",
+  "晨风铃",
+  "青叶疾驰",
+  "星砂步",
+  "白露弯道",
+  "红茶终线",
+  "薄荷影",
+  "夜樱步"
+]
+
 const STRATEGIES = {
   normal: {
     label: "正常跑",
@@ -265,7 +276,7 @@ export class UmaRaceManager {
       return [
         `这一局已经开了，当前 ${existing.participants.size} 人。`,
         this.formatTrack(existing.track),
-        "想参加发：.赛马娘 加入 稳一点",
+        "想参加发：.赛马娘 加入 [策略]",
         this.formatStrategyTips()
       ].join("\n")
     }
@@ -287,10 +298,10 @@ export class UmaRaceManager {
     return [
       "赛马娘小游戏开局啦。",
       this.formatTrack(room.track),
-      `报名：.赛马娘 加入 稳一点`,
+      `报名：.赛马娘 加入 [策略]`,
       this.formatStrategyTips(),
       `开跑：.赛马娘 开跑`,
-      `人数：${room.participants.size}/${config.maxPlayers}，至少 ${config.minPlayers} 人`
+      `人数：${room.participants.size}/${config.maxPlayers}，至少 ${config.minPlayers} 人，不够会补 NPC`
     ].join("\n")
   }
 
@@ -359,7 +370,7 @@ export class UmaRaceManager {
 
     const players = [...room.participants.values()]
     if (players.length < config.minPlayers) {
-      return `人数还不够，现在 ${players.length}/${config.minPlayers}。想参加发：.赛马娘 加入`
+      this.fillNpcPlayers(players, config.minPlayers)
     }
 
     this.rooms.delete(groupId)
@@ -369,6 +380,27 @@ export class UmaRaceManager {
     const awards = this.getAwards(config)
     const awardLines = await this.applyAwards(result.ranking, awards, config)
     return this.formatRaceResult(result, awardLines)
+  }
+
+  fillNpcPlayers(players, minPlayers) {
+    const need = Math.max(0, Number(minPlayers) - players.length)
+    const usedNames = new Set(players.map(player => player.nickname))
+    for (let index = 0; index < need; index++) {
+      const name = this.pickNpcName(usedNames)
+      usedNames.add(name)
+      players.push({
+        userId: `npc:${Date.now()}:${index}`,
+        nickname: name,
+        strategyKey: pick(["normal", "steady", "burst", "conserve", "inside"]),
+        isNpc: true,
+        joinedAt: Date.now()
+      })
+    }
+  }
+
+  pickNpcName(usedNames) {
+    const available = NPC_NAMES.filter(name => !usedNames.has(name))
+    return available.length ? pick(available) : `临时选手${usedNames.size + 1}`
   }
 
   simulateRace(players, track = pick(TRACKS)) {
@@ -454,6 +486,10 @@ export class UmaRaceManager {
     const lines = []
     ranking.forEach((runner, index) => {
       const points = awards[index] || 0
+      if (runner.isNpc) {
+        if (points > 0) lines.push(`${index + 1}. ${runner.nickname} 是NPC，不计入积分`)
+        return
+      }
       const record = data.players[runner.userId] || {
         userId: runner.userId,
         nickname: runner.nickname,
@@ -482,7 +518,7 @@ export class UmaRaceManager {
 
   formatRaceResult(result, awardLines) {
     const rankingLines = result.ranking.slice(0, 8).map((runner, index) =>
-      `${index + 1}. ${runner.nickname}（${runner.strategyLabel || "正常跑"}）`
+      `${index + 1}. ${runner.nickname}${runner.isNpc ? "（NPC）" : ""}（${runner.strategyLabel || "正常跑"}）`
     )
     return [
       "赛马结果出炉：",
