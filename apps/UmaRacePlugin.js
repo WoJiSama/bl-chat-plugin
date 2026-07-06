@@ -12,6 +12,7 @@ export class UmaRacePlugin extends plugin {
         { reg: "^[.。]赛马娘\\s*(帮助|help)\\s*$", fnc: "showHelp" },
         { reg: "^[.。]赛马娘\\s*(领养|创建|注册)\\s+[\\s\\S]+$", fnc: "adoptUma" },
         { reg: "^[.。]赛马娘\\s*重新领养\\s+[\\s\\S]+$", fnc: "readoptUma" },
+        { reg: "^[.。]赛马娘\\s*(弃养|放生)(\\s*确认)?\\s*$", fnc: "abandonUma" },
         { reg: "^[.。]赛马娘\\s*(我的赛马娘|赛马娘信息|属性|六维)\\s*$", fnc: "showUma" },
         { reg: "^[.。]赛马娘\\s*(开始|开局|创建)\\s*$", fnc: "startRace" },
         { reg: "^[.。]赛马娘\\s*(加入|参加|上马|报名)([\\s\\S]*)$", fnc: "joinRace" },
@@ -40,6 +41,11 @@ export class UmaRacePlugin extends plugin {
 
   async readoptUma(e) {
     await e.reply(await umaRaceManager.adoptUma(e, { overwrite: true }))
+    return true
+  }
+
+  async abandonUma(e) {
+    await e.reply(await umaRaceManager.abandonUma(e, { confirm: /确认/.test(String(e.msg || "")) }))
     return true
   }
 

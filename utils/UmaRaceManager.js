@@ -510,6 +510,42 @@ export class UmaRaceManager {
     ].join("\n")
   }
 
+  async abandonUma(e, { confirm = false } = {}) {
+    const config = this.getConfig()
+    if (!config.enabled) return "赛马娘小游戏现在没开。"
+    const userId = this.getUserId(e)
+    if (!userId) return "没拿到你的 QQ 号，弃养失败。"
+
+    const data = this.readPoints(config)
+    const record = data.players?.[userId]
+    const uma = record?.uma
+    if (!uma) return "你现在没有领养赛马娘。"
+    if (!confirm) {
+      return `确认要弃养「${uma.name}」吗？积分和历史战绩会保留，但这匹小马的六维档案会删除。\n确认请发：.赛马娘 弃养 确认`
+    }
+
+    delete record.uma
+    record.nickname = this.getDisplayName(e)
+    record.updatedAt = nowIso()
+    data.players[userId] = record
+    await this.writePoints(data, config)
+
+    const removedFromRoom = this.removeUserFromActiveRoom(e, userId)
+    return [
+      `已弃养：${uma.name}`,
+      "你的积分和历史战绩已保留。",
+      removedFromRoom ? "你也已从当前赛马局报名列表中移除。" : ""
+    ].filter(Boolean).join("\n")
+  }
+
+  removeUserFromActiveRoom(e, userId) {
+    if (!e?.group_id || !userId) return false
+    const room = this.getRoom(e.group_id)
+    if (!room?.participants?.has(userId)) return false
+    room.participants.delete(userId)
+    return true
+  }
+
   getRoom(groupId) {
     return this.rooms.get(String(groupId || ""))
   }
@@ -962,6 +998,7 @@ export class UmaRaceManager {
       "赛马娘小游戏：",
       ".赛马娘 领养 名字 性格描述 - 创建自己的赛马娘",
       ".赛马娘 我的赛马娘 - 查看六维属性",
+      ".赛马娘 弃养 - 删除当前小马档案，保留积分",
       ".赛马娘 开始 - 开一局",
       ".赛马娘 加入 [策略] - 报名，可选策略",
       "策略：稳一点 / 拼一把 / 留体力 / 抢内道；不填就是正常跑",
