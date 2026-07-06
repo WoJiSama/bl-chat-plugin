@@ -36,6 +36,7 @@ pluginSettings:
     minPlayers: 8
     maxPlayers: 8
     lobbySeconds: 300
+    raceStageSeconds: 45
     cooldownSeconds: 30
     winPoints: 5
     secondPoints: 2

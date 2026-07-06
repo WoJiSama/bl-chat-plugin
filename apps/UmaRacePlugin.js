@@ -18,6 +18,7 @@ export class UmaRacePlugin extends plugin {
         { reg: "^[.。]赛马娘\\s*训练\\s+[\\s\\S]+$", fnc: "trainUma" },
         { reg: "^[.。]赛马娘\\s*(开始|开局|创建)\\s*$", fnc: "startRace" },
         { reg: "^[.。]赛马娘\\s*(加入|参加|上马|报名)([\\s\\S]*)$", fnc: "joinRace" },
+        { reg: "^[.。]赛马娘\\s*(决策|选择|行动)\\s+[\\s\\S]+$", fnc: "raceDecision" },
         { reg: "^[.。]赛马娘\\s*(开跑|开赛|比赛|冲|跑)\\s*$", fnc: "runRace" },
         { reg: "^[.。]赛马娘\\s*(取消|关闭|结束)\\s*$", fnc: "cancelRace" },
         { reg: "^[.。]赛马娘\\s*(积分|分数|我的积分)\\s*$", fnc: "showScore" },
@@ -67,7 +68,12 @@ export class UmaRacePlugin extends plugin {
   }
 
   async joinRace(e) {
-    await e.reply(umaRaceManager.joinRace(e, e.msg))
+    await e.reply(await umaRaceManager.joinRace(e, e.msg))
+    return true
+  }
+
+  async raceDecision(e) {
+    await e.reply(umaRaceManager.raceDecision(e))
     return true
   }
 

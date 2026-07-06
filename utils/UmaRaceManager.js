@@ -7,6 +7,7 @@ const DEFAULT_CONFIG = {
   minPlayers: 8,
   maxPlayers: 8,
   lobbySeconds: 300,
+  raceStageSeconds: 45,
   cooldownSeconds: 30,
   winPoints: 5,
   secondPoints: 2,
@@ -16,6 +17,80 @@ const DEFAULT_CONFIG = {
 }
 
 const RACE_SIZE = 8
+
+const RACE_STAGES = [
+  {
+    key: "start",
+    label: "起步阶段",
+    prompt: "刚出闸，抢速度和找位置都很关键。",
+    event: "闸门一开，前排很快挤成一线，后面的人也在找空档。"
+  },
+  {
+    key: "mid",
+    label: "半程阶段",
+    prompt: "节奏已经拉开，有人开始喘，也有人还在等机会。",
+    event: "半程过后，队伍节奏明显分层，内外线都在重新洗牌。"
+  },
+  {
+    key: "finish",
+    label: "冲刺阶段",
+    prompt: "最后直线到了，保住节奏还是全力冲刺都要现在决定。",
+    event: "终点线已经能看见，前排开始顶速度，后排只能找最后的机会。"
+  }
+]
+
+const RACE_ACTIONS = {
+  speed_up: {
+    label: "提速",
+    aliases: ["提速", "加速", "冲", "快跑", "拉速度"],
+    description: "吃速度，位置提升明显，但会消耗耐力并让节奏更紧。",
+    defaultFor: ["burst"]
+  },
+  slow_down: {
+    label: "减速",
+    aliases: ["减速", "放慢", "慢一点", "缓一缓", "回复"],
+    description: "位置会让一点，但能把呼吸和节奏收回来。"
+  },
+  steady: {
+    label: "稳住",
+    aliases: ["稳住", "稳一点", "稳定", "别急", "保持"],
+    description: "吃稳定，波动最小，适合复杂路况。"
+  },
+  inside: {
+    label: "抢位",
+    aliases: ["抢位", "抢内道", "内道", "卡位", "贴内"],
+    description: "吃判断，成功会省距离，失败会被堵。"
+  },
+  burst: {
+    label: "爆发",
+    aliases: ["爆发", "冲刺", "全力", "拼一把", "开大"],
+    description: "吃爆发，冲刺收益很高，但会大量消耗余力。"
+  },
+  gamble: {
+    label: "赌一把",
+    aliases: ["赌一把", "赌", "搏一把", "莽", "看运气"],
+    description: "吃运气，上下限都很大，可能突然翻盘也可能乱节奏。"
+  },
+  follow: {
+    label: "跟跑",
+    aliases: ["跟跑", "跟住", "咬住", "跟前面"],
+    description: "吃判断和稳定，适合贴住前排，超车能力一般。"
+  },
+  pace: {
+    label: "压节奏",
+    aliases: ["压节奏", "留体力", "省体力", "控节奏", "攒体力"],
+    description: "吃耐力和稳定，短期不抢，后段更舒服。",
+    defaultFor: ["conserve"]
+  }
+}
+
+const STRATEGY_DEFAULT_ACTIONS = {
+  normal: "steady",
+  steady: "steady",
+  burst: "speed_up",
+  conserve: "pace",
+  inside: "inside"
+}
 
 const NPC_NAMES = [
   "晨间训练员",
@@ -487,6 +562,7 @@ export class UmaRaceManager {
       minPlayers: RACE_SIZE,
       maxPlayers: RACE_SIZE,
       lobbySeconds: safeNumber(raw.lobbySeconds, DEFAULT_CONFIG.lobbySeconds, 10, 300),
+      raceStageSeconds: safeNumber(raw.raceStageSeconds, DEFAULT_CONFIG.raceStageSeconds, 10, 180),
       cooldownSeconds: safeNumber(raw.cooldownSeconds, DEFAULT_CONFIG.cooldownSeconds, 0, 3600),
       winPoints: safeNumber(raw.winPoints, DEFAULT_CONFIG.winPoints, 0, 100000),
       secondPoints: safeNumber(raw.secondPoints, DEFAULT_CONFIG.secondPoints, 0, 100000),
@@ -1030,6 +1106,9 @@ export class UmaRaceManager {
     const groupId = String(e.group_id)
     const existing = this.getRoom(groupId)
     if (existing) {
+      if (existing.phase === "race") {
+        return this.formatActiveRaceStatus(existing)
+      }
       return [
         `这一局已经开了，当前 ${existing.participants.size} 人。`,
         this.formatTrack(existing.track),
@@ -1046,6 +1125,7 @@ export class UmaRaceManager {
       groupId,
       starterId: String(e.user_id || e.sender?.user_id || ""),
       createdAt: Date.now(),
+      phase: "lobby",
       track: this.pickTrack(),
       participants: new Map(),
       event: e,
@@ -1092,6 +1172,7 @@ export class UmaRaceManager {
         groupId,
         starterId: userId,
         createdAt: Date.now(),
+        phase: "lobby",
         track: this.pickTrack(),
         participants: new Map(),
         event: e,
@@ -1099,6 +1180,13 @@ export class UmaRaceManager {
       }
       this.rooms.set(groupId, room)
       createdByJoin = true
+    }
+
+    if (room.phase === "race") {
+      return [
+        "这一局已经开跑了，不能再报名。",
+        this.formatActiveRaceStatus(room)
+      ].join("\n")
     }
 
     const elapsed = Math.floor((Date.now() - room.createdAt) / 1000)
@@ -1113,6 +1201,7 @@ export class UmaRaceManager {
         groupId,
         starterId: userId,
         createdAt: Date.now(),
+        phase: "lobby",
         track: this.pickTrack(),
         participants: new Map(),
         event: e,
@@ -1186,6 +1275,25 @@ export class UmaRaceManager {
     }
   }
 
+  scheduleStageAdvance(room, config = this.getConfig()) {
+    if (!room || room.phase !== "race") return
+    this.clearStageTimer(room)
+    const delayMs = Math.max(1, Number(config.raceStageSeconds) || DEFAULT_CONFIG.raceStageSeconds) * 1000
+    room.stageTimer = setTimeout(() => {
+      this.advanceRaceStage(room.groupId).catch(error => {
+        this.logger?.warn?.(`[赛马娘小游戏] 阶段推进失败: ${error.message}`)
+      })
+    }, delayMs)
+    room.stageTimer.unref?.()
+  }
+
+  clearStageTimer(room) {
+    if (room?.stageTimer) {
+      clearTimeout(room.stageTimer)
+      room.stageTimer = null
+    }
+  }
+
   async autoStartRace(groupId) {
     const room = this.getRoom(groupId)
     if (!room) return
@@ -1219,6 +1327,7 @@ export class UmaRaceManager {
     const userId = String(e.user_id || e.sender?.user_id || "")
     if (!e.isMaster && userId !== room.starterId) return "只有开局的人或主人可以取消这一局。"
     this.clearAutoStart(room)
+    this.clearStageTimer(room)
     this.rooms.delete(groupId)
     return "这局赛马已经取消。"
   }
@@ -1231,6 +1340,7 @@ export class UmaRaceManager {
     const groupId = String(e.group_id)
     const room = this.getRoom(groupId)
     if (!room) return "现在没有赛马局。先发：.赛马娘 开始"
+    if (room.phase === "race") return this.formatActiveRaceStatus(room)
 
     const players = [...room.participants.values()]
     if (players.length < RACE_SIZE) {
@@ -1238,12 +1348,376 @@ export class UmaRaceManager {
     }
 
     this.clearAutoStart(room)
-    this.rooms.delete(groupId)
+    room.phase = "race"
+    room.event = e
+    room.startedAt = Date.now()
+    room.stageIndex = 0
+    room.twist = this.pickTwist()
+    room.scene = this.pickScene()
+    room.decisions = new Map()
+    room.history = []
+    room.runners = this.initializeStageRunners(players, room.track, room.twist, room.scene)
     this.lastRaceAt.set(groupId, Date.now())
+    this.scheduleStageAdvance(room, config)
 
-    const result = this.simulateRace(players, room.track, this.pickTwist(), this.pickScene())
-    const awards = this.getAwards(config)
-    const awardLines = await this.applyAwards(result.ranking, awards, config)
+    return this.formatRaceStage(room, { opening: true })
+  }
+
+  raceDecision(e) {
+    if (!e?.group_id) return "这个小游戏要在群里玩。"
+    const groupId = String(e.group_id)
+    const room = this.getRoom(groupId)
+    if (!room) return "现在没有赛马局。先发：.赛马娘 开始"
+    if (room.phase !== "race") return "比赛还没开跑。开跑后每个阶段可以发：.赛马娘 决策 提速"
+
+    const userId = this.getUserId(e)
+    const runner = room.runners?.find(item => String(item.userId) === userId && !item.isNpc)
+    if (!runner) return "你不在这一局里，不能下阶段决策。"
+
+    const action = this.parseRaceAction(e?.msg)
+    if (!action) {
+      return [
+        "没看懂这个决策。",
+        this.formatRaceActionTips()
+      ].join("\n")
+    }
+
+    const stage = RACE_STAGES[room.stageIndex] || RACE_STAGES[0]
+    if (!room.decisions) room.decisions = new Map()
+    let stageDecisions = room.decisions.get(stage.key)
+    if (!stageDecisions) {
+      stageDecisions = new Map()
+      room.decisions.set(stage.key, stageDecisions)
+    }
+    const previous = stageDecisions.get(userId)
+    stageDecisions.set(userId, action.key)
+    return previous && previous !== action.key
+      ? `${runner.nickname} 把${stage.label}决策改成了：${action.label}`
+      : `${runner.nickname} 的${stage.label}决策：${action.label}`
+  }
+
+  parseRaceAction(msg = "") {
+    const text = String(msg || "")
+      .replace(/^[.。]赛马娘\s*(决策|选择|行动)\s*/u, "")
+      .trim()
+    if (!text) return null
+    for (const [key, action] of Object.entries(RACE_ACTIONS)) {
+      if (action.aliases.some(alias => text.includes(alias))) return { key, ...action }
+    }
+    return null
+  }
+
+  formatRaceActionTips() {
+    return [
+      "可选决策：提速 / 减速 / 稳住 / 抢位 / 爆发 / 赌一把 / 跟跑 / 压节奏",
+      "格式：.赛马娘 决策 提速"
+    ].join("\n")
+  }
+
+  initializeStageRunners(players, track, twist, scene) {
+    const strategyCounts = this.countStrategies(players)
+    return players.map(player => {
+      const attributes = this.isValidAttributes(player.attributes)
+        ? player.attributes
+        : this.generateAttributes(player.umaName || player.nickname, "均衡")
+      const strategyKey = player.strategyKey && STRATEGIES[player.strategyKey] ? player.strategyKey : "normal"
+      const strategy = STRATEGIES[strategyKey]
+      const trait = this.getRaceTrait(player)
+      const speed = this.rollAttributeValue(attributes.speed)
+      const staminaAttr = this.rollAttributeValue(attributes.stamina)
+      const power = this.rollAttributeValue(attributes.power)
+      const focus = this.rollAttributeValue(attributes.focus)
+      const wisdom = this.rollAttributeValue(attributes.wisdom)
+      const luck = this.rollAttributeValue(attributes.luck, 50 + (trait.luckBonus || 0), 6)
+      const conditionBonus = randomBetween(-7, 8)
+      const fitBonus = Number(track.fit?.[strategyKey]) || 0
+      const twistBonus = Number(twist.fit?.[strategyKey]) || 0
+      const sceneBonus = Number(scene.fit?.[strategyKey]) || 0
+      const traitBonus = this.getTraitBonus(trait, strategyKey, track.id)
+      const strategyCrowdPenalty = this.getStrategyCrowdPenalty(strategyKey, strategyCounts, players.length)
+      const basePosition = speed * 0.24 +
+        staminaAttr * 0.15 +
+        power * 0.15 +
+        focus * 0.16 +
+        wisdom * 0.14 +
+        luck * 0.08 +
+        fitBonus +
+        twistBonus * 0.55 +
+        sceneBonus * 0.55 +
+        traitBonus +
+        conditionBonus -
+        strategyCrowdPenalty +
+        randomBetween(-8, 9)
+
+      return {
+        ...player,
+        attributes,
+        strategyKey,
+        strategyLabel: strategy.label,
+        traitKey: trait.key,
+        traitLabel: trait.label,
+        race: {
+          speed,
+          staminaAttr,
+          power,
+          focus,
+          wisdom,
+          luck,
+          position: basePosition,
+          stamina: Math.min(125, 66 + Number(attributes.stamina || 0) * 2.4 + randomBetween(-5, 8)),
+          rhythm: Math.min(125, 66 + Number(attributes.focus || 0) * 2.2 + randomBetween(-6, 8)),
+          burstReserve: Math.min(120, 48 + Number(attributes.power || 0) * 2.5 + randomBetween(-6, 8)),
+          route: Math.min(120, 48 + Number(attributes.wisdom || 0) * 2.4 + randomBetween(-7, 8)),
+          luckState: Math.min(120, 46 + Number(attributes.luck || 0) * 2.3 + randomBetween(-10, 11)),
+          notes: [this.formatConditionEvent(player.nickname, conditionBonus)]
+        }
+      }
+    })
+  }
+
+  async advanceRaceStage(groupId) {
+    const room = this.getRoom(groupId)
+    if (!room || room.phase !== "race") return
+    this.clearStageTimer(room)
+    const stage = RACE_STAGES[room.stageIndex] || RACE_STAGES[0]
+    const lines = this.resolveRaceStage(room, stage)
+    room.history.push({ stage: stage.key, lines })
+
+    if (room.stageIndex >= RACE_STAGES.length - 1) {
+      const finalText = await this.finishStagedRace(room)
+      await room.event?.reply?.(finalText)
+      return
+    }
+
+    room.stageIndex += 1
+    this.scheduleStageAdvance(room)
+    await room.event?.reply?.([
+      `${stage.label}结束：`,
+      ...lines,
+      "",
+      this.formatRaceStage(room)
+    ].join("\n"))
+  }
+
+  resolveRaceStage(room, stage) {
+    const rankedBefore = this.rankRunners(room.runners)
+    const stageDecisions = room.decisions?.get(stage.key) || new Map()
+    const lines = []
+    for (const runner of room.runners) {
+      const beforeRank = rankedBefore.findIndex(item => item.userId === runner.userId) + 1
+      const actionKey = runner.isNpc
+        ? this.pickNpcStageAction(runner, beforeRank, stage)
+        : (stageDecisions.get(String(runner.userId)) || this.getDefaultStageAction(runner))
+      const action = RACE_ACTIONS[actionKey] ? { key: actionKey, ...RACE_ACTIONS[actionKey] } : { key: "steady", ...RACE_ACTIONS.steady }
+      const result = this.applyRaceAction(runner, action, stage, beforeRank, room)
+      if (!runner.isNpc && result.line) lines.push(result.line)
+    }
+    for (const runner of room.runners) {
+      const race = runner.race
+      if (race.stamina < 24) race.position -= randomBetween(5, 11)
+      if (race.rhythm < 24) race.position -= randomBetween(4, 10)
+      if (race.stamina > 82 && stage.key === "finish") race.position += randomBetween(1, 5)
+    }
+    return lines.length ? lines.slice(0, 5) : ["大家都按自己的节奏处理了这一段，队形还在继续变化。"]
+  }
+
+  applyRaceAction(runner, action, stage, beforeRank, room) {
+    const race = runner.race
+    const stageRate = this.getStageActionRate(action.key, stage.key, room.track?.id)
+    const attrPush = this.getActionAttributePush(runner, action.key)
+    const crowdRisk = action.key === "inside" && beforeRank <= 4 ? randomBetween(0, 8) : 0
+    const lowStaminaPenalty = race.stamina < 38 && ["speed_up", "burst", "gamble"].includes(action.key)
+      ? randomBetween(5, 14)
+      : 0
+    const lowRhythmPenalty = race.rhythm < 38 && ["inside", "gamble", "burst"].includes(action.key)
+      ? randomBetween(4, 12)
+      : 0
+    let positionDelta = attrPush * stageRate + randomBetween(-4, 5) - crowdRisk - lowStaminaPenalty - lowRhythmPenalty
+    let note = ""
+
+    if (action.key === "speed_up") {
+      race.stamina -= randomBetween(11, 18)
+      race.rhythm -= randomBetween(3, 8)
+      note = `${runner.nickname} 选择提速，脚步明显往前压，呼吸也开始急了一点。`
+    } else if (action.key === "slow_down") {
+      positionDelta -= randomBetween(6, 11)
+      race.stamina += randomBetween(12, 20)
+      race.rhythm += randomBetween(6, 12)
+      note = `${runner.nickname} 主动减速，把呼吸收了回来，但位置让出了一些。`
+    } else if (action.key === "steady") {
+      race.rhythm += randomBetween(7, 13)
+      race.stamina -= randomBetween(3, 7)
+      note = `${runner.nickname} 稳住了节奏，动作不夸张，但路线处理得很干净。`
+    } else if (action.key === "inside") {
+      race.route += randomBetween(4, 10)
+      race.rhythm -= randomBetween(2, 7)
+      if (crowdRisk > 0) {
+        positionDelta -= randomBetween(4, 9)
+        note = `${runner.nickname} 想抢位，可前排太挤，被迫多等了一拍。`
+      } else {
+        note = `${runner.nickname} 抢到更舒服的位置，像是贴着内侧省了一段距离。`
+      }
+    } else if (action.key === "burst") {
+      race.burstReserve -= randomBetween(18, 30)
+      race.stamina -= randomBetween(14, 24)
+      race.rhythm -= randomBetween(5, 11)
+      if (race.burstReserve < 18) positionDelta -= randomBetween(7, 15)
+      note = `${runner.nickname} 开始爆发，身位一下子往前顶，余力也被用掉不少。`
+    } else if (action.key === "gamble") {
+      const lucky = randomBetween(0, 120) < race.luckState
+      positionDelta += lucky ? randomBetween(8, 20) : -randomBetween(8, 18)
+      race.luckState -= randomBetween(5, 14)
+      race.rhythm -= randomBetween(4, 12)
+      note = lucky
+        ? `${runner.nickname} 赌了一把，刚好抓到空档，位置突然变得很有威胁。`
+        : `${runner.nickname} 赌了一把，但这次没接住节奏，脚步有点乱。`
+    } else if (action.key === "follow") {
+      race.rhythm += randomBetween(4, 10)
+      race.stamina -= randomBetween(3, 7)
+      positionDelta += beforeRank > 4 ? randomBetween(1, 6) : randomBetween(-2, 3)
+      note = `${runner.nickname} 选择跟跑，贴住前面的人影，没有急着单独冲出去。`
+    } else if (action.key === "pace") {
+      race.stamina += randomBetween(5, 12)
+      race.rhythm += randomBetween(4, 10)
+      positionDelta += stage.key === "finish" ? randomBetween(-5, 2) : randomBetween(-3, 4)
+      note = `${runner.nickname} 压住节奏，把一口气留了下来，看起来是在等后面。`
+    }
+
+    race.position += positionDelta
+    race.stamina = Math.max(0, Math.min(130, race.stamina))
+    race.rhythm = Math.max(0, Math.min(130, race.rhythm))
+    race.burstReserve = Math.max(0, Math.min(125, race.burstReserve))
+    race.route = Math.max(0, Math.min(125, race.route))
+    race.luckState = Math.max(0, Math.min(125, race.luckState))
+    race.notes = [note, this.describeRunnerState(runner)].filter(Boolean)
+    return { line: `${note} ${this.describeRunnerState(runner)}` }
+  }
+
+  getActionAttributePush(runner, actionKey) {
+    const race = runner.race
+    const attr = {
+      speed_up: race.speed * 0.085 + race.staminaAttr * 0.025,
+      slow_down: race.staminaAttr * 0.03 + race.focus * 0.03,
+      steady: race.focus * 0.07 + race.wisdom * 0.025,
+      inside: race.wisdom * 0.07 + race.focus * 0.035,
+      burst: race.power * 0.095 + race.speed * 0.04,
+      gamble: race.luck * 0.08 + race.power * 0.025,
+      follow: race.wisdom * 0.055 + race.focus * 0.045,
+      pace: race.staminaAttr * 0.055 + race.focus * 0.035
+    }
+    return Number(attr[actionKey]) || 0
+  }
+
+  getStageActionRate(actionKey, stageKey, trackId) {
+    const table = {
+      start: { speed_up: 1.15, inside: 1.18, steady: 1.08, burst: 0.92, slow_down: 0.72, pace: 0.9 },
+      mid: { slow_down: 1.15, follow: 1.15, pace: 1.18, inside: 1.08, speed_up: 0.95, burst: 0.86 },
+      finish: { burst: 1.28, speed_up: 1.16, gamble: 1.18, follow: 0.9, pace: 0.78, slow_down: 0.65 }
+    }
+    let rate = table[stageKey]?.[actionKey] || 1
+    if (trackId === "short_sprint" && ["speed_up", "burst"].includes(actionKey)) rate += 0.08
+    if (trackId === "endurance" && ["pace", "slow_down", "follow"].includes(actionKey)) rate += 0.08
+    if (trackId === "many_corners" && ["inside", "steady"].includes(actionKey)) rate += 0.08
+    if (trackId === "rain_mud" && ["steady", "pace"].includes(actionKey)) rate += 0.08
+    return rate
+  }
+
+  getDefaultStageAction(runner) {
+    return STRATEGY_DEFAULT_ACTIONS[runner.strategyKey] || "steady"
+  }
+
+  pickNpcStageAction(runner, beforeRank, stage) {
+    const race = runner.race
+    if (race.stamina < 32) return pick(["slow_down", "pace", "steady"])
+    if (race.rhythm < 32) return pick(["steady", "follow", "slow_down"])
+    if (stage.key === "finish") return beforeRank <= 3 ? pick(["speed_up", "burst", "steady"]) : pick(["burst", "gamble", "speed_up"])
+    if (stage.key === "mid") return beforeRank <= 3 ? pick(["follow", "pace", "steady"]) : pick(["inside", "speed_up", "follow"])
+    return this.getDefaultStageAction(runner)
+  }
+
+  rankRunners(runners = []) {
+    return [...runners].sort((a, b) => (b.race?.position || 0) - (a.race?.position || 0))
+  }
+
+  formatRaceStage(room, { opening = false } = {}) {
+    const stage = RACE_STAGES[room.stageIndex] || RACE_STAGES[0]
+    const stageCount = `${room.stageIndex + 1}/${RACE_STAGES.length}`
+    return [
+      opening ? "比赛开跑。" : `${stage.label}开始。`,
+      this.formatTrack(room.track),
+      `复合场景：${room.track.name} + ${room.twist.name} + ${room.scene.name}`,
+      `当前阶段：${stage.label}（${stageCount}）- ${stage.prompt}`,
+      room.stageIndex === 0 ? `临场变化：${room.twist.name} - ${room.twist.description}` : `赛况事件：${room.scene.name} - ${room.scene.description}`,
+      "",
+      "当前队形：",
+      ...this.formatStageRanking(room.runners),
+      "",
+      this.formatRaceActionTips()
+    ].join("\n")
+  }
+
+  formatActiveRaceStatus(room) {
+    const stage = RACE_STAGES[room.stageIndex] || RACE_STAGES[0]
+    return [
+      `这一局已经开跑了，当前是${stage.label}。`,
+      "当前队形：",
+      ...this.formatStageRanking(room.runners || []),
+      "",
+      this.formatRaceActionTips()
+    ].join("\n")
+  }
+
+  formatStageRanking(runners = []) {
+    return this.rankRunners(runners).slice(0, RACE_SIZE).map((runner, index) =>
+      `${index + 1}. ${this.formatRunnerName(runner)}｜${this.describeRunnerState(runner)}`
+    )
+  }
+
+  describeRunnerState(runner) {
+    const race = runner?.race || {}
+    const breath = race.stamina >= 86
+      ? "呼吸很稳"
+      : race.stamina >= 62
+        ? "已经轻微喘气"
+        : race.stamina >= 36
+          ? "气息明显乱了"
+          : "像是快被体力拖住了"
+    const rhythm = race.rhythm >= 86
+      ? "步点很干净"
+      : race.rhythm >= 62
+        ? "节奏还压得住"
+        : race.rhythm >= 36
+          ? "步伐有点散"
+          : "节奏被拉得很碎"
+    const route = race.route >= 82
+      ? "贴着舒服路线"
+      : race.route >= 55
+        ? "还在找空档"
+        : "有点被堵在外侧"
+    const burst = race.burstReserve >= 78
+      ? "还藏着冲刺劲"
+      : race.burstReserve >= 42
+        ? "余力还够再顶一下"
+        : "爆发余力不多"
+    return `${breath}，${rhythm}，${route}，${burst}`
+  }
+
+  async finishStagedRace(room) {
+    this.clearStageTimer(room)
+    const ranking = this.rankRunners(room.runners)
+    this.rooms.delete(String(room.groupId || ""))
+    const config = this.getConfig()
+    const awardLines = await this.applyAwards(ranking, this.getAwards(config), config)
+    const result = {
+      ranking,
+      track: room.track,
+      twist: room.twist,
+      scene: room.scene,
+      highlights: [
+        ...room.history.flatMap(item => item.lines).slice(-5),
+        pick(room.track.events).replace("{name}", ranking[0]?.nickname || "前排")
+      ].slice(0, 5)
+    }
     return this.formatRaceResult(result, awardLines)
   }
 
@@ -1577,7 +2051,9 @@ export class UmaRaceManager {
       ".赛马娘 开始 - 开一局",
       ".赛马娘 加入 [策略] - 报名，可选策略",
       "策略：稳一点 / 拼一把 / 留体力 / 抢内道；不填就是正常跑",
-      ".赛马娘 开跑 - 结算比赛",
+      ".赛马娘 开跑 - 开始三段比赛",
+      ".赛马娘 决策 [行动] - 每个阶段调整一次跑法",
+      "行动：提速 / 减速 / 稳住 / 抢位 / 爆发 / 赌一把 / 跟跑 / 压节奏",
       ".赛马娘 积分 - 查看自己的全群互通积分",
       ".赛马娘 排行 - 查看全局排行"
     ].join("\n")

@@ -7,7 +7,7 @@ export default [
     field: "umaRace.enabled",
     label: "启用赛马娘小游戏",
     component: "Switch",
-    bottomHelpMessage: "开启后可使用 .赛马娘 开始 / 加入 / 开跑 / 积分 / 排行"
+    bottomHelpMessage: "开启后可使用 .赛马娘 开始 / 加入 / 开跑 / 决策 / 积分 / 排行"
   },
   {
     field: "umaRace.minPlayers",
@@ -29,6 +29,13 @@ export default [
     component: "InputNumber",
     bottomHelpMessage: "超过这个时间未手动开跑会自动开赛；有人加入或更新策略会刷新计时",
     componentProps: { min: 10, max: 300, step: 10, placeholder: "300" }
+  },
+  {
+    field: "umaRace.raceStageSeconds",
+    label: "比赛阶段时长（秒）",
+    component: "InputNumber",
+    bottomHelpMessage: "每局分起步、半程、冲刺三段；每段到时间会自动推进。",
+    componentProps: { min: 10, max: 180, step: 5, placeholder: "45" }
   },
   {
     field: "umaRace.cooldownSeconds",
