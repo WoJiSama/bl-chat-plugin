@@ -2,6 +2,7 @@ import fs from "fs"
 import path from "path"
 import yaml from "js-yaml"
 import { renderUmaRaceReport } from "./UmaRaceReportRenderer.js"
+import { sendSmartReply } from "./SmartReply.js"
 
 const DEFAULT_CONFIG = {
   enabled: true,
@@ -1310,7 +1311,8 @@ export class UmaRaceManager {
       return
     }
     const result = await this.runRace(event)
-    await event.reply(`报名时间到了，自动开赛。\n${result}`)
+    if (typeof result === "string") await sendSmartReply(event, `报名时间到了，自动开赛。\n${result}`, { kind: "umaRaceResult" })
+    else await event.reply(["报名时间到了，自动开赛。", result])
   }
 
   getStrategyKey(strategy) {
@@ -1361,7 +1363,11 @@ export class UmaRaceManager {
     this.lastRaceAt.set(groupId, Date.now())
     this.scheduleStageAdvance(room, config)
 
-    return this.formatRaceStage(room, { opening: true })
+    return this.renderRaceReportOrFallback(
+      e,
+      this.buildOpeningRaceReport(room),
+      this.formatRaceStage(room, { opening: true })
+    )
   }
 
   async raceDecision(e) {
@@ -1758,6 +1764,24 @@ export class UmaRaceManager {
       prompt: "当前队形已更新，下一段可以调整跑法。",
       ranking: this.buildRaceReportRanking(room.runners),
       highlights: lines.slice(0, 5)
+    }
+  }
+
+  buildOpeningRaceReport(room) {
+    const currentStage = RACE_STAGES[room.stageIndex] || RACE_STAGES[0]
+    return {
+      type: "stage",
+      title: "比赛开跑",
+      subtitle: `${currentStage.label}：${currentStage.prompt}`,
+      scene: `${room.track.name} / ${room.twist.name} / ${room.scene.name}`,
+      generatedAt: this.formatReportTime(),
+      prompt: `可选决策：提速 / 减速 / 稳住 / 抢位 / 爆发 / 赌一把 / 跟跑 / 压节奏\n格式：.赛马娘 决策 提速`,
+      ranking: this.buildRaceReportRanking(room.runners),
+      highlights: [
+        this.formatTrack(room.track).replace(/^本局赛道：/, "赛道："),
+        `复合场景：${room.track.name} + ${room.twist.name} + ${room.scene.name}`,
+        `临场变化：${room.twist.name} - ${room.twist.description}`
+      ]
     }
   }
 

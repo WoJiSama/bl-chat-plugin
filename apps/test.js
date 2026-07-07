@@ -20,6 +20,8 @@ import { factShortId } from "../utils/memory/entityModel.js"
 import { stripChatLogSpeakerPrefix, stripChatLogSpeakerPrefixes } from "../utils/replySanitizer.js"
 import { personaFeedbackManager } from "../utils/PersonaFeedbackManager.js"
 import { globalStyleLearnerManager } from "../utils/GlobalStyleLearnerManager.js"
+import { diceManager } from "../utils/DiceManager.js"
+import { analyzeReplyText } from "../utils/SmartReply.js"
 import { buildMissingImageAnalysisReply, looksLikeImageAuthenticityRequest, looksLikeImageVerificationRequest, looksLikeVisualInspectionRequest } from "../utils/imageRequestGuard.js"
 import { compileImagePrompt } from "../utils/promptCompiler.js"
 import { buildToolIntentDisclosure, selectToolIntentCandidates } from "../utils/toolIntentManifests.js"
@@ -2133,7 +2135,6 @@ export class ExamplePlugin extends plugin {
 
   getTextImageTemplateForFinalReply({ content, output, session, toolName, e }) {
     if (toolName === "textImageTool") return false
-    if (!toolConfigHasName(this.config.oneapi_tools, "textImageTool")) return false
     if (!this.toolInstances?.textImageTool?.execute) return false
 
     const userText = `${session?.userContent || ""}\n${e?.msg || ""}`
@@ -2155,6 +2156,10 @@ export class ExamplePlugin extends plugin {
     }
     if (replyLooksLikeCodeOrMarkdown || (userAskedForCodeOrMarkdown && String(output || "").trim().length > 30)) {
       return "chat"
+    }
+    const longReply = analyzeReplyText(output)
+    if (longReply.shouldRender) {
+      return longReply.template
     }
     return false
   }
@@ -4580,6 +4585,11 @@ ${recentHistory || '(无)'}
 
     if (this.isUserBlacklisted(e)) {
       logger.info(`[用户黑名单] group=${e.group_id} user=${e.user_id} msg="${summarizeForLog(e.msg || "")}"`)
+      return false
+    }
+
+    if (diceManager.isLogActive(e.group_id, this.config.diceSystem)) {
+      logger.info(`[骰娘log] group=${e.group_id} log开启中，跳过AI对话`)
       return false
     }
 

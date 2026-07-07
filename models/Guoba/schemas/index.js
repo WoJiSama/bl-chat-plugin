@@ -22,6 +22,7 @@ import voice from "./voice.js"
 import deltaForce from "./deltaForce.js"
 import tools from "./tools.js"
 import umaRace from "./umaRace.js"
+import dice from "./dice.js"
 
 export const schemas = [
   basic,
@@ -41,6 +42,7 @@ export const schemas = [
   voice,
   deltaForce,
   umaRace,
+  dice,
   tools
 ].flat()
 

@@ -1,4 +1,5 @@
 import { umaRaceManager } from "../utils/UmaRaceManager.js"
+import { sendSmartReply } from "../utils/SmartReply.js"
 
 export class UmaRacePlugin extends plugin {
   constructor() {
@@ -28,80 +29,84 @@ export class UmaRacePlugin extends plugin {
     })
   }
 
+  async reply(e, output, options = {}) {
+    return await sendSmartReply(e, output, options)
+  }
+
   async showHelp(e) {
-    await e.reply(umaRaceManager.showHelp())
+    await this.reply(e, umaRaceManager.showHelp(), { kind: "diceLong" })
     return true
   }
 
   async startRace(e) {
-    await e.reply(await umaRaceManager.startRace(e))
+    await this.reply(e, await umaRaceManager.startRace(e), { kind: "umaRaceResult" })
     return true
   }
 
   async adoptUma(e) {
-    await e.reply(await umaRaceManager.adoptUma(e))
+    await this.reply(e, await umaRaceManager.adoptUma(e))
     return true
   }
 
   async readoptUma(e) {
-    await e.reply(await umaRaceManager.adoptUma(e, { overwrite: true }))
+    await this.reply(e, await umaRaceManager.adoptUma(e, { overwrite: true }))
     return true
   }
 
   async abandonUma(e) {
-    await e.reply(await umaRaceManager.abandonUma(e, { confirm: /确认/.test(String(e.msg || "")) }))
+    await this.reply(e, await umaRaceManager.abandonUma(e, { confirm: /确认/.test(String(e.msg || "")) }))
     return true
   }
 
   async showUma(e) {
-    await e.reply(umaRaceManager.showUma(e))
+    await this.reply(e, umaRaceManager.showUma(e), { kind: "umaRaceResult" })
     return true
   }
 
   async trainUma(e) {
-    await e.reply(await umaRaceManager.trainUma(e))
+    await this.reply(e, await umaRaceManager.trainUma(e), { kind: "umaRaceResult" })
     return true
   }
 
   async showTrainingStatus(e) {
-    await e.reply(umaRaceManager.showTrainingStatus(e))
+    await this.reply(e, umaRaceManager.showTrainingStatus(e), { kind: "umaRaceResult" })
     return true
   }
 
   async joinRace(e) {
-    await e.reply(await umaRaceManager.joinRace(e, e.msg))
+    await this.reply(e, await umaRaceManager.joinRace(e, e.msg), { kind: "umaRaceResult" })
     return true
   }
 
   async raceDecision(e) {
     const result = await umaRaceManager.raceDecision(e)
-    if (result) await e.reply(result)
+    if (result) await this.reply(e, result, { kind: "umaRaceResult" })
     return true
   }
 
   async runRace(e) {
-    await e.reply(await umaRaceManager.runRace(e))
+    await this.reply(e, await umaRaceManager.runRace(e), { kind: "umaRaceResult" })
     return true
   }
 
   async cancelRace(e) {
-    await e.reply(umaRaceManager.cancelRace(e))
+    await this.reply(e, umaRaceManager.cancelRace(e))
     return true
   }
 
   async showScore(e) {
-    await e.reply(umaRaceManager.showScore(e))
+    await this.reply(e, umaRaceManager.showScore(e))
     return true
   }
 
   async adjustScore(e) {
-    await e.reply(await umaRaceManager.adjustScore(e))
+    await this.reply(e, await umaRaceManager.adjustScore(e))
     return true
   }
 
   async showRank(e) {
     const match = String(e.msg || "").match(/\s+(\d+)\s*$/)
-    await e.reply(umaRaceManager.showRank(match?.[1]))
+    await this.reply(e, umaRaceManager.showRank(match?.[1]), { kind: "ranking" })
     return true
   }
 }
