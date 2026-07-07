@@ -124,6 +124,30 @@ export default [
     component: "InputNumber",
     componentProps: { min: 10, max: 500, step: 10, placeholder: "80" }
   },
+  {
+    field: "globalStyleLearning.aiSummaryEnabled",
+    label: "允许模型总结",
+    component: "Switch",
+    bottomHelpMessage: "主人手动执行 .表达学习总结 时，调用记忆模型把脱敏样本沉淀成表达规则"
+  },
+  {
+    field: "globalStyleLearning.summarySampleLimit",
+    label: "总结样本数",
+    component: "InputNumber",
+    componentProps: { min: 10, max: 120, step: 5, placeholder: "40" }
+  },
+  {
+    field: "globalStyleLearning.maxAiRules",
+    label: "模型规则保留数",
+    component: "InputNumber",
+    componentProps: { min: 1, max: 12, step: 1, placeholder: "6" }
+  },
+  {
+    field: "globalStyleLearning.summaryTimeoutMs",
+    label: "模型总结超时毫秒",
+    component: "InputNumber",
+    componentProps: { min: 5000, max: 120000, step: 5000, placeholder: "30000" }
+  },
 
   { component: "Divider", label: "用户画像" },
   {

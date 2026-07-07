@@ -1816,7 +1816,7 @@ export class ExamplePlugin extends plugin {
         { reg: "^#mcp\\s+测试\\s+\\S+", fnc: "testMCPTool" },
         { reg: "^#清除群记忆$", fnc: "clearGroupMemory" },
         { reg: "^[#＃.。]\\s*希洛反馈\\s+[\\s\\S]+$", fnc: "recordPersonaFeedback" },
-        { reg: "^[#＃.。]\\s*(全局表达学习|表达学习)\\s*(报告|状态|记忆|清空|帮助)?\\s*$", fnc: "globalStyleLearningCommand" },
+        { reg: "^[#＃.。]\\s*(全局表达学习|表达学习)\\s*(报告|状态|记忆|总结|清空|帮助)?\\s*$", fnc: "globalStyleLearningCommand" },
         { reg: "[\\s\\S]*", fnc: "handleRandomReply", log: false }
       ]
     })
@@ -6656,8 +6656,28 @@ ${mcpPrompts}
         ".表达学习状态 - 看是否在学习、是否已注入",
         ".表达学习记忆 - 看希洛当前会吸收/避开的表达策略",
         ".表达学习报告 - 看样本和离散特征统计",
+        ".表达学习总结 - 调用模型，把脱敏样本沉淀成表达规则",
         ".表达学习清空 - 清空全局表达学习记忆"
       ].join("\n"))
+      return true
+    }
+    if (/总结/.test(text)) {
+      try {
+        const result = await globalStyleLearnerManager.summarizeWithAI(
+          this.config.globalStyleLearning,
+          this.config.memoryAiConfig
+        )
+        await e.reply([
+          "全局表达学习总结完成：",
+          `本次参考脱敏样本：${result.sampleCount} 条`,
+          `新增/更新可吸收规则：${result.absorbChanged} 条`,
+          `新增/更新避坑规则：${result.avoidChanged} 条`,
+          `当前模型规则：可吸收 ${result.totalAbsorb} 条，避坑 ${result.totalAvoid} 条`
+        ].join("\n"))
+      } catch (error) {
+        logger.warn(`[全局表达学习] 模型总结失败: ${error.message}`)
+        await e.reply(`全局表达学习总结失败：${error.message}`)
+      }
       return true
     }
     if (/报告/.test(text)) {
