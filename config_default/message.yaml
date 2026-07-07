@@ -470,6 +470,7 @@ pluginSettings:
     - recallTool
     - reminderTool
     - textImageTool
+    - sendLocalEmojiTool
     - waitTool                            # 拟人化"稍后再说一句"；仅 chatTriggerMode=smart 且 smartTrigger.waitToolEnabled=true 时才会暴露给 LLM
     - sendGiftTool
   githubToken: ""

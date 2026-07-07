@@ -663,7 +663,11 @@ ${list}
   async selectEmoji(query, options = {}) {
     this.refreshConfig()
     const allItems = await this.loadItems()
-    const usableAll = allItems.filter(i => !i.isBanned)
+    const usableAll = allItems.filter(i => {
+      if (i.isBanned || i.noFileFlag) return false
+      const abs = this.getAbsoluteFilePath(i)
+      return fs.existsSync(abs)
+    })
     if (!usableAll.length) return { item: null, strategy: "empty" }
 
     // avoidRecent：只按 hash 排除（不再按 tag —— tag 不准且容易把池清空）
