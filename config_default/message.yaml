@@ -164,6 +164,10 @@ pluginSettings:
     summarySampleLimit: 40
     maxAiRules: 6
     summaryTimeoutMs: 30000
+    autoSummaryEnabled: true
+    autoSummaryMinNewSamples: 300
+    autoSummaryCooldownHours: 12
+    autoSummaryMinTotalSamples: 120
   # 固定身份绑定：把 QQ 号和人设关系绑定，优先级高于群名片/昵称/历史。
   # 示例：
   # identityBindings:

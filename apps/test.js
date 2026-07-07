@@ -4589,6 +4589,12 @@ ${recentHistory || '(无)'}
     if (this.config.globalStyleLearning?.enabled !== false) {
       try {
         globalStyleLearnerManager.observeMessage(e, this.config.globalStyleLearning)
+        globalStyleLearnerManager.maybeAutoSummarize(
+          this.config.globalStyleLearning,
+          this.config.memoryAiConfig
+        ).catch(error => {
+          logger.warn(`[全局表达学习] 自动总结调度失败: ${error.message}`)
+        })
       } catch (error) {
         logger.warn(`[全局表达学习] 记录失败: ${error.message}`)
       }

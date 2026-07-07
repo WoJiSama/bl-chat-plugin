@@ -128,7 +128,7 @@ export default [
     field: "globalStyleLearning.aiSummaryEnabled",
     label: "允许模型总结",
     component: "Switch",
-    bottomHelpMessage: "主人手动执行 .表达学习总结 时，调用记忆模型把脱敏样本沉淀成表达规则"
+    bottomHelpMessage: "主人手动执行 .表达学习 总结 时，调用记忆模型把脱敏样本沉淀成表达规则"
   },
   {
     field: "globalStyleLearning.summarySampleLimit",
@@ -147,6 +147,30 @@ export default [
     label: "模型总结超时毫秒",
     component: "InputNumber",
     componentProps: { min: 5000, max: 120000, step: 5000, placeholder: "30000" }
+  },
+  {
+    field: "globalStyleLearning.autoSummaryEnabled",
+    label: "启用自动总结",
+    component: "Switch",
+    bottomHelpMessage: "达到阈值后在后台自动调用模型总结；主人手动 .表达学习 总结 不受阈值限制"
+  },
+  {
+    field: "globalStyleLearning.autoSummaryMinNewSamples",
+    label: "自动总结新增样本阈值",
+    component: "InputNumber",
+    componentProps: { min: 20, max: 100000, step: 10, placeholder: "300" }
+  },
+  {
+    field: "globalStyleLearning.autoSummaryCooldownHours",
+    label: "自动总结冷却小时",
+    component: "InputNumber",
+    componentProps: { min: 1, max: 720, step: 1, placeholder: "12" }
+  },
+  {
+    field: "globalStyleLearning.autoSummaryMinTotalSamples",
+    label: "自动总结总样本门槛",
+    component: "InputNumber",
+    componentProps: { min: 10, max: 100000, step: 10, placeholder: "120" }
   },
 
   { component: "Divider", label: "用户画像" },

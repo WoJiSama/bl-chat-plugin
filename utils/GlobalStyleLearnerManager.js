@@ -12,7 +12,11 @@ const DEFAULT_CONFIG = {
   aiSummaryEnabled: true,
   summarySampleLimit: 40,
   maxAiRules: 6,
-  summaryTimeoutMs: 30000
+  summaryTimeoutMs: 30000,
+  autoSummaryEnabled: true,
+  autoSummaryMinNewSamples: 300,
+  autoSummaryCooldownHours: 12,
+  autoSummaryMinTotalSamples: 120
 }
 
 const TONE_WORDS = ["草", "笑死", "绷", "啊？", "诶", "确实", "离谱", "好吧", "不是", "哈哈", "呃", "唔"]
@@ -117,6 +121,10 @@ function normalizeConfig(config = {}) {
     summarySampleLimit: safeNumber(config.summarySampleLimit, DEFAULT_CONFIG.summarySampleLimit, 10, 120),
     maxAiRules: safeNumber(config.maxAiRules, DEFAULT_CONFIG.maxAiRules, 1, 12),
     summaryTimeoutMs: safeNumber(config.summaryTimeoutMs, DEFAULT_CONFIG.summaryTimeoutMs, 5000, 120000),
+    autoSummaryEnabled: config.autoSummaryEnabled !== false,
+    autoSummaryMinNewSamples: safeNumber(config.autoSummaryMinNewSamples, DEFAULT_CONFIG.autoSummaryMinNewSamples, 20, 100000),
+    autoSummaryCooldownHours: safeNumber(config.autoSummaryCooldownHours, DEFAULT_CONFIG.autoSummaryCooldownHours, 1, 720),
+    autoSummaryMinTotalSamples: safeNumber(config.autoSummaryMinTotalSamples, DEFAULT_CONFIG.autoSummaryMinTotalSamples, 10, 100000),
     baseDir: config.baseDir || DEFAULT_CONFIG.baseDir
   }
 }
@@ -190,8 +198,11 @@ function createEmptyMemory() {
     },
     aiSummary: {
       lastAt: "",
+      lastAutoAt: "",
       count: 0,
-      lastSamples: 0
+      autoCount: 0,
+      lastSamples: 0,
+      lastTotalSamples: 0
     }
   }
 }
@@ -366,6 +377,7 @@ export class GlobalStyleLearnerManager {
     this.memory = null
     this.dirty = false
     this.flushTimer = null
+    this.autoSummaryRunning = false
   }
 
   getDataDir(config = {}) {
@@ -631,7 +643,55 @@ export class GlobalStyleLearnerManager {
     ]
   }
 
-  async summarizeWithAI(config = {}, memoryAiConfig = {}) {
+  getAutoSummaryState(config = {}) {
+    const cfg = normalizeConfig(config)
+    const memory = this.readMemory(cfg)
+    const totalSamples = Number(memory.totalSamples) || 0
+    const lastTotalSamples = Number(memory.aiSummary?.lastTotalSamples) || 0
+    const newSamples = Math.max(0, totalSamples - lastTotalSamples)
+    const lastAutoAt = memory.aiSummary?.lastAutoAt || memory.aiSummary?.lastAt || ""
+    const lastAutoMs = lastAutoAt ? new Date(lastAutoAt).getTime() : 0
+    const cooldownMs = cfg.autoSummaryCooldownHours * 60 * 60 * 1000
+    const cooldownReady = !lastAutoMs || !Number.isFinite(lastAutoMs) || Date.now() - lastAutoMs >= cooldownMs
+    const enoughTotal = totalSamples >= cfg.autoSummaryMinTotalSamples
+    const enoughNew = newSamples >= cfg.autoSummaryMinNewSamples
+    return {
+      enabled: cfg.enabled && cfg.aiSummaryEnabled && cfg.autoSummaryEnabled,
+      totalSamples,
+      lastTotalSamples,
+      newSamples,
+      enoughTotal,
+      enoughNew,
+      cooldownReady,
+      lastAutoAt
+    }
+  }
+
+  shouldAutoSummarize(config = {}) {
+    const state = this.getAutoSummaryState(config)
+    return state.enabled && state.enoughTotal && state.enoughNew && state.cooldownReady
+  }
+
+  async maybeAutoSummarize(config = {}, memoryAiConfig = {}) {
+    const cfg = normalizeConfig(config)
+    if (this.autoSummaryRunning || !this.shouldAutoSummarize(cfg)) return { triggered: false }
+    if (!memoryAiConfig?.memoryAiUrl || !memoryAiConfig?.memoryAiApikey) {
+      return { triggered: false, reason: "missing_memory_ai_config" }
+    }
+    this.autoSummaryRunning = true
+    try {
+      const result = await this.summarizeWithAI(cfg, memoryAiConfig, { source: "auto" })
+      this.logger?.info?.(`[全局表达学习] 自动总结完成: absorb=${result.absorbChanged}, avoid=${result.avoidChanged}, samples=${result.sampleCount}`)
+      return { triggered: true, result }
+    } catch (error) {
+      this.logger?.warn?.(`[全局表达学习] 自动总结失败: ${error.message}`)
+      return { triggered: false, error }
+    } finally {
+      this.autoSummaryRunning = false
+    }
+  }
+
+  async summarizeWithAI(config = {}, memoryAiConfig = {}, options = {}) {
     const cfg = normalizeConfig(config)
     if (!cfg.enabled) throw new Error("全局表达学习未开启")
     if (!cfg.aiSummaryEnabled) throw new Error("模型总结未开启")
@@ -662,6 +722,14 @@ export class GlobalStyleLearnerManager {
     const content = data?.choices?.[0]?.message?.content?.trim() || ""
     const parsed = parseSummaryResult(content)
     const changed = this.mergeAiRules(memory, parsed, cfg)
+    memory.aiSummary = {
+      ...(memory.aiSummary || {}),
+      lastTotalSamples: Number(memory.totalSamples) || 0
+    }
+    if (options.source === "auto") {
+      memory.aiSummary.lastAutoAt = nowIso()
+      memory.aiSummary.autoCount = (Number(memory.aiSummary.autoCount) || 0) + 1
+    }
     this.writeMemory(cfg)
     return {
       ...changed,
@@ -709,11 +777,13 @@ export class GlobalStyleLearnerManager {
     const essenceCount = this.getEssenceRules(memory, cfg.maxPromptRules).length
     const drossCount = this.getDrossRules(memory, Math.min(4, cfg.maxPromptRules)).length
     const aiRules = this.getAiRules(memory, cfg.maxAiRules)
+    const autoState = this.getAutoSummaryState(cfg)
     return [
       "全局表达学习状态：",
       `学习：${cfg.enabled ? "开启" : "关闭"}`,
       `注入：${cfg.promptInjectionEnabled ? (enough ? "开启，已生效" : "开启，但样本还不够") : "关闭"}`,
       `模型总结：${cfg.aiSummaryEnabled ? "可手动触发" : "关闭"}${memory.aiSummary?.lastAt ? `；上次 ${memory.aiSummary.lastAt}` : ""}`,
+      `自动总结：${autoState.enabled ? "开启" : "关闭"}；新增样本 ${autoState.newSamples}/${cfg.autoSummaryMinNewSamples}；冷却 ${autoState.cooldownReady ? "已满足" : "未满足"}`,
       `样本：${samples}/${cfg.minSamplesForPrompt}`,
       `规则侧策略：${essenceCount} 条；规则侧避坑：${drossCount} 条`,
       `模型侧策略：${aiRules.absorb.length} 条；模型侧避坑：${aiRules.avoid.length} 条`,
@@ -746,7 +816,7 @@ export class GlobalStyleLearnerManager {
         lines.push(`${index + 1}. 避开/${item.label}：${item.rule}（置信度 ${Math.round(clampConfidence(item.confidence) * 100)}%）`)
       })
     } else {
-      lines.push("模型总结：暂无；可以用“.表达学习总结”手动沉淀一次。")
+      lines.push("模型总结：暂无；可以用“.表达学习 总结”手动沉淀一次。")
     }
 
     if (essence.length) {
@@ -781,13 +851,15 @@ export class GlobalStyleLearnerManager {
     const tones = topEntries(memory.toneWords, 10)
 
     const samples = Number(memory.totalSamples) || 0
+    const autoState = this.getAutoSummaryState(cfg)
     const groupSummary = groups.length
       ? `${groups.length} 个主要来源群，${groups.map(([k, v]) => `${k}：${v}条`).join("、")}`
       : "暂无"
     return [
       "全局表达学习报告：",
       `样本：${samples} 条；覆盖：${Object.keys(memory.groupCount || {}).length} 个群；注入：${cfg.promptInjectionEnabled ? "开启" : "关闭"}`,
-      `脱敏样本池：${Array.isArray(memory.samplePool) ? memory.samplePool.length : 0} 条；模型总结：${memory.aiSummary?.count || 0} 次`,
+      `脱敏样本池：${Array.isArray(memory.samplePool) ? memory.samplePool.length : 0} 条；模型总结：${memory.aiSummary?.count || 0} 次，自动 ${memory.aiSummary?.autoCount || 0} 次`,
+      `自动总结：${autoState.enabled ? "开启" : "关闭"}；总样本门槛 ${autoState.totalSamples}/${cfg.autoSummaryMinTotalSamples}；新增样本 ${autoState.newSamples}/${cfg.autoSummaryMinNewSamples}；冷却 ${autoState.cooldownReady ? "已满足" : "未满足"}`,
       `主要来源：${groupSummary}`,
       features.length ? `离散特征：${features.map(([k, v]) => `${featureLabel(k)} ${v}`).join("、")}` : "离散特征：暂无",
       tones.length ? `常见语气信号：${tones.map(([k, v]) => `${k} ${v}`).join("、")}` : "常见语气信号：暂无",
@@ -801,7 +873,7 @@ export class GlobalStyleLearnerManager {
       dross.length ? `过滤掉的坏倾向：\n${dross.map((item, index) => `${index + 1}. ${item.label}：${confidenceLabel(item.weight, samples)}。${item.rule}`).join("\n")}` : "过滤掉的坏倾向：暂无明显信号",
       (Number(memory.totalSamples) || 0) < cfg.minSamplesForPrompt
         ? `提示：少于 ${cfg.minSamplesForPrompt} 条样本，暂不注入回复 prompt。`
-        : `提示：真正注入的内容请看“.表达学习记忆”。`
+        : `提示：真正注入的内容请看“.表达学习 记忆”。`
     ].join("\n")
   }
 
