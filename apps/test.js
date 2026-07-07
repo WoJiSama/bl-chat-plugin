@@ -6645,23 +6645,28 @@ ${mcpPrompts}
       return true
     }
     const text = String(e.msg || "")
-    if (/清空/.test(text)) {
+    const subCommand = text
+      .replace(/^[#＃.。]\s*(全局表达学习|表达学习)\s*/, "")
+      .trim()
+    const helpText = [
+      "全局表达学习：",
+      ".表达学习 状态 - 看是否在学习、是否已注入",
+      ".表达学习 记忆 - 看希洛当前会吸收/避开的表达策略",
+      ".表达学习 报告 - 看样本和离散特征统计",
+      ".表达学习 总结 - 调用模型，把脱敏样本沉淀成表达规则",
+      ".表达学习 清空 - 清空全局表达学习记忆"
+    ].join("\n")
+
+    if (!subCommand || /帮助/.test(subCommand)) {
+      await e.reply(helpText)
+      return true
+    }
+    if (/清空/.test(subCommand)) {
       globalStyleLearnerManager.clear(this.config.globalStyleLearning)
       await e.reply("全局表达学习记忆已清空。")
       return true
     }
-    if (/帮助/.test(text)) {
-      await e.reply([
-        "全局表达学习：",
-        ".表达学习状态 - 看是否在学习、是否已注入",
-        ".表达学习记忆 - 看希洛当前会吸收/避开的表达策略",
-        ".表达学习报告 - 看样本和离散特征统计",
-        ".表达学习总结 - 调用模型，把脱敏样本沉淀成表达规则",
-        ".表达学习清空 - 清空全局表达学习记忆"
-      ].join("\n"))
-      return true
-    }
-    if (/总结/.test(text)) {
+    if (/总结/.test(subCommand)) {
       try {
         const result = await globalStyleLearnerManager.summarizeWithAI(
           this.config.globalStyleLearning,
@@ -6680,15 +6685,19 @@ ${mcpPrompts}
       }
       return true
     }
-    if (/报告/.test(text)) {
+    if (/报告/.test(subCommand)) {
       await e.reply(globalStyleLearnerManager.buildReport(this.config.globalStyleLearning))
       return true
     }
-    if (/记忆/.test(text)) {
+    if (/记忆/.test(subCommand)) {
       await e.reply(globalStyleLearnerManager.buildMemoryView(this.config.globalStyleLearning))
       return true
     }
-    await e.reply(globalStyleLearnerManager.buildStatus(this.config.globalStyleLearning))
+    if (/状态/.test(subCommand)) {
+      await e.reply(globalStyleLearnerManager.buildStatus(this.config.globalStyleLearning))
+      return true
+    }
+    await e.reply(helpText)
     return true
   }
 
