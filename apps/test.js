@@ -19,7 +19,7 @@ import { memStats } from "../utils/memory/stats.js"
 import { factShortId } from "../utils/memory/entityModel.js"
 import { stripChatLogSpeakerPrefix, stripChatLogSpeakerPrefixes } from "../utils/replySanitizer.js"
 import { personaFeedbackManager } from "../utils/PersonaFeedbackManager.js"
-import { styleObserverManager } from "../utils/StyleObserverManager.js"
+import { globalStyleLearnerManager } from "../utils/GlobalStyleLearnerManager.js"
 import { buildMissingImageAnalysisReply, looksLikeImageAuthenticityRequest, looksLikeImageVerificationRequest, looksLikeVisualInspectionRequest } from "../utils/imageRequestGuard.js"
 import { compileImagePrompt } from "../utils/promptCompiler.js"
 import { buildToolIntentDisclosure, selectToolIntentCandidates } from "../utils/toolIntentManifests.js"
@@ -1816,8 +1816,7 @@ export class ExamplePlugin extends plugin {
         { reg: "^#mcp\\s+测试\\s+\\S+", fnc: "testMCPTool" },
         { reg: "^#清除群记忆$", fnc: "clearGroupMemory" },
         { reg: "^[#＃.。]\\s*希洛反馈\\s+[\\s\\S]+$", fnc: "recordPersonaFeedback" },
-        { reg: "^[#＃.。]\\s*(群风格报告|风格报告)\\s*$", fnc: "styleObserverReport" },
-        { reg: "^[#＃.。]\\s*(群风格观察|风格观察)\\s*(开启|关闭|状态)?\\s*$", fnc: "styleObserverControl" },
+        { reg: "^[#＃.。]\\s*(全局表达学习|表达学习)\\s*(报告|状态|记忆|清空|帮助)?\\s*$", fnc: "globalStyleLearningCommand" },
         { reg: "[\\s\\S]*", fnc: "handleRandomReply", log: false }
       ]
     })
@@ -4587,11 +4586,11 @@ ${recentHistory || '(无)'}
     const messageTypes = e.message?.map(m => m.type) || []
     if (this.config.excludeMessageTypes.some(t => messageTypes.includes(t))) return false
 
-    if (this.config.styleObserver?.enabled !== false) {
+    if (this.config.globalStyleLearning?.enabled !== false) {
       try {
-        styleObserverManager.observeMessage(e, this.config.styleObserver)
+        globalStyleLearnerManager.observeMessage(e, this.config.globalStyleLearning)
       } catch (error) {
-        logger.warn(`[群风格观察] 记录失败: ${error.message}`)
+        logger.warn(`[全局表达学习] 记录失败: ${error.message}`)
       }
     }
 
@@ -4851,6 +4850,7 @@ ${recentHistory || '(无)'}
           ? await this.expressionLearner.getExpressionPromptForGroup(groupId)
           : ''
         const personaFeedbackPrompt = personaFeedbackManager.buildFeedbackPrompt(this.config.personaGuard)
+        const globalStylePrompt = globalStyleLearnerManager.buildPrompt(this.config.globalStyleLearning)
 
         // 知识库检索
         let knowledgePrompt = ''
@@ -4881,7 +4881,7 @@ ${recentHistory || '(无)'}
           ? await this.getCurrentGroupContext(e)
           : this.getBasicGroupContext(e)
         const mergedTriggerPrompt = this.buildMergedDirectTriggerPrompt(e)
-        const enhancedPrompts = [identityBindingsPrompt, explicitTeachingPrompt, mergedTriggerPrompt, emotionPrompt, memoryPrompt, expressionPrompt, personaFeedbackPrompt, knowledgePrompt, memberLookupPrompt, personProfilePrompt].filter(Boolean).join('\n')
+        const enhancedPrompts = [identityBindingsPrompt, explicitTeachingPrompt, mergedTriggerPrompt, emotionPrompt, memoryPrompt, expressionPrompt, personaFeedbackPrompt, globalStylePrompt, knowledgePrompt, memberLookupPrompt, personProfilePrompt].filter(Boolean).join('\n')
         const runtimeGroupInfo = {
           group_id: groupContext.groupId,
           group_name: groupContext.groupName
@@ -6639,48 +6639,36 @@ ${mcpPrompts}
     return true
   }
 
-  canManageStyleObserver(e) {
-    return Boolean(e?.isMaster || ["owner", "admin"].includes(e?.sender?.role))
-  }
-
-  async styleObserverReport(e) {
-    if (!e?.group_id) {
-      await e.reply("这个功能要在群里看。")
-      return true
-    }
-    if (!this.canManageStyleObserver(e)) {
-      await e.reply("只有主人、群主或管理员可以查看群风格报告。")
-      return true
-    }
-    await e.reply(styleObserverManager.buildReport(e.group_id, this.config.styleObserver))
-    return true
-  }
-
-  async styleObserverControl(e) {
-    if (!e?.group_id) {
-      await e.reply("这个功能要在群里用。")
-      return true
-    }
-    if (!this.canManageStyleObserver(e)) {
-      await e.reply("只有主人、群主或管理员可以调整群风格观察。")
+  async globalStyleLearningCommand(e) {
+    if (!e?.isMaster) {
+      await e.reply("只有主人可以查看或调整全局表达学习。")
       return true
     }
     const text = String(e.msg || "")
-    if (/关闭/.test(text)) {
-      styleObserverManager.setGroupEnabled(e.group_id, false, this.config.styleObserver)
-      await e.reply("群风格观察已关闭。")
+    if (/清空/.test(text)) {
+      globalStyleLearnerManager.clear(this.config.globalStyleLearning)
+      await e.reply("全局表达学习记忆已清空。")
       return true
     }
-    if (/开启/.test(text)) {
-      styleObserverManager.setGroupEnabled(e.group_id, true, this.config.styleObserver)
-      await e.reply("群风格观察已开启。")
+    if (/帮助/.test(text)) {
+      await e.reply([
+        "全局表达学习：",
+        ".表达学习状态 - 看是否在学习、是否已注入",
+        ".表达学习记忆 - 看希洛当前会吸收/避开的表达策略",
+        ".表达学习报告 - 看样本和离散特征统计",
+        ".表达学习清空 - 清空全局表达学习记忆"
+      ].join("\n"))
       return true
     }
-    const enabled = styleObserverManager.isGroupEnabled(e.group_id, this.config.styleObserver)
-    await e.reply([
-      `群风格观察：${enabled ? "观察中" : "已关闭"}`,
-      "可用命令：.群风格观察 开启 / .群风格观察 关闭 / .群风格报告"
-    ].join("\n"))
+    if (/报告/.test(text)) {
+      await e.reply(globalStyleLearnerManager.buildReport(this.config.globalStyleLearning))
+      return true
+    }
+    if (/记忆/.test(text)) {
+      await e.reply(globalStyleLearnerManager.buildMemoryView(this.config.globalStyleLearning))
+      return true
+    }
+    await e.reply(globalStyleLearnerManager.buildStatus(this.config.globalStyleLearning))
     return true
   }
 

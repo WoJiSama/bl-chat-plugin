@@ -85,38 +85,44 @@ export default [
     componentProps: { allowAdd: true, allowDel: true }
   },
 
-  { component: "Divider", label: "群风格观察" },
+  { component: "Divider", label: "全局表达学习" },
   {
-    field: "styleObserver.enabled",
-    label: "启用群风格观察",
+    field: "globalStyleLearning.enabled",
+    label: "启用全局表达学习",
     component: "Switch",
-    bottomHelpMessage: "只做后台统计和报告，不额外回复，也不会自动改变希洛说话方式"
+    bottomHelpMessage: "从所有群离散提取表达策略，取精华去糟粕；不保存原文模仿具体群友"
   },
   {
-    field: "styleObserver.minReportMessages",
-    label: "报告建议样本数",
+    field: "globalStyleLearning.promptInjectionEnabled",
+    label: "注入全局表达策略",
+    component: "Switch",
+    bottomHelpMessage: "达到样本阈值后，每次回复前注入少量高权重表达策略"
+  },
+  {
+    field: "globalStyleLearning.maxPromptRules",
+    label: "最多注入规则数",
     component: "InputNumber",
-    componentProps: { min: 10, max: 10000, step: 10, placeholder: "50" },
-    bottomHelpMessage: "低于该数量时报告会提示只能粗略参考"
+    componentProps: { min: 1, max: 12, step: 1, placeholder: "6" }
   },
   {
-    field: "styleObserver.flushIntervalMs",
+    field: "globalStyleLearning.minSamplesForPrompt",
+    label: "注入前最小样本数",
+    component: "InputNumber",
+    componentProps: { min: 10, max: 100000, step: 10, placeholder: "80" },
+    bottomHelpMessage: "低于该数量时只统计和报告，不注入 prompt"
+  },
+  {
+    field: "globalStyleLearning.flushIntervalMs",
     label: "写入间隔毫秒",
     component: "InputNumber",
     componentProps: { min: 5000, max: 600000, step: 5000, placeholder: "60000" },
     bottomHelpMessage: "降低写盘频率，避免每条消息都写文件"
   },
   {
-    field: "styleObserver.disabledGroups",
-    label: "关闭观察的群",
-    component: "GTags",
-    componentProps: { allowAdd: true, allowDel: true }
-  },
-  {
-    field: "styleObserver.maxToneWords",
-    label: "报告语气词上限",
+    field: "globalStyleLearning.maxRecentSignals",
+    label: "近期信号保留数",
     component: "InputNumber",
-    componentProps: { min: 5, max: 50, step: 1, placeholder: "18" }
+    componentProps: { min: 10, max: 500, step: 10, placeholder: "80" }
   },
 
   { component: "Divider", label: "用户画像" },
