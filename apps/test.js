@@ -18,6 +18,7 @@ import { personProfileInjector } from "../utils/PersonProfileInjector.js"
 import { memStats } from "../utils/memory/stats.js"
 import { factShortId } from "../utils/memory/entityModel.js"
 import { stripChatLogSpeakerPrefix, stripChatLogSpeakerPrefixes } from "../utils/replySanitizer.js"
+import { personaFeedbackManager } from "../utils/PersonaFeedbackManager.js"
 import { buildMissingImageAnalysisReply, looksLikeImageAuthenticityRequest, looksLikeImageVerificationRequest, looksLikeVisualInspectionRequest } from "../utils/imageRequestGuard.js"
 import { compileImagePrompt } from "../utils/promptCompiler.js"
 import { buildToolIntentDisclosure, selectToolIntentCandidates } from "../utils/toolIntentManifests.js"
@@ -1813,6 +1814,7 @@ export class ExamplePlugin extends plugin {
         { reg: "^#mcp\\s+状态", fnc: "mcpStatus" },
         { reg: "^#mcp\\s+测试\\s+\\S+", fnc: "testMCPTool" },
         { reg: "^#清除群记忆$", fnc: "clearGroupMemory" },
+        { reg: "^[#＃.。]\\s*希洛反馈\\s+[\\s\\S]+$", fnc: "recordPersonaFeedback" },
         { reg: "[\\s\\S]*", fnc: "handleRandomReply", log: false }
       ]
     })
@@ -4837,6 +4839,7 @@ ${recentHistory || '(无)'}
         const expressionPrompt = this.config.expressionLearning?.enabled
           ? await this.expressionLearner.getExpressionPromptForGroup(groupId)
           : ''
+        const personaFeedbackPrompt = personaFeedbackManager.buildFeedbackPrompt(this.config.personaGuard)
 
         // 知识库检索
         let knowledgePrompt = ''
@@ -4867,7 +4870,7 @@ ${recentHistory || '(无)'}
           ? await this.getCurrentGroupContext(e)
           : this.getBasicGroupContext(e)
         const mergedTriggerPrompt = this.buildMergedDirectTriggerPrompt(e)
-        const enhancedPrompts = [identityBindingsPrompt, explicitTeachingPrompt, mergedTriggerPrompt, emotionPrompt, memoryPrompt, expressionPrompt, knowledgePrompt, memberLookupPrompt, personProfilePrompt].filter(Boolean).join('\n')
+        const enhancedPrompts = [identityBindingsPrompt, explicitTeachingPrompt, mergedTriggerPrompt, emotionPrompt, memoryPrompt, expressionPrompt, personaFeedbackPrompt, knowledgePrompt, memberLookupPrompt, personProfilePrompt].filter(Boolean).join('\n')
         const runtimeGroupInfo = {
           group_id: groupContext.groupId,
           group_name: groupContext.groupName
@@ -6519,6 +6522,11 @@ ${mcpPrompts}
       output = buildInternalStatusSafeReply(toolName, session)
     }
     output = polishHumanReplyText(output)
+    output = personaFeedbackManager.guardReply(output, this.config.personaGuard)
+    if (!output) {
+      logger.warn("[最终回复清理] 风格拦截后回复为空，已跳过发送")
+      return
+    }
     const textImageTemplate = this.getTextImageTemplateForFinalReply({
       content,
       output,
@@ -6576,6 +6584,12 @@ ${mcpPrompts}
       logger.error("[MessageRecord] 记录消息失败：", error)
     }
 
+    try {
+      personaFeedbackManager.rememberBotReply({ ...e, message_id: botMessageId }, output)
+    } catch (error) {
+      logger.warn(`[希洛反馈] 记录最近回复失败: ${error.message}`)
+    }
+
     // 保存到 messages 数组
     if (session.toolResults?.length) {
       const existingToolResultIds = new Set(
@@ -6607,6 +6621,11 @@ ${mcpPrompts}
     this.updateEnhancedSystems(e, e.msg || '', output).catch(err => {
       logger.error('[增强系统] 更新失败:', err)
     })
+  }
+
+  async recordPersonaFeedback(e) {
+    await e.reply(await personaFeedbackManager.recordFeedback(e, e.msg || ""))
+    return true
   }
 
   /**

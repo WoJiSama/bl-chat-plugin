@@ -46,6 +46,45 @@ export default [
     component: "InputTextArea"
   },
 
+  { component: "Divider", label: "回复微雕" },
+  {
+    field: "personaGuard.enabled",
+    label: "启用坏习惯拦截",
+    component: "Switch",
+    bottomHelpMessage: "最终发送前清理强硬拒绝、客服腔、自我怀疑等不自然表达"
+  },
+  {
+    field: "personaGuard.stripSelfDoubt",
+    label: "移除自我怀疑",
+    component: "Switch",
+    bottomHelpMessage: "例如“我是不是太啰嗦了”“扯远了”等"
+  },
+  {
+    field: "personaGuard.stripCustomerTone",
+    label: "弱化客服腔",
+    component: "Switch",
+    bottomHelpMessage: "清理“很抱歉”“作为AI”“建议您”等表达"
+  },
+  {
+    field: "personaGuard.rewriteHardRefusal",
+    label: "软化强硬拒绝",
+    component: "Switch",
+    bottomHelpMessage: "把直接“不能/无法”改成更自然的边界表达"
+  },
+  {
+    field: "personaGuard.maxPromptItems",
+    label: "反馈注入条数",
+    component: "InputNumber",
+    componentProps: { min: 0, max: 8, step: 1, placeholder: "4" },
+    bottomHelpMessage: "主人反馈会汇总成少量风格规则注入 prompt；0 表示只记录不注入"
+  },
+  {
+    field: "personaGuard.badPatterns",
+    label: "额外拦截词",
+    component: "GTags",
+    componentProps: { allowAdd: true, allowDel: true }
+  },
+
   { component: "Divider", label: "用户画像" },
   {
     field: "userProfiles",

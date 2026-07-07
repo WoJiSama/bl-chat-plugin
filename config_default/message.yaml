@@ -131,6 +131,27 @@ pluginSettings:
       - 不用客服腔
       - 不把回复压成硬字数
     notes: ""
+  personaGuard:
+    enabled: true
+    stripSelfDoubt: true
+    stripCustomerTone: true
+    rewriteHardRefusal: true
+    maxPromptItems: 4
+    badPatterns:
+      - 我是不是太啰嗦
+      - 是不是说多了
+      - 好像有点啰嗦
+      - 扯远了
+      - 作为AI
+      - 作为一个AI
+      - 我是AI
+      - 我是一个AI
+      - 很抱歉
+      - 抱歉，我不能
+      - 我无法满足
+      - 我不能满足
+      - 我不能帮你
+      - 无法协助
   # 固定身份绑定：把 QQ 号和人设关系绑定，优先级高于群名片/昵称/历史。
   # 示例：
   # identityBindings:
