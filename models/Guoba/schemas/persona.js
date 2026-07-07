@@ -85,6 +85,40 @@ export default [
     componentProps: { allowAdd: true, allowDel: true }
   },
 
+  { component: "Divider", label: "群风格观察" },
+  {
+    field: "styleObserver.enabled",
+    label: "启用群风格观察",
+    component: "Switch",
+    bottomHelpMessage: "只做后台统计和报告，不额外回复，也不会自动改变希洛说话方式"
+  },
+  {
+    field: "styleObserver.minReportMessages",
+    label: "报告建议样本数",
+    component: "InputNumber",
+    componentProps: { min: 10, max: 10000, step: 10, placeholder: "50" },
+    bottomHelpMessage: "低于该数量时报告会提示只能粗略参考"
+  },
+  {
+    field: "styleObserver.flushIntervalMs",
+    label: "写入间隔毫秒",
+    component: "InputNumber",
+    componentProps: { min: 5000, max: 600000, step: 5000, placeholder: "60000" },
+    bottomHelpMessage: "降低写盘频率，避免每条消息都写文件"
+  },
+  {
+    field: "styleObserver.disabledGroups",
+    label: "关闭观察的群",
+    component: "GTags",
+    componentProps: { allowAdd: true, allowDel: true }
+  },
+  {
+    field: "styleObserver.maxToneWords",
+    label: "报告语气词上限",
+    component: "InputNumber",
+    componentProps: { min: 5, max: 50, step: 1, placeholder: "18" }
+  },
+
   { component: "Divider", label: "用户画像" },
   {
     field: "userProfiles",

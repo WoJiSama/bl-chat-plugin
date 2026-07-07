@@ -19,6 +19,7 @@ import { memStats } from "../utils/memory/stats.js"
 import { factShortId } from "../utils/memory/entityModel.js"
 import { stripChatLogSpeakerPrefix, stripChatLogSpeakerPrefixes } from "../utils/replySanitizer.js"
 import { personaFeedbackManager } from "../utils/PersonaFeedbackManager.js"
+import { styleObserverManager } from "../utils/StyleObserverManager.js"
 import { buildMissingImageAnalysisReply, looksLikeImageAuthenticityRequest, looksLikeImageVerificationRequest, looksLikeVisualInspectionRequest } from "../utils/imageRequestGuard.js"
 import { compileImagePrompt } from "../utils/promptCompiler.js"
 import { buildToolIntentDisclosure, selectToolIntentCandidates } from "../utils/toolIntentManifests.js"
@@ -1815,6 +1816,8 @@ export class ExamplePlugin extends plugin {
         { reg: "^#mcp\\s+测试\\s+\\S+", fnc: "testMCPTool" },
         { reg: "^#清除群记忆$", fnc: "clearGroupMemory" },
         { reg: "^[#＃.。]\\s*希洛反馈\\s+[\\s\\S]+$", fnc: "recordPersonaFeedback" },
+        { reg: "^[#＃.。]\\s*(群风格报告|风格报告)\\s*$", fnc: "styleObserverReport" },
+        { reg: "^[#＃.。]\\s*(群风格观察|风格观察)\\s*(开启|关闭|状态)?\\s*$", fnc: "styleObserverControl" },
         { reg: "[\\s\\S]*", fnc: "handleRandomReply", log: false }
       ]
     })
@@ -4584,6 +4587,14 @@ ${recentHistory || '(无)'}
     const messageTypes = e.message?.map(m => m.type) || []
     if (this.config.excludeMessageTypes.some(t => messageTypes.includes(t))) return false
 
+    if (this.config.styleObserver?.enabled !== false) {
+      try {
+        styleObserverManager.observeMessage(e, this.config.styleObserver)
+      } catch (error) {
+        logger.warn(`[群风格观察] 记录失败: ${error.message}`)
+      }
+    }
+
     // 禁言检测：bot 在该群被禁言（个人/全员）时不触发任何回复，避免发送失败 + 表情/red 包等也无意义
     if (await this.isMutedInGroup(e)) return false
 
@@ -6625,6 +6636,51 @@ ${mcpPrompts}
 
   async recordPersonaFeedback(e) {
     await e.reply(await personaFeedbackManager.recordFeedback(e, e.msg || ""))
+    return true
+  }
+
+  canManageStyleObserver(e) {
+    return Boolean(e?.isMaster || ["owner", "admin"].includes(e?.sender?.role))
+  }
+
+  async styleObserverReport(e) {
+    if (!e?.group_id) {
+      await e.reply("这个功能要在群里看。")
+      return true
+    }
+    if (!this.canManageStyleObserver(e)) {
+      await e.reply("只有主人、群主或管理员可以查看群风格报告。")
+      return true
+    }
+    await e.reply(styleObserverManager.buildReport(e.group_id, this.config.styleObserver))
+    return true
+  }
+
+  async styleObserverControl(e) {
+    if (!e?.group_id) {
+      await e.reply("这个功能要在群里用。")
+      return true
+    }
+    if (!this.canManageStyleObserver(e)) {
+      await e.reply("只有主人、群主或管理员可以调整群风格观察。")
+      return true
+    }
+    const text = String(e.msg || "")
+    if (/关闭/.test(text)) {
+      styleObserverManager.setGroupEnabled(e.group_id, false, this.config.styleObserver)
+      await e.reply("群风格观察已关闭。")
+      return true
+    }
+    if (/开启/.test(text)) {
+      styleObserverManager.setGroupEnabled(e.group_id, true, this.config.styleObserver)
+      await e.reply("群风格观察已开启。")
+      return true
+    }
+    const enabled = styleObserverManager.isGroupEnabled(e.group_id, this.config.styleObserver)
+    await e.reply([
+      `群风格观察：${enabled ? "观察中" : "已关闭"}`,
+      "可用命令：.群风格观察 开启 / .群风格观察 关闭 / .群风格报告"
+    ].join("\n"))
     return true
   }
 

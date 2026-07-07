@@ -152,6 +152,13 @@ pluginSettings:
       - 我不能满足
       - 我不能帮你
       - 无法协助
+  styleObserver:
+    enabled: true
+    baseDir: data/style_observer
+    minReportMessages: 50
+    flushIntervalMs: 60000
+    disabledGroups: []
+    maxToneWords: 18
   # 固定身份绑定：把 QQ 号和人设关系绑定，优先级高于群名片/昵称/历史。
   # 示例：
   # identityBindings:
