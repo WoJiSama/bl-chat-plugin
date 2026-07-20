@@ -131,7 +131,7 @@ pluginSettings:
       - { range: "23:00-23:59", value: 0.05 }
       - { range: "00:00-07:59", value: 0.034 }
     replyDebounceMs: 1500                # 准备回复前先等待这么久看有没有新消息（防"对方没说完就抢答"）；0=关
-    directTriggerMergeMs: 3000           # 同一群同一用户连续 @/前缀/名字点名触发时合并等待窗口；对方停下后只回复一次；0=关
+    directTriggerMergeMs: 1000           # 同一群同一用户连续 @/前缀/名字点名触发时合并等待窗口；对方停下后只回复一次；0=关
     toolRequestMergeMs: 600              # 可确定工具且参数完整时使用更短合并窗口；图片和开放式请求仍用上面的窗口
     directTriggerMergeMaxMessages: 8     # 连续触发合并最多保留最后 N 条，防刷屏把提示词撑爆
     maxConsecutiveInterrupts: 3          # 同一群被新消息连续打断的最大次数；超过后强制走完不再让步；0=每次都让步
