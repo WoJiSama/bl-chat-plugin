@@ -95,6 +95,40 @@ export default [
     bottomHelpMessage: "仅在「周期文件巡检」开启时生效",
     componentProps: { min: 1, max: 1440, placeholder: "10" }
   },
+  {
+    field: "emojiSystem.stalePruneEnabled",
+    label: "冷门过期淘汰",
+    component: "Switch",
+    bottomHelpMessage: "开启后，巡检会从「最近一段时间没用过」且使用次数最低的一批表情里随机淘汰少量表情。默认关闭，避免误删收藏"
+  },
+  {
+    field: "emojiSystem.staleDays",
+    label: "冷门判定天数",
+    component: "InputNumber",
+    bottomHelpMessage: "超过 N 天没被发送，或从未发送过，会进入冷门候选池",
+    componentProps: { min: 1, max: 365, placeholder: "30" }
+  },
+  {
+    field: "emojiSystem.staleCandidatePoolSize",
+    label: "冷门候选池大小",
+    component: "InputNumber",
+    bottomHelpMessage: "先按使用次数从低到高取前 N 个冷门候选，再从这些候选里随机淘汰，避免总是机械删除同一张",
+    componentProps: { min: 1, max: 200, placeholder: "20" }
+  },
+  {
+    field: "emojiSystem.stalePruneCount",
+    label: "每次淘汰数量",
+    component: "InputNumber",
+    bottomHelpMessage: "每次巡检最多淘汰几张冷门过期表情。建议 1-3，别太激进",
+    componentProps: { min: 0, max: 20, placeholder: "1" }
+  },
+  {
+    field: "emojiSystem.minItemsToKeep",
+    label: "最低保留数量",
+    component: "InputNumber",
+    bottomHelpMessage: "表情包库数量低于或等于这个值时不执行冷门淘汰；库满替换也会尊重此下限",
+    componentProps: { min: 0, max: 2000, placeholder: "50" }
+  },
 
   // ===== 反重复挑图 =====
   {
@@ -121,16 +155,16 @@ export default [
   // ===== 文字+表情节奏延迟 =====
   {
     field: "emojiSystem.followUpDelayMinMs",
-    label: "节奏延迟最小值（毫秒）",
+    label: "组合消息最小间隔（毫秒）",
     component: "InputNumber",
-    bottomHelpMessage: "LLM 用「文字 + 表情」组合发送时，文字发出后等待的最小毫秒数，模拟人类敲字间隔",
+    bottomHelpMessage: "文字与表情包相邻发送时的最小间隔，适用于文字→图、图→文字和三段式",
     componentProps: { min: 0, max: 5000, placeholder: "300" }
   },
   {
     field: "emojiSystem.followUpDelayMaxMs",
-    label: "节奏延迟最大值（毫秒）",
+    label: "组合消息最大间隔（毫秒）",
     component: "InputNumber",
-    bottomHelpMessage: "实际延迟在 min-max 之间随机取值。范围越大节奏越「不像 AI」",
+    bottomHelpMessage: "实际相邻间隔在 min-max 之间随机取值；不要设得过大，否则会显得断裂",
     componentProps: { min: 0, max: 10000, placeholder: "1200" }
   },
 

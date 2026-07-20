@@ -1,4 +1,5 @@
 import { pluginBridge } from "./pluginBridge.js"
+import { safeTruncateUnicode } from "./unicodeText.js"
 
 function asList(value) {
   if (Array.isArray(value)) return value.map(item => String(item || "").trim()).filter(Boolean)
@@ -28,10 +29,9 @@ function clampNumber(value, fallback, min, max) {
 }
 
 function compactLine(text, maxLength = 80) {
-  return String(text || "")
+  return safeTruncateUnicode(String(text || "")
     .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, maxLength)
+    .trim(), maxLength)
 }
 
 function dedupeRecentMessages(messages = [], limit = 3) {
@@ -106,7 +106,7 @@ export class PersonProfileInjector {
 
     if (hasData) lines.push(userLines.join("\n"))
     if (!lines.length) return ""
-    return lines.join("\n").slice(0, maxChars)
+    return safeTruncateUnicode(lines.join("\n"), maxChars)
   }
 
   buildPersonaPrompt(persona = {}) {

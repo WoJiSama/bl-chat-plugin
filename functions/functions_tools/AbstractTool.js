@@ -10,6 +10,19 @@ export class AbstractTool {
       required: []
     };
     this.description = '';
+    this.skill = null;
+  }
+
+  getSkill() {
+    return this.skill || {
+      name: this.name,
+      purpose: this.description,
+      instructions: '只在用户意图与该能力匹配时调用；参数必须符合 schema，缺少必要信息时先追问。'
+    };
+  }
+
+  normalizeParameters(params) {
+    return params && typeof params === 'object' ? { ...params } : {};
   }
 
   /**
@@ -22,8 +35,9 @@ export class AbstractTool {
       return '参数必须是一个对象';
     }
   
+    const requiredFields = new Set(this.parameters.required || []);
     if (this.parameters.required) {
-      for (const required of this.parameters.required) {
+      for (const required of requiredFields) {
         if (!(required in params)) {
           return `缺少必填参数: ${required}`;
         }
@@ -34,6 +48,12 @@ export class AbstractTool {
     for (const [key, value] of Object.entries(params)) {
       const schema = properties[key];
       if (!schema) continue;
+
+      // Normalizers commonly use an empty value to mean an omitted optional
+      // filter. It must not fail an enum intended for actual supplied values.
+      if (!requiredFields.has(key) && (value === undefined || value === null || value === '')) {
+        continue;
+      }
   
       // 处理数组类型
       if (schema.type === 'array') {
@@ -74,6 +94,10 @@ export class AbstractTool {
   
       if (schema.pattern && !new RegExp(schema.pattern).test(String(value))) {
         return `参数 ${key} 格式不正确`;
+      }
+
+      if (Array.isArray(schema.enum) && !schema.enum.includes(value)) {
+        return `参数 ${key} 必须是以下值之一: ${schema.enum.join(', ')}`;
       }
   
       if (['number', 'integer'].includes(schema.type)) {
@@ -116,13 +140,19 @@ export class AbstractTool {
    * @returns {Promise<any>} - 工具执行的结果或错误信息
    */
   async execute(params, event) {
-    const validation = this.validateParameters(params);
+    let normalizedParams;
+    try {
+      normalizedParams = this.normalizeParameters(params, { event });
+    } catch (error) {
+      return `error: 参数规范化失败: ${error.message}`;
+    }
+    const validation = this.validateParameters(normalizedParams);
     if (validation !== true) {
       // 返回错误信息而不是抛出错误
       return `error: ${validation}`;
     }
     try {
-      return await this.func(params, event);
+      return await this.func(normalizedParams, event);
     } catch (error) {
       // 返回错误信息而不是抛出错误
       return `error: 工具 ${this.name} 执行失败: ${error.message}`;

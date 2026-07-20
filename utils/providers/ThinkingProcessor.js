@@ -1,3 +1,5 @@
+import { safeTruncateUnicode } from "../unicodeText.js"
+
 export const ThinkingProcessor = {
     MARKERS: {
         BRACKET: { start: '[思考开始]', end: '[思考结束]' },
@@ -75,7 +77,7 @@ export const ThinkingProcessor = {
 
             // 处理内容
             let processedContent = truncate && content.length > maxLength ?
-                content.substring(0, maxLength) + '...' : content;
+                safeTruncateUnicode(content, maxLength, '...') : content;
 
             if (toMarkdown) {
                 result = result.substring(0, startIndex) +

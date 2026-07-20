@@ -48,18 +48,25 @@ export default [
     field: "umaRace.winPoints",
     label: "冠军积分",
     component: "InputNumber",
-    componentProps: { min: 0, max: 100000, step: 1, placeholder: "5" }
+    componentProps: { min: 0, max: 100000, step: 1, placeholder: "6" }
   },
   {
     field: "umaRace.secondPoints",
     label: "亚军积分",
     component: "InputNumber",
-    componentProps: { min: 0, max: 100000, step: 1, placeholder: "2" }
+    componentProps: { min: 0, max: 100000, step: 1, placeholder: "4" }
   },
   {
     field: "umaRace.thirdPoints",
     label: "季军积分",
     component: "InputNumber",
+    componentProps: { min: 0, max: 100000, step: 1, placeholder: "2" }
+  },
+  {
+    field: "umaRace.participationPoints",
+    label: "参与奖积分",
+    component: "InputNumber",
+    bottomHelpMessage: "未进入前三名的真实玩家获得；NPC 不计入积分。",
     componentProps: { min: 0, max: 100000, step: 1, placeholder: "1" }
   },
   {

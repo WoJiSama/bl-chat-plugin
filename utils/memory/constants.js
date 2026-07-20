@@ -1,4 +1,6 @@
 // utils/memory/constants.js
+import { safeTruncateUnicode } from '../unicodeText.js'
+
 export const AUTHORITY_RANK = Object.freeze({ mention: 1, teaching: 2, self: 3, config: 4 })
 
 export const ROUTES = new Set([
@@ -13,6 +15,8 @@ export const KEY = Object.freeze({
   entities: groupId => `ytbot:mem:g:${groupId}:entities`,
   alias:    groupId => `ytbot:mem:g:${groupId}:alias`,
   facts:    groupId => `ytbot:mem:g:${groupId}:facts`,
+  workflows: groupId => `ytbot:mem:g:${groupId}:workflows`,
+  knowledge: groupId => `ytbot:mem:g:${groupId}:knowledge`,
   meta:     groupId => `ytbot:mem:g:${groupId}:meta`,
   prefix:   groupId => `ytbot:mem:g:${groupId}:`
 })
@@ -35,5 +39,5 @@ export function normalizeAlias(text) {
 }
 
 export function compactText(text, maxLength = 240) {
-  return String(text || '').replace(/\s+/g, ' ').trim().slice(0, maxLength)
+  return safeTruncateUnicode(String(text || '').replace(/\s+/g, ' ').trim(), maxLength)
 }

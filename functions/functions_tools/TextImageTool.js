@@ -3,9 +3,12 @@ import path from "path"
 import sharp from "sharp"
 import puppeteer from "puppeteer"
 import { AbstractTool } from "./AbstractTool.js"
+import { personaFeedbackManager } from "../../utils/PersonaFeedbackManager.js"
+import { safeTruncateUnicode } from "../../utils/unicodeText.js"
+import { pluginBridge } from "../../utils/pluginBridge.js"
 
 const AVATAR_SIZE = 64
-const CHAT_MAX_TEXT_LENGTH = 1800
+const CHAT_MAX_TEXT_LENGTH = 5000
 const DOCUMENT_MAX_TEXT_LENGTH = 12000
 const DELETE_RETRY_DELAYS_MS = [0, 200, 1000]
 
@@ -17,6 +20,16 @@ const QUOTE_FONT_SIZE = 25
 const QUOTE_LINE_HEIGHT = 36
 const CODE_FONT_SIZE = 20
 const CODE_LINE_HEIGHT = 30
+const PUPPETEER_LAUNCH_OPTIONS = {
+  headless: "new",
+  args: [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu"
+  ]
+}
+const SHARED_BROWSER_IDLE_MS = 60_000
 const CODE_COLORS = {
   default: "#e5e7eb",
   keyword: "#c084fc",
@@ -27,6 +40,110 @@ const CODE_COLORS = {
   function: "#93c5fd",
   operator: "#f9a8d4",
   punctuation: "#94a3b8"
+}
+
+let sharedBrowserPromise = null
+let sharedBrowserIdleTimer = null
+
+function clearSharedBrowserIdleTimer() {
+  if (!sharedBrowserIdleTimer) return
+  clearTimeout(sharedBrowserIdleTimer)
+  sharedBrowserIdleTimer = null
+}
+
+async function getSharedBrowser() {
+  clearSharedBrowserIdleTimer()
+  if (!sharedBrowserPromise) {
+    sharedBrowserPromise = puppeteer.launch(PUPPETEER_LAUNCH_OPTIONS)
+      .then(browser => {
+        browser.on?.("disconnected", () => {
+          if (sharedBrowserPromise) sharedBrowserPromise = null
+        })
+        return browser
+      })
+      .catch(error => {
+        sharedBrowserPromise = null
+        throw error
+      })
+  }
+
+  const browser = await sharedBrowserPromise
+  if (!browser?.isConnected?.()) {
+    sharedBrowserPromise = null
+    return await getSharedBrowser()
+  }
+  return browser
+}
+
+function scheduleSharedBrowserClose() {
+  clearSharedBrowserIdleTimer()
+  sharedBrowserIdleTimer = setTimeout(async () => {
+    const browserPromise = sharedBrowserPromise
+    sharedBrowserPromise = null
+    sharedBrowserIdleTimer = null
+    try {
+      const browser = await browserPromise
+      if (browser?.isConnected?.()) await browser.close()
+    } catch {}
+  }, SHARED_BROWSER_IDLE_MS)
+  sharedBrowserIdleTimer.unref?.()
+}
+
+function getRenderTheme(date = new Date()) {
+  let hour = date.getHours()
+  try {
+    const shanghaiHour = new Intl.DateTimeFormat("en-US", {
+      timeZone: "Asia/Shanghai",
+      hour: "2-digit",
+      hourCycle: "h23"
+    }).format(date)
+    hour = Number.parseInt(shanghaiHour, 10)
+  } catch {
+    hour = date.getHours()
+  }
+
+  const night = hour >= 18 || hour < 6
+  return night
+    ? {
+        mode: "night",
+        pageBg: "#090f1f",
+        cardBg: "#111827",
+        cardBorder: "#2f3b56",
+        text: "#f8fafc",
+        muted: "#cbd5e1",
+        subtle: "#94a3b8",
+        quoteBg: "#182235",
+        quoteBorder: "#8fb6ff",
+        inlineBg: "#1d2940",
+        inlineText: "#dbeafe",
+        chatBg: "#09101f",
+        chatBubble: "#151e31",
+        chatBubbleBorder: "#2b3954",
+        chatText: "#f8fafc",
+        chatQuoteText: "#d8e3f3",
+        chatName: "#b9c7da",
+        chatShadow: "#020617"
+      }
+    : {
+        mode: "day",
+        pageBg: "#e8edf3",
+        cardBg: "#f8fafc",
+        cardBorder: "#cfd7e3",
+        text: "#1f2937",
+        muted: "#4b5563",
+        subtle: "#74849a",
+        quoteBg: "#eef3f8",
+        quoteBorder: "#74849a",
+        inlineBg: "#eef2f7",
+        inlineText: "#1f3a5f",
+        chatBg: "#f4f6fb",
+        chatBubble: "#ffffff",
+        chatBubbleBorder: "#e2e8f0",
+        chatText: "#1f2937",
+        chatQuoteText: "#5b6472",
+        chatName: "#8a94a6",
+        chatShadow: "#d7dde8"
+      }
 }
 
 const KEYWORDS = {
@@ -484,6 +601,14 @@ function getPlainCodeBlock(text) {
   return createCodeBlock(codeLines, language)
 }
 
+export function shouldUseDocumentTemplateForTextImage(text = "") {
+  const content = String(text || "")
+  if (!content.trim()) return false
+  if (/```[\s\S]*```/.test(content)) return true
+  if (looksLikeMarkdown(content)) return true
+  return Boolean(getPlainCodeBlock(content))
+}
+
 function flushMarkdownLines(blocks, lines) {
   for (const rawLine of lines) {
     const line = rawLine.trimEnd()
@@ -718,6 +843,7 @@ function markdownToDocumentHtml(text = "") {
 }
 
 function buildDocumentHtml(text = "") {
+  const theme = getRenderTheme()
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -725,30 +851,63 @@ function buildDocumentHtml(text = "") {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     * { box-sizing: border-box; }
-    html, body { margin: 0; padding: 0; background: #e8edf3; color: #1f2937; }
+    html, body { margin: 0; padding: 0; background: ${theme.pageBg}; color: ${theme.text}; }
     body {
+      position: relative;
       width: 980px;
       padding: 20px;
       font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif;
       letter-spacing: 0;
     }
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background:
+        ${theme.mode === "night"
+          ? "radial-gradient(circle at 8% 92%, rgba(219,234,254,0.3) 0 28px, rgba(96,165,250,0.12) 29px 78px, transparent 80px), radial-gradient(circle at 12% 18%, rgba(255,255,255,0.9) 0 1px, transparent 2px), radial-gradient(circle at 24% 72%, rgba(255,255,255,0.66) 0 1px, transparent 2px), radial-gradient(circle at 78% 16%, rgba(191,219,254,0.88) 0 1.4px, transparent 2.6px), radial-gradient(circle at 88% 62%, rgba(255,255,255,0.7) 0 1px, transparent 2px), radial-gradient(circle at 50% 34%, rgba(147,197,253,0.36) 0 1px, transparent 2px), radial-gradient(circle at 7% 86%, rgba(255,255,255,0.9) 0 1.4px, transparent 2.6px), radial-gradient(circle at 14% 94%, rgba(191,219,254,0.86) 0 1px, transparent 2px), radial-gradient(circle at 19% 82%, rgba(255,255,255,0.72) 0 1px, transparent 2px)"
+          : "radial-gradient(circle at 88% 12%, rgba(251,191,36,0.36) 0 46px, rgba(251,191,36,0.15) 47px 86px, transparent 88px), radial-gradient(circle at 12% 86%, rgba(96,165,250,0.18) 0 64px, transparent 66px)"};
+    }
+    body::after {
+      content: "";
+      position: fixed;
+      inset: 14px;
+      pointer-events: none;
+      border-radius: 14px;
+      border: 1px solid ${theme.mode === "night" ? "rgba(191, 219, 254, 0.2)" : "rgba(251, 191, 36, 0.22)"};
+    }
     .document {
+      position: relative;
       width: 940px;
       padding: 34px 42px;
-      background: #f8fafc;
-      border: 1px solid #cfd7e3;
+      background: ${theme.cardBg};
+      border: 1px solid ${theme.cardBorder};
       border-radius: 8px;
-      box-shadow: 0 14px 30px rgba(27, 39, 63, 0.12);
+      box-shadow: ${theme.mode === "night"
+        ? "0 18px 42px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(255, 255, 255, 0.05)"
+        : "0 14px 30px rgba(27, 39, 63, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.7)"};
+      overflow: hidden;
     }
-    .content { font-size: 25px; line-height: 1.62; }
+    .document::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background:
+        ${theme.mode === "night"
+          ? "linear-gradient(135deg, rgba(96,165,250,0.13), transparent 32%), radial-gradient(circle at 7% 92%, rgba(147,197,253,0.16) 0 52px, transparent 54px), radial-gradient(circle at 92% 8%, rgba(255,255,255,0.22) 0 1px, transparent 2px), radial-gradient(circle at 83% 26%, rgba(191,219,254,0.34) 0 1px, transparent 2px), radial-gradient(circle at 8% 18%, rgba(255,255,255,0.18) 0 1px, transparent 2px), radial-gradient(circle at 5% 89%, rgba(255,255,255,0.38) 0 1px, transparent 2px), radial-gradient(circle at 11% 96%, rgba(191,219,254,0.28) 0 1px, transparent 2px)"
+          : "linear-gradient(135deg, rgba(251,191,36,0.12), transparent 36%), radial-gradient(circle at 92% 10%, rgba(251,191,36,0.24) 0 28px, transparent 30px)"};
+    }
+    .content { position: relative; z-index: 1; font-size: 25px; line-height: 1.62; }
     h1, h2, h3 {
       margin: 0 0 18px;
-      color: #111827;
+      color: ${theme.text};
       line-height: 1.28;
       font-weight: 800;
       letter-spacing: 0;
     }
-    h1 { font-size: 34px; padding-bottom: 14px; border-bottom: 2px solid #dde4ee; }
+    h1 { font-size: 34px; padding-bottom: 14px; border-bottom: 2px solid ${theme.mode === "night" ? "#26344d" : "#dde4ee"}; }
     h2 { margin-top: 26px; font-size: 31px; }
     h3 { margin-top: 22px; font-size: 28px; }
     p { margin: 0 0 16px; white-space: normal; overflow-wrap: anywhere; }
@@ -757,18 +916,18 @@ function buildDocumentHtml(text = "") {
     blockquote {
       margin: 4px 0 18px;
       padding: 14px 18px;
-      color: #4b5563;
-      background: #eef3f8;
-      border-left: 5px solid #74849a;
+      color: ${theme.muted};
+      background: ${theme.quoteBg};
+      border-left: 5px solid ${theme.quoteBorder};
       border-radius: 6px;
       overflow-wrap: anywhere;
     }
-    strong { font-weight: 800; color: #111827; }
+    strong { font-weight: 800; color: ${theme.text}; }
     .inline-code {
       padding: 2px 7px;
       border-radius: 5px;
-      background: #eef2f7;
-      color: #1f3a5f;
+      background: ${theme.inlineBg};
+      color: ${theme.inlineText};
       font-family: Consolas, "SFMono-Regular", Menlo, monospace;
       font-size: 0.88em;
     }
@@ -819,7 +978,7 @@ export class TextImageTool extends AbstractTool {
     super()
     this.name = "textImageTool"
     this.description =
-      "把文字、Markdown 或代码内容渲染成图片并发送。默认使用 QQ 聊天气泡样式；科普、讲解、推导、公式总结这类较长内容应使用 document 文档模板。只要用户要求写代码、给代码、实现算法、提供示例代码、编写 Markdown/MD 文档或输出较长结构化文本，都必须调用本工具，把完整内容作为 text 参数发送，不要直接在普通回复里发送代码或 Markdown 原文。也适用于文字可能被 QQ 群管家、其他 QQ 机器人、风控、敏感词检测撤回的场景。代码内容即使没有使用 ``` 包裹，也可以交给本工具自动识别并按代码块高亮渲染。调用后不要再重复发送原始文字。"
+      "把文字、Markdown 或代码内容渲染成图片并发送。普通短文本可以使用 QQ 聊天气泡样式；代码、Markdown、科普、讲解、推导、公式总结这类较长内容必须使用 document 文档卡片模板。只要用户要求写代码、给代码、实现算法、提供示例代码、编写 Markdown/MD 文档或输出较长结构化文本，都必须调用本工具，把完整内容作为 text 参数发送，不要直接在普通回复里发送代码或 Markdown 原文。也适用于文字可能被 QQ 群管家、其他 QQ 机器人、风控、敏感词检测撤回的场景。代码内容即使没有使用 ``` 包裹，也可以交给本工具自动识别并按代码块高亮渲染。调用后不要再重复发送原始文字。"
     this.parameters = {
       type: "object",
       properties: {
@@ -838,7 +997,7 @@ export class TextImageTool extends AbstractTool {
         template: {
           type: "string",
           enum: ["chat", "document"],
-          description: "渲染模板。chat 为聊天气泡；document 为 HTML 文档卡片，适合长文本、讲解、代码和 Markdown"
+          description: "渲染模板。chat 为普通短文本聊天气泡；document 为 HTML 文档卡片，代码、Markdown、长文本和讲解必须用 document"
         }
       },
       required: ["text"],
@@ -847,18 +1006,21 @@ export class TextImageTool extends AbstractTool {
   }
 
   async func(opts, e) {
-    const text = String(opts.text || "").trim()
+    const text = personaFeedbackManager.guardReply(String(opts.text || "").trim(), pluginBridge.instance?.config?.personaGuard, {
+      userText: e?.msg || "",
+      botNames: [e?.bot?.nickname, pluginBridge.instance?.config?.persona?.name]
+    })
     if (!text) return "error: text 不能为空"
 
     const rawTemplate = String(opts.template || "").trim()
-    const template = rawTemplate === "document" || rawTemplate === "html" || rawTemplate.startsWith("parchment")
+    const shouldUseDocument = shouldUseDocumentTemplateForTextImage(text)
+    const template = shouldUseDocument || rawTemplate === "document" || rawTemplate === "html" || rawTemplate.startsWith("parchment")
       ? "document"
       : "chat"
     const maxTextLength = template === "document" ? DOCUMENT_MAX_TEXT_LENGTH : CHAT_MAX_TEXT_LENGTH
-    const safeText = text.slice(0, maxTextLength)
-    const nickname = String(opts.nickname || globalThis.Bot?.nickname || "机器人").trim()
-    const avatarUrl =
-      opts.avatarUrl || `https://q1.qlogo.cn/g?b=qq&nk=${globalThis.Bot?.uin || e?.self_id || ""}&s=100`
+    const safeText = safeTruncateUnicode(text, maxTextLength)
+    const nickname = String(opts.nickname || "").trim()
+    const avatarUrl = String(opts.avatarUrl || "").trim()
     let imagePath = ""
 
     try {
@@ -885,33 +1047,26 @@ export class TextImageTool extends AbstractTool {
       `safe_text_document_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.png`
     )
 
-    let browser
+    let page
     try {
-      browser = await puppeteer.launch({
-        headless: "new",
-        args: [
-          "--no-sandbox",
-          "--disable-setuid-sandbox",
-          "--disable-dev-shm-usage",
-          "--disable-gpu"
-        ]
-      })
-      const page = await browser.newPage()
+      const browser = await getSharedBrowser()
+      page = await browser.newPage()
       await page.setViewport({ width: 980, height: 1200, deviceScaleFactor: 2 })
-      await page.setContent(buildDocumentHtml(text), { waitUntil: "networkidle0", timeout: 60000 })
+      await page.setContent(buildDocumentHtml(text), { waitUntil: "domcontentloaded", timeout: 60000 })
       const clip = await page.evaluate(() => {
         const body = document.body
         const height = Math.ceil(body.getBoundingClientRect().height)
         return { x: 0, y: 0, width: 980, height: Math.max(1, height) }
       })
       await page.screenshot({ path: outputPath, clip, type: "png" })
-      await page.close()
       return outputPath
     } catch (error) {
+      sharedBrowserPromise = null
       await deleteGeneratedFile(outputPath)
       throw error
     } finally {
-      if (browser) await browser.close().catch(() => {})
+      if (page) await page.close().catch(() => {})
+      scheduleSharedBrowserClose()
     }
   }
 
@@ -919,7 +1074,9 @@ export class TextImageTool extends AbstractTool {
     const outputDir = path.join(process.cwd(), "resources", "bl-chat-plugin", "safe_text_images")
     await fs.promises.mkdir(outputDir, { recursive: true })
 
+    const theme = getRenderTheme()
     const avatarDataUrl = await fetchAvatarDataUrl(avatarUrl)
+    const hasIdentity = Boolean(nickname || avatarDataUrl)
     const blocks = parseMarkdown(text)
     const bubblePaddingX = 28
     const bubblePaddingY = 24
@@ -933,11 +1090,13 @@ export class TextImageTool extends AbstractTool {
     const bubbleHeight = Math.max(76, contentHeight + bubblePaddingY * 2)
     const avatarX = 28
     const avatarY = 28
-    const bubbleX = avatarX + AVATAR_SIZE + 26
+    const bubbleX = hasIdentity ? avatarX + AVATAR_SIZE + 26 : 28
     const nameY = avatarY + 19
-    const bubbleY = avatarY + 36
+    const bubbleY = hasIdentity ? avatarY + 36 : 28
     const width = bubbleX + bubbleWidth + 28
-    const height = Math.max(avatarY + AVATAR_SIZE + 28, bubbleY + bubbleHeight + 28)
+    const height = hasIdentity
+      ? Math.max(avatarY + AVATAR_SIZE + 28, bubbleY + bubbleHeight + 28)
+      : bubbleY + bubbleHeight + 28
     const contentX = bubbleX + bubblePaddingX
     let currentY = bubbleY + bubblePaddingY
 
@@ -973,12 +1132,13 @@ export class TextImageTool extends AbstractTool {
 
         const prefixWidth = block.prefix ? measureTextWidth(`${block.prefix} `, block.fontSize) : 0
         const lineX = contentX + prefixWidth
+        const textFill = block.type === "quote" ? theme.chatQuoteText : theme.chatText
         const prefixSvg = block.prefix
-          ? `<text x="${contentX}" y="${currentY + block.fontSize}" font-size="${block.fontSize}" fill="#374151" font-family="Microsoft YaHei, Noto Sans CJK SC, Arial">${escapeXml(block.prefix)}</text>`
+          ? `<text x="${contentX}" y="${currentY + block.fontSize}" font-size="${block.fontSize}" fill="${theme.chatText}" font-family="Microsoft YaHei, Noto Sans CJK SC, Arial">${escapeXml(block.prefix)}</text>`
           : ""
         const quoteSvg =
           block.type === "quote"
-            ? `<rect x="${contentX - 12}" y="${currentY + 2}" width="4" height="${block.height - 4}" rx="2" fill="#c9d2df"/>`
+            ? `<rect x="${contentX - 12}" y="${currentY + 2}" width="4" height="${block.height - 4}" rx="2" fill="${theme.mode === "night" ? "#8fb6ff" : "#c9d2df"}"/>`
             : ""
         const linesSvg = block.lines
           .map(
@@ -991,7 +1151,7 @@ export class TextImageTool extends AbstractTool {
         return `
   ${quoteSvg}
   ${prefixSvg}
-  <text font-size="${block.fontSize}" fill="${block.fill}" font-weight="${block.fontWeight}" font-family="Microsoft YaHei, Noto Sans CJK SC, Arial" dominant-baseline="alphabetic">
+  <text font-size="${block.fontSize}" fill="${textFill}" font-weight="${block.fontWeight}" font-family="Microsoft YaHei, Noto Sans CJK SC, Arial" dominant-baseline="alphabetic">
     ${linesSvg}
   </text>`
       })
@@ -999,8 +1159,29 @@ export class TextImageTool extends AbstractTool {
 
     const avatarSvg = avatarDataUrl
       ? `<image href="${avatarDataUrl}" x="${avatarX}" y="${avatarY}" width="${AVATAR_SIZE}" height="${AVATAR_SIZE}" clip-path="url(#avatarClip)" preserveAspectRatio="xMidYMid slice"/>`
-      : `<circle cx="${avatarX + AVATAR_SIZE / 2}" cy="${avatarY + AVATAR_SIZE / 2}" r="${AVATAR_SIZE / 2}" fill="#8fb6ff"/>
-         <text x="${avatarX + AVATAR_SIZE / 2}" y="${avatarY + 42}" text-anchor="middle" font-size="24" fill="#fff" font-family="Microsoft YaHei, Arial">AI</text>`
+      : ""
+    const nameSvg = nickname
+      ? `<text x="${bubbleX}" y="${nameY}" font-size="18" fill="${theme.chatName}" font-family="Microsoft YaHei, Arial">${escapeXml(nickname)}</text>`
+      : ""
+    const tailSvg = hasIdentity
+      ? `<path d="M ${bubbleX - 10} ${bubbleY + 26} L ${bubbleX + 4} ${bubbleY + 18} L ${bubbleX + 4} ${bubbleY + 34} Z" fill="${theme.chatBubble}"/>`
+      : ""
+
+    const decorationSvg = theme.mode === "night"
+      ? `
+  <circle cx="${Math.max(26, width - 86)}" cy="28" r="1.4" fill="#ffffff" opacity="0.88"/>
+  <circle cx="${Math.max(32, width - 42)}" cy="74" r="1.1" fill="#bfdbfe" opacity="0.82"/>
+  <circle cx="42" cy="${Math.max(34, height - 34)}" r="23" fill="#60a5fa" opacity="0.08"/>
+  <circle cx="34" cy="${Math.max(34, height - 28)}" r="1.7" fill="#ffffff" opacity="0.9"/>
+  <circle cx="58" cy="${Math.max(38, height - 48)}" r="1.2" fill="#bfdbfe" opacity="0.82"/>
+  <circle cx="82" cy="${Math.max(40, height - 22)}" r="1" fill="#ffffff" opacity="0.68"/>
+  <path d="M 54 ${Math.max(34, height - 32)} l7 0 m-3.5 -3.5 l0 7" stroke="#dbeafe" stroke-width="1.5" stroke-linecap="round" opacity="0.84"/>
+  <circle cx="${Math.max(44, width - 138)}" cy="${Math.max(36, height - 38)}" r="1" fill="#93c5fd" opacity="0.66"/>
+  <path d="M ${Math.max(40, width - 118)} 42 l4 0 m-2 -2 l0 4" stroke="#dbeafe" stroke-width="1.4" stroke-linecap="round" opacity="0.78"/>`
+      : `
+  <circle cx="${Math.max(58, width - 58)}" cy="46" r="24" fill="#fbbf24" opacity="0.28"/>
+  <circle cx="${Math.max(58, width - 58)}" cy="46" r="39" fill="none" stroke="#fbbf24" stroke-width="2" opacity="0.14"/>
+  <path d="M ${Math.max(58, width - 58)} 8 v13 M ${Math.max(58, width - 58)} 71 v13 M ${Math.max(24, width - 96)} 46 h13 M ${Math.max(22, width - 19)} 46 h13" stroke="#f59e0b" stroke-width="3" stroke-linecap="round" opacity="0.22"/>`
 
     const svg = `
 <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
@@ -1009,14 +1190,15 @@ export class TextImageTool extends AbstractTool {
       <circle cx="${avatarX + AVATAR_SIZE / 2}" cy="${avatarY + AVATAR_SIZE / 2}" r="${AVATAR_SIZE / 2}"/>
     </clipPath>
     <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#d7dde8" flood-opacity="0.75"/>
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="${theme.chatShadow}" flood-opacity="${theme.mode === "night" ? "0.62" : "0.75"}"/>
     </filter>
   </defs>
-  <rect width="100%" height="100%" fill="#f4f6fb"/>
+  <rect width="100%" height="100%" fill="${theme.chatBg}"/>
+  ${decorationSvg}
   ${avatarSvg}
-  <text x="${bubbleX}" y="${nameY}" font-size="18" fill="#8a94a6" font-family="Microsoft YaHei, Arial">${escapeXml(nickname)}</text>
-  <path d="M ${bubbleX - 10} ${bubbleY + 26} L ${bubbleX + 4} ${bubbleY + 18} L ${bubbleX + 4} ${bubbleY + 34} Z" fill="#ffffff"/>
-  <rect x="${bubbleX}" y="${bubbleY}" width="${bubbleWidth}" height="${bubbleHeight}" rx="18" fill="#ffffff" filter="url(#softShadow)"/>
+  ${nameSvg}
+  ${tailSvg}
+  <rect x="${bubbleX}" y="${bubbleY}" width="${bubbleWidth}" height="${bubbleHeight}" rx="18" fill="${theme.chatBubble}" stroke="${theme.chatBubbleBorder}" stroke-width="1" filter="url(#softShadow)"/>
   ${blockSvg}
 </svg>`
 

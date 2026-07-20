@@ -73,11 +73,11 @@
     }
 
     .prompt {
-      margin: 14px 24px 0;
+      margin: 14px 0 0;
       padding: 12px 14px;
       color: #e8edf3;
-      background: rgba(255, 255, 255, 0.055);
-      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(241, 197, 108, 0.09);
+      border: 1px solid rgba(241, 197, 108, 0.2);
       border-radius: 7px;
       font-size: 17px;
       line-height: 1.42;
@@ -147,6 +147,80 @@
       font-size: 18px;
       line-height: 1.25;
       font-weight: 900;
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 4px 6px;
+    }
+
+    .runner-affix {
+      display: inline-block;
+      margin-right: 2px;
+      font-weight: 900;
+    }
+
+    .affix-broken {
+      color: #9aa0a8;
+      text-shadow: 0 0 8px rgba(154, 160, 168, 0.1);
+    }
+
+    .affix-cursed {
+      color: #ff6b7a;
+      text-shadow: 0 0 10px rgba(255, 107, 122, 0.32);
+    }
+
+    .affix-common {
+      color: #d7e0ea;
+      text-shadow: 0 0 8px rgba(215, 224, 234, 0.12);
+    }
+
+    .affix-good {
+      color: #7bd88f;
+      text-shadow: 0 0 9px rgba(123, 216, 143, 0.25);
+    }
+
+    .affix-rare {
+      color: #7fc7ff;
+      text-shadow: 0 0 9px rgba(127, 199, 255, 0.28);
+    }
+
+    .affix-epic {
+      color: #c39bff;
+      text-shadow: 0 0 10px rgba(195, 155, 255, 0.32);
+    }
+
+    .affix-shiny {
+      color: #ffd36f;
+      text-shadow: 0 0 10px rgba(255, 211, 111, 0.38);
+    }
+
+    .runner-name {
+      color: #fff;
+    }
+
+    .npc-mark {
+      display: inline-block;
+      padding: 2px 5px;
+      border-radius: 5px;
+      color: #9ca8b8;
+      background: rgba(255, 255, 255, 0.07);
+      font-size: 12px;
+      line-height: 1.2;
+      vertical-align: 2px;
+      font-weight: 900;
+    }
+
+    .runner-gap {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 5px;
+      color: #f1c56c;
+      background: rgba(241, 197, 108, 0.1);
+      border: 1px solid rgba(241, 197, 108, 0.18);
+      font-size: 12px;
+      line-height: 1.2;
+      font-weight: 900;
+      white-space: nowrap;
     }
 
     .meta {
@@ -220,9 +294,117 @@
     .no-awards .awards {
       display: none;
     }
+
+    .proficiency {
+      margin-top: 14px;
+      padding: 14px 16px;
+      border-radius: 7px;
+      background: rgba(92, 171, 155, 0.12);
+      border: 1px solid rgba(112, 214, 190, 0.18);
+    }
+
+    .prof-title {
+      margin: 0 0 10px;
+      color: #dffbf4;
+      font-size: 18px;
+      line-height: 1.25;
+      font-weight: 900;
+    }
+
+    .prof-runner {
+      display: grid;
+      grid-template-columns: 160px 1fr;
+      gap: 12px;
+      padding: 10px 0;
+      border-top: 1px solid rgba(255, 255, 255, 0.07);
+    }
+
+    .prof-runner:first-of-type {
+      border-top: 0;
+      padding-top: 0;
+    }
+
+    .prof-name {
+      color: #fff;
+      font-size: 17px;
+      line-height: 1.35;
+      font-weight: 900;
+      overflow-wrap: anywhere;
+    }
+
+    .prof-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .prof-item {
+      min-width: 0;
+    }
+
+    .prof-main {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 24px;
+      font-size: 15px;
+      line-height: 1.25;
+    }
+
+    .prof-action {
+      color: #edf8f5;
+      font-weight: 900;
+    }
+
+    .prof-gain {
+      min-width: 42px;
+      padding: 3px 7px;
+      border-radius: 6px;
+      color: #10241f;
+      background: #8fe1d0;
+      font-weight: 900;
+      text-align: center;
+    }
+
+    .prof-level {
+      color: #aee7dc;
+      font-weight: 800;
+    }
+
+    .prof-progress {
+      display: grid;
+      grid-template-columns: minmax(180px, 1fr) 210px;
+      align-items: center;
+      gap: 10px;
+      margin-top: 5px;
+    }
+
+    .prof-bar {
+      height: 8px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.13);
+    }
+
+    .prof-bar span {
+      display: block;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, #70d6be, #f1c56c);
+    }
+
+    .prof-num {
+      color: #aab8c5;
+      font-size: 13px;
+      line-height: 1.25;
+      white-space: nowrap;
+    }
+
+    .no-proficiency .proficiency {
+      display: none;
+    }
   </style>
 </head>
-<body class="{{typeClass}} {{hasAwardsClass}}">
+<body class="{{typeClass}} {{hasAwardsClass}} {{hasProficiencyClass}}">
   <main class="report">
     <section class="header">
       <div class="title-row">
@@ -231,8 +413,8 @@
       </div>
       <div class="subtitle">{{subtitle}}</div>
       <div class="scene">{{scene}}</div>
+      <div class="prompt">{{prompt}}</div>
     </section>
-    <div class="prompt">{{prompt}}</div>
     <section class="body">
       <table>
         <thead>
@@ -253,6 +435,10 @@
       <div class="awards">
         {{@ awardsHtml}}
       </div>
+      <section class="proficiency">
+        <h2 class="prof-title">熟练度提升</h2>
+        {{@ proficiencyHtml}}
+      </section>
     </section>
   </main>
 </body>

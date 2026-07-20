@@ -1,5 +1,6 @@
 import { AbstractTool } from "./AbstractTool.js"
 import { pluginBridge } from "../../utils/pluginBridge.js"
+import { personaFeedbackManager } from "../../utils/PersonaFeedbackManager.js"
 import { VolcengineVoiceProvider } from "../../utils/VolcengineVoiceProvider.js"
 import {
   getVoiceStyleConfig,
@@ -51,7 +52,11 @@ export class VoiceTool extends AbstractTool {
     }
 
     const rawText = opts?.text || ""
-    const text = sanitizeVoiceText(rawText, config.maxTextLength || 80)
+    const guardedText = personaFeedbackManager.guardReply(rawText, pluginBridge.instance?.config?.personaGuard, {
+      userText: e?.msg || "",
+      botNames: [e?.bot?.nickname, pluginBridge.instance?.config?.persona?.name]
+    })
+    const text = sanitizeVoiceText(guardedText, config.maxTextLength || 80)
     if (!text) return "语音内容为空，先不发语音。"
 
     const styleName = opts?.style || selectVoiceStyle(text, config.styles || {})

@@ -23,11 +23,11 @@ export default [
     componentProps: { min: 10, max: 1000, placeholder: "100" }
   },
   {
-    field: "groupChatMemoryDays",
-    label: "历史保存天数",
+    field: "groupChatMemoryMinutes",
+    label: "近期上下文保留分钟",
     component: "InputNumber",
-    bottomHelpMessage: "群聊记录在内存中保留的时间（天）",
-    componentProps: { min: 1, max: 30, placeholder: "1" }
+    bottomHelpMessage: "Redis 中供 AI 衔接上下文的近期消息保留时间；每条新消息会重新开始计时，不影响长期聊天归档",
+    componentProps: { min: 1, max: 1440, placeholder: "60" }
   },
   {
     field: "concurrentLimit",

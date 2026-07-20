@@ -30,6 +30,12 @@ import { SendLocalEmojiTool } from "../functions/functions_tools/SendLocalEmojiT
 import { WaitTool } from "../functions/functions_tools/WaitTool.js"
 import { SendGiftTool } from "../functions/functions_tools/SendGiftTool.js"
 import { DeltaForceTool } from "../functions/functions_tools/DeltaForceTool.js"
+import { ExcelWorkbookTool } from "../functions/functions_tools/ExcelWorkbookTool.js"
+import { ModrinthTool } from "../functions/functions_tools/ModrinthTool.js"
+import { MentionAdminsTool } from "../functions/functions_tools/MentionAdminsTool.js"
+import { MentionMembersTool } from "../functions/functions_tools/MentionMembersTool.js"
+import { ForgetGroupKnowledgeTool } from "../functions/functions_tools/ForgetGroupKnowledgeTool.js"
+import { resolveToolSkill } from "./toolSkills.js"
 
 const PLUGIN_NAME = "bl-chat-plugin"
 const CUSTOM_TOOL_EXTENSIONS = new Set([".js", ".mjs", ".cjs"])
@@ -66,6 +72,11 @@ const BUILT_IN_TOOL_FACTORIES = [
   () => new WaitTool(),
   () => new SendGiftTool(),
   () => new DeltaForceTool(),
+  () => new ExcelWorkbookTool(),
+  () => new ModrinthTool(),
+  () => new MentionAdminsTool(),
+  () => new MentionMembersTool(),
+  () => new ForgetGroupKnowledgeTool(),
 ]
 
 function logInfo(message) {
@@ -101,6 +112,7 @@ export class LocalToolRegistry {
       toolInstances: { ...this.toolInstances },
       functions: [...this.functions],
       functionMap: new Map(this.functionMap),
+      toolSkills: Object.fromEntries(Object.entries(this.toolInstances).map(([name, tool]) => [name, resolveToolSkill(tool)])),
       builtInToolCount: this.builtInToolNames.size,
       customToolCount: this.lastCustomToolCount
     }

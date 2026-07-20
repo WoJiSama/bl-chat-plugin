@@ -42,5 +42,26 @@ export default [
     component: "InputNumber",
     bottomHelpMessage: "积累多少条消息后触发一次 AI 学习",
     componentProps: { min: 10, max: 500, placeholder: "50" }
+  },
+  {
+    field: "expressionLearning.sequenceWindowMs",
+    label: "连续消息时间窗（毫秒）",
+    component: "InputNumber",
+    bottomHelpMessage: "同一群友在此时间内连续发送的文字/表情包会作为一整轮学习；其他人插话会立即断开",
+    componentProps: { min: 3000, max: 120000, step: 1000, placeholder: "20000" }
+  },
+  {
+    field: "expressionLearning.maxSequenceTurns",
+    label: "每轮最大学习条数",
+    component: "InputNumber",
+    bottomHelpMessage: "最多学习同一轮中的几条消息，建议保持 2-3，避免把长刷屏学成常态",
+    componentProps: { min: 2, max: 5, placeholder: "3" }
+  },
+  {
+    field: "expressionLearning.maxSequenceSamples",
+    label: "整轮节奏样本上限",
+    component: "InputNumber",
+    bottomHelpMessage: "每个群最多保留多少条整轮节奏样本",
+    componentProps: { min: 5, max: 100, placeholder: "30" }
   }
 ]

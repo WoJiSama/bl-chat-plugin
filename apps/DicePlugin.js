@@ -1,5 +1,6 @@
 import { diceManager } from "../utils/DiceManager.js"
 import { sendSmartReply } from "../utils/SmartReply.js"
+import { DICE_COMMAND_RULES, matchDiceCommand, stripDiceCommand } from "../utils/diceCommandPolicy.js"
 
 export class DicePlugin extends plugin {
   constructor() {
@@ -8,63 +9,23 @@ export class DicePlugin extends plugin {
       dsc: "COC 跑团骰娘命令",
       event: "message",
       priority: 560,
-      rule: [
-        { reg: "^[.。](骰娘|dice)\\s*$", fnc: "showHelp" },
-        { reg: "^[.。](骰娘|dice)\\s*(帮助|help)\\s*$", fnc: "showHelp" },
-        { reg: "^[.。](help|帮助)(\\s+[\\s\\S]+)?$", fnc: "help" },
-        { reg: "^[.。](bot|dismiss|bye)(\\s+[\\s\\S]+)?$", fnc: "botControl" },
-        { reg: "^[.。]reply(\\s+[\\s\\S]+)?$", fnc: "replyControl" },
-        { reg: "^[.。]send(\\s+[\\s\\S]+)?$", fnc: "sendToMaster" },
-        { reg: "^[.。]find(\\s+[\\s\\S]+)?$", fnc: "findEntry" },
-        { reg: "^[.。]set(?!coc)(\\s+[\\s\\S]+)?$", fnc: "setDiceOption" },
-        { reg: "^[.。]sn(\\s+[\\s\\S]+)?$", fnc: "sn" },
-        { reg: "^[.。]log\\s*(on|start|开始|开启)(\\s+[\\s\\S]+)?$", fnc: "logStart" },
-        { reg: "^[.。]log\\s*(new|新建|create)(\\s+[\\s\\S]+)?$", fnc: "logNew" },
-        { reg: "^[.。]log\\s*(off|stop|结束|关闭)\\s*$", fnc: "logStop" },
-        { reg: "^[.。]log\\s*(end|结束并导出)\\s*$", fnc: "logEnd" },
-        { reg: "^[.。]log\\s*(status|状态)?\\s*$", fnc: "logStatus" },
-        { reg: "^[.。]log\\s*(export|get|导出|获取)(\\s+[\\s\\S]+)?$", fnc: "logExport" },
-        { reg: "^[.。](ri)(\\s+[\\s\\S]+)?$", fnc: "initiativeRoll" },
-        { reg: "^[.。](init|先攻)(\\s+[\\s\\S]+)?$", fnc: "initiative" },
-        { reg: "^[.。](?:r(?![A-Za-z])|roll)([\\s\\S]*)$", fnc: "roll" },
-        { reg: "^[.。](rsr)(\\s+[\\s\\S]+)?$", fnc: "rsr" },
-        { reg: "^[.。](ww)(\\s+[\\s\\S]+)?$", fnc: "ww" },
-        { reg: "^[.。](dx)(\\s+[\\s\\S]+)?$", fnc: "dx" },
-        { reg: "^[.。](ekgen)(\\s+[\\s\\S]+)?$", fnc: "ekgen" },
-        { reg: "^[.。](ek)(\\s+[\\s\\S]+)?$", fnc: "ek" },
-        { reg: "^[.。](bp)(\\d+)?(\\s+[\\s\\S]+)?$", fnc: "bonusRoll" },
-        { reg: "^[.。](pp)(\\d+)?(\\s+[\\s\\S]+)?$", fnc: "penaltyRoll" },
-        { reg: "^[.。](rav)(\\s+[\\s\\S]+)?$", fnc: "opposed" },
-        { reg: "^[.。](rab|rap|rahb|rahp|rah|ra)(\\d+)?#?(b|p)?(\\s+[\\s\\S]+)?$", fnc: "seaCocCheck" },
-        { reg: "^[.。](ra|rc)([+\\-]?\\d+)(\\s+[\\s\\S]+)?$", fnc: "numberedCheck" },
-        { reg: "^[.。](ra|rc)(\\s+[\\s\\S]+)?$", fnc: "check" },
-        { reg: "^[.。](rb)(\\d+)?(\\s+[\\s\\S]+)?$", fnc: "bonusCheck" },
-        { reg: "^[.。](rp)(\\d+)?(\\s+[\\s\\S]+)?$", fnc: "penaltyCheck" },
-        { reg: "^[.。](rh|rah)(\\s+[\\s\\S]+)?$", fnc: "hiddenCheck" },
-        { reg: "^[.。]sc([\\s\\S]*)$", fnc: "sanCheck" },
-        { reg: "^[.。]en(\\s+[\\s\\S]+)?$", fnc: "enCheck" },
-        { reg: "^[.。](?:coc7?|天命)([\\s\\S]*)$", fnc: "coc" },
-        { reg: "^[.。](dnd5e?|dnd)([\\s\\S]*)$", fnc: "dnd" },
-        { reg: "^[.。](buff|ss|cast|longrest|ds)([\\s\\S]*)$", fnc: "dndUtility" },
-        { reg: "^[.。](namednd)([\\s\\S]*)$", fnc: "nameDnd" },
-        { reg: "^[.。](jrrp|今日人品)\\s*$", fnc: "jrrp" },
-        { reg: "^[.。](db|伤害加值)(\\s+[\\s\\S]+)?$", fnc: "db" },
-        { reg: "^[.。]st([\\s\\S]*)$", fnc: "st" },
-        { reg: "^[.。]pc(\\s+[\\s\\S]+)?$", fnc: "pc" },
-        { reg: "^[.。]nn(\\s+[\\s\\S]+)?$", fnc: "nn" },
-        { reg: "^[.。]setcoc([\\s\\S]*)$", fnc: "setCoc" },
-        { reg: "^[.。]ti\\s*$", fnc: "ti" },
-        { reg: "^[.。]li\\s*$", fnc: "li" }
-      ]
+      rule: DICE_COMMAND_RULES.map(rule => ({ ...rule }))
     })
   }
 
   strip(e, head) {
-    return String(e.msg || "").replace(new RegExp(`^[.。]${head}\\s*`, "i"), "").trim()
+    return stripDiceCommand(e?.msg, head)
   }
 
   async reply(e, output, options = {}) {
-    return await sendSmartReply(e, output, options)
+    const userId = e?.user_id || e?.sender?.user_id
+    const senderOptions = userId
+      ? {
+          nickname: e?.sender?.card || e?.sender?.nickname || String(userId),
+          avatarUrl: `https://q1.qlogo.cn/g?b=qq&nk=${userId}&s=100`
+        }
+      : {}
+    return await sendSmartReply(e, output, { ...senderOptions, ...options })
   }
 
   async showHelp(e) {
@@ -143,7 +104,7 @@ export class DicePlugin extends plugin {
 
   async roll(e) {
     const text = String(e.msg || "")
-    const match = text.match(/^[.。](?:r(?![A-Za-z])|roll)\s*([\s\S]*)$/i)
+    const match = matchDiceCommand(text, "(?:r(?![A-Za-z])|roll)\\s*([\\s\\S]*)")
     await this.reply(e, diceManager.handleRoll(e, match?.[1] || ""))
     return true
   }
@@ -185,14 +146,14 @@ export class DicePlugin extends plugin {
 
   async bonusRoll(e) {
     const text = String(e.msg || "")
-    const match = text.match(/^[.。]bp(\d+)?\s*([\s\S]*)$/i)
+    const match = matchDiceCommand(text, "bp(\\d+)?\\s*([\\s\\S]*)")
     await this.reply(e, diceManager.handleBonusPenaltyRoll(e, match?.[2] || "", Number(match?.[1] || 1)))
     return true
   }
 
   async penaltyRoll(e) {
     const text = String(e.msg || "")
-    const match = text.match(/^[.。]pp(\d+)?\s*([\s\S]*)$/i)
+    const match = matchDiceCommand(text, "pp(\\d+)?\\s*([\\s\\S]*)")
     await this.reply(e, diceManager.handleBonusPenaltyRoll(e, match?.[2] || "", -Number(match?.[1] || 1)))
     return true
   }
@@ -204,7 +165,7 @@ export class DicePlugin extends plugin {
 
   async seaCocCheck(e) {
     const text = String(e.msg || "")
-    const match = text.match(/^[.。](rab|rap|rahb|rahp|rah|ra)(\d+)?#?(b|p)?\s*([\s\S]*)$/i)
+    const match = matchDiceCommand(text, "(rab|rap|rahb|rahp|rah|ra)(\\d+)?#?(b|p)?\\s*([\\s\\S]*)")
     const head = String(match?.[1] || "ra").toLowerCase()
     const num = Number(match?.[2] || 0)
     const suffix = String(match?.[3] || "").toLowerCase()
@@ -226,7 +187,7 @@ export class DicePlugin extends plugin {
 
   async numberedCheck(e) {
     const text = String(e.msg || "")
-    const match = text.match(/^[.。](?:ra|rc)([+\-]?\d+)\s*([\s\S]*)$/i)
+    const match = matchDiceCommand(text, "(?:ra|rc)([+\\-]?\\d+)\\s*([\\s\\S]*)")
     const modifier = Number(match?.[1] || 0)
     await this.reply(e, diceManager.handleCheck(e, match?.[2] || "", { modifier }))
     return true
@@ -234,14 +195,14 @@ export class DicePlugin extends plugin {
 
   async bonusCheck(e) {
     const text = String(e.msg || "")
-    const match = text.match(/^[.。]rb(\d+)?\s*([\s\S]*)$/i)
+    const match = matchDiceCommand(text, "rb(\\d+)?\\s*([\\s\\S]*)")
     await this.reply(e, diceManager.handleCheck(e, match?.[2] || "", { modifier: Number(match?.[1] || 1) }))
     return true
   }
 
   async penaltyCheck(e) {
     const text = String(e.msg || "")
-    const match = text.match(/^[.。]rp(\d+)?\s*([\s\S]*)$/i)
+    const match = matchDiceCommand(text, "rp(\\d+)?\\s*([\\s\\S]*)")
     await this.reply(e, diceManager.handleCheck(e, match?.[2] || "", { modifier: -Number(match?.[1] || 1) }))
     return true
   }
@@ -263,14 +224,14 @@ export class DicePlugin extends plugin {
 
   async coc(e) {
     const text = String(e.msg || "")
-    const match = text.match(/^[.。](?:coc7?|天命)\s*([\s\S]*)$/i)
+    const match = matchDiceCommand(text, "(?:coc7?|天命)\\s*([\\s\\S]*)")
     await this.reply(e, diceManager.handleCoc(e, match?.[1] || ""), { kind: "cocAttributes" })
     return true
   }
 
   async dnd(e) {
     const text = String(e.msg || "")
-    const match = text.match(/^[.。](?:dnd5e?|dnd)\s*([\s\S]*)$/i)
+    const match = matchDiceCommand(text, "(?:dnd5e?|dnd)\\s*([\\s\\S]*)")
     await this.reply(e, diceManager.handleDnd(e, match?.[1] || ""), { kind: "diceLong" })
     return true
   }
@@ -282,7 +243,7 @@ export class DicePlugin extends plugin {
 
   async dndUtility(e) {
     const text = String(e.msg || "")
-    const match = text.match(/^[.。](buff|ss|cast|longrest|ds)\s*([\s\S]*)$/i)
+    const match = matchDiceCommand(text, "(buff|ss|cast|longrest|ds)\\s*([\\s\\S]*)")
     await this.reply(e, await diceManager.handleDndUtility(e, match?.[1] || "", match?.[2] || ""))
     return true
   }

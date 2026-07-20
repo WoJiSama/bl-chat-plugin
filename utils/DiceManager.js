@@ -1,6 +1,7 @@
 import fs from "fs"
 import path from "path"
 import { createRequire } from "module"
+import { collectMentionTargetIds, getMentionTargetId, stripCqMentions } from "./mentionTargets.js"
 
 const require = createRequire(import.meta.url)
 let yamlParser = null
@@ -419,7 +420,7 @@ export class DiceManager {
     const type = segment.type || ""
     const data = segment.data || segment
     if (type === "text") return data.text || segment.text || ""
-    if (type === "at") return `[@${data.qq || segment.qq || ""}]`
+    if (type === "at") return `[@${getMentionTargetId(segment) || ""}]`
     if (type === "face") return `[表情:${data.id || segment.id || ""}]`
     if (type === "image") return `[图片:${data.file || segment.file || data.url || segment.url || ""}]`
     if (type === "record") return `[语音:${data.file || segment.file || ""}]`
@@ -836,13 +837,7 @@ export class DiceManager {
   }
 
   getMentionedUserIds(e) {
-    const ids = []
-    for (const seg of e?.message || []) {
-      if (seg?.type !== "at") continue
-      const qq = seg.qq || seg.data?.qq
-      if (qq && String(qq) !== "all") ids.push(String(qq))
-    }
-    return ids
+    return collectMentionTargetIds(e, e?.bot?.uin || globalThis.Bot?.uin)
   }
 
   getActiveCard(e, state = this.readState()) {
@@ -989,7 +984,7 @@ export class DiceManager {
     const config = this.getConfig()
     if (!config.enabled) return "骰娘模块现在没开。"
     const targetUserId = options.targetUserId || this.getMentionedUserIds(e)[0]
-    const cleanRaw = targetUserId ? String(raw || "").replace(/\[CQ:at,qq=\d+\]/g, "").trim() : raw
+    const cleanRaw = targetUserId ? stripCqMentions(raw) : raw
     const targetEvent = targetUserId ? this.getEventForUser(e, targetUserId) : e
     const parsed = this.parseCheckArgs(cleanRaw)
     const target = this.getTargetValue(parsed.skill, parsed.target, targetEvent)
@@ -1052,7 +1047,7 @@ export class DiceManager {
       leftRaw = parts[0]
       rightRaw = parts.slice(1).join(" vs ")
     } else if (mentioned.length) {
-      leftRaw = text.replace(/\[CQ:at,qq=\d+\]/g, "").trim()
+      leftRaw = stripCqMentions(text)
       rightRaw = leftRaw
       rightEvent = this.getEventForUser(e, mentioned[0])
     } else {

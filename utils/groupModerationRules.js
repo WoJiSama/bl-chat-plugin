@@ -13,7 +13,13 @@ export const DEFAULT_GROUP_MODERATION_CONFIG = {
   adTemplateSimilarityThreshold: 0.58,
   adTemplateWeight: 0.55,
   adTemplates: [
-    "AI 培训公司 需要 软件工程师 线上培训讲课 要求 6年以上代码经验 前端 后端 晚上时间 在家即可上课 无需外出 保障收益 加创始人微信"
+    "AI 培训公司 需要 软件工程师 线上培训讲课 要求 6年以上代码经验 前端 后端 晚上时间 在家即可上课 无需外出 保障收益 加创始人微信",
+    "扫码进群 加群二维码 群聊邀请 长按识别二维码 进群领取福利",
+    "推广加V 加微信 私聊领取 名额有限 免费带 兼职副业 日结佣金",
+    "一念成仙 免@授权 全量申请 qm.qq.com 群跳转 联动关注活动",
+    "B站关注 查阅详细 账号UID 参与代表同意使用 联动关注活动",
+    "已匹配到本群老婆 结缘 扣除积分 选ta 一念成仙 免@授权",
+    "合并转发聊天记录 广告引流 推广话术 加群 加微信 二维码"
   ],
   thresholds: {
     report: 0.7,
@@ -34,22 +40,24 @@ const RULE_DEFINITIONS = [
   {
     name: "包含外链",
     weight: 0.22,
-    test: text => /(https?:\/\/|www\.|t\.cn\/|u\.jd\.com|tb\.cn|m.tb.cn|dwz\.cn|url\.cn|bit\.ly|tinyurl\.com)/i.test(text)
+    test: text => /(https?:\/\/|www\.|qm\.qq\.com\/q\/|mqqapi:\/\/|t\.cn\/|u\.jd\.com|tb\.cn|m.tb.cn|dwz\.cn|url\.cn|bit\.ly|tinyurl\.com)/i.test(text)
   },
   {
     name: "包含群邀请",
-    weight: 0.18,
-    test: text => /(加群|群号|QQ群|qq\s*群|邀请.*群|进群|群聊).{0,16}(\d{6,12}|链接|二维码)/i.test(text)
+    weight: 0.2,
+    test: text => /(加群|群号|QQ群|qq\s*群|邀请.*群|进群|入群|群聊|群跳转|qm\.qq\.com).{0,24}(\d{6,12}|链接|二维码|福利|领取|申请|授权|https?:\/\/|qm\.qq\.com)/i.test(text)
+      || /(https?:\/\/)?qm\.qq\.com\/q\//i.test(text)
   },
   {
     name: "疑似招募话术",
     weight: 0.2,
-    test: text => /(招募|招人|收人|拉人|推广|地推|代理|兼职|日结|周结|躺赚|副业|宝妈|学生党|长期有效|免费带|带你赚|名额有限|私聊|加[我vV]|加微信|薇信)/i.test(text)
+    test: text => /(招募|招人|收人|拉人|推广|地推|代理|兼职|日结|周结|躺赚|副业|宝妈|学生党|长期有效|免费带|带你赚|名额有限|私聊|加[我vV]|加微信|加v|加V|v我|V我|薇信|领取福利|关注.*活动|全量申请|免@授权)/i.test(text)
   },
   {
     name: "包含联系方式",
     weight: 0.16,
-    test: text => /(微信|VX|vx|v信|薇信|企鹅|QQ|电话|手机号|联系).{0,12}([a-zA-Z][-_a-zA-Z0-9]{4,}|\d{6,12})/i.test(text)
+    test: text => /(微信|VX|vx|v信|薇信|企鹅|QQ|电话|手机号|联系|加v|加V|v我|V我).{0,16}([a-zA-Z][-_a-zA-Z0-9]{4,}|\d{6,12})/i.test(text)
+      || /(?:加|私|滴|看)?[vV](?:x|信)?[:：\s-]*[a-zA-Z][-_a-zA-Z0-9]{4,}/i.test(text)
   },
   {
     name: "疑似违规交易",
@@ -58,12 +66,23 @@ const RULE_DEFINITIONS = [
   },
   {
     name: "疑似图片广告",
-    weight: 0.12,
-    test: (_text, context) => Number(context.imageCount || 0) > 0 && context.textLength <= 20
+    weight: 0.16,
+    test: (text, context) => Number(context.imageCount || 0) > 0 && (context.textLength <= 20 || /(二维码|扫码|长按|加群|进群|入群|加v|加V|微信|VX|vx)/i.test(text))
+  },
+  {
+    name: "疑似二维码引流",
+    weight: 0.22,
+    test: (text, context) => /(二维码|扫码|长按识别|扫一扫|群二维码|加群码|进群码)/i.test(text)
+      || (Number(context.imageCount || 0) > 0 && /(加群|进群|入群|加v|加V|微信|VX|vx|私聊|领取|福利)/i.test(text))
+  },
+  {
+    name: "疑似授权推广",
+    weight: 0.22,
+    test: text => /(免@授权|全量申请|一念成仙|联动关注|B站关注|账号UID|点击.*关注按钮|选ta|本群老婆|结缘)/i.test(text)
   },
   {
     name: "低活跃合并转发",
-    weight: 0.18,
+    weight: 0.34,
     test: (_text, context) => Number(context.forwardCount || 0) > 0 && Number(context.memberLevel) <= Number(context.minActiveLevel)
   },
   {
@@ -237,6 +256,7 @@ export function analyzeModerationRules({ text = "", memberLevel, imageCount = 0,
   }
 
   if (rules.includes("低活跃等级") && rules.length >= 3) confidence += 0.12
+  if (rules.includes("低活跃等级") && rules.includes("低活跃合并转发")) confidence += 0.12
   if (rules.includes("包含外链") && rules.includes("疑似招募话术")) confidence += 0.1
   return {
     rules: [...new Set(rules)],

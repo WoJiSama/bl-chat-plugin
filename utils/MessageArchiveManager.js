@@ -1,6 +1,15 @@
 import fs from "fs"
 import path from "path"
 import YAML from "yaml"
+import { getMentionTargetId, replaceCqMentions } from "./mentionTargets.js"
+import { safeTruncateUnicode } from "./unicodeText.js"
+import { enrichBilibiliMessageSegments, formatBilibiliHistoryLinks, formatBilibiliHistoryText } from "./bilibiliMessage.js"
+import { enrichDouyinMessageSegments, formatDouyinHistoryLinks, formatDouyinHistoryText } from "./douyinMessage.js"
+import { KeyedSerialQueue } from "./messagePipeline/keyedSerialQueue.js"
+
+const archiveWriteQueue = new KeyedSerialQueue()
+const archiveIdentityIndexes = new Map()
+const MAX_ARCHIVE_IDENTITY_FILES = 256
 
 const DEFAULT_CONFIG = {
   enabled: false,
@@ -30,6 +39,11 @@ function formatTime(ts) {
   return `${formatDate(date)} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
 }
 
+function formatClock(ts) {
+  const date = new Date(Number(ts || Date.now()))
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
 function toArray(value) {
   if (Array.isArray(value)) return value.map(v => String(v).trim()).filter(Boolean)
   if (value === undefined || value === null || value === "") return []
@@ -48,6 +62,24 @@ function normalizeGroupAdmins(value) {
 function normalizeMessageSegments(message = [], storeMediaUrl = true) {
   if (!Array.isArray(message)) return []
   return message.map(seg => {
+    if (seg?.type === "bilibili") {
+      const next = { type: "bilibili", platform: "bilibili" }
+      for (const key of ["title", "description", "bvid", "aid", "cid", "owner", "owner_mid", "duration", "page_count", "pages", "short_url", "page_url", "video_url", "cover_url", "stats", "shared_by", "shared_by_qq", "published_at", "metadata_status"]) {
+        if (seg[key] === undefined || (!storeMediaUrl && ["short_url", "page_url", "video_url", "cover_url"].includes(key))) continue
+        next[key] = seg[key]
+      }
+      if (storeMediaUrl && !next.video_url && next.page_url) next.video_url = next.page_url
+      return next
+    }
+    if (seg?.type === "douyin") {
+      const next = { type: "douyin", platform: "douyin" }
+      for (const key of ["title", "description", "aweme_id", "author", "author_uid", "duration", "short_url", "page_url", "video_url", "cover_url", "stats", "metadata_status"]) {
+        if (seg[key] === undefined || (!storeMediaUrl && ["short_url", "page_url", "video_url", "cover_url"].includes(key))) continue
+        next[key] = seg[key]
+      }
+      if (storeMediaUrl && !next.video_url && next.page_url) next.video_url = next.page_url
+      return next
+    }
     const next = { type: seg?.type || "unknown" }
     const data = seg?.data && typeof seg.data === "object" ? seg.data : seg
     for (const key of ["text", "qq", "id", "file", "summary", "url", "sub_type", "fid"]) {
@@ -63,6 +95,47 @@ function messageHasType(record, type) {
   return Array.isArray(record.message) && record.message.some(seg => seg?.type === type)
 }
 
+function archiveRecordIdentity(record = {}) {
+  if (record.event_id) return `event:${String(record.event_id)}`
+  if (record.message_id === undefined || record.message_id === null || record.message_id === "") return ""
+  return [
+    "message",
+    String(record.archive_kind || "message"),
+    String(record.message_id),
+    String(record.user_id || "")
+  ].join(":")
+}
+
+function rememberArchiveIndex(file, identities) {
+  archiveIdentityIndexes.delete(file)
+  archiveIdentityIndexes.set(file, identities)
+  while (archiveIdentityIndexes.size > MAX_ARCHIVE_IDENTITY_FILES) {
+    archiveIdentityIndexes.delete(archiveIdentityIndexes.keys().next().value)
+  }
+}
+
+async function getArchiveIdentityIndex(file) {
+  const cached = archiveIdentityIndexes.get(file)
+  if (cached) {
+    rememberArchiveIndex(file, cached)
+    return cached
+  }
+  const identities = new Set()
+  const text = await fs.promises.readFile(file, "utf8").catch(error => {
+    if (error?.code === "ENOENT") return ""
+    throw error
+  })
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue
+    try {
+      const identity = archiveRecordIdentity(JSON.parse(line))
+      if (identity) identities.add(identity)
+    } catch {}
+  }
+  rememberArchiveIndex(file, identities)
+  return identities
+}
+
 function decodeEntities(text = "") {
   return String(text || "")
     .replace(/&amp;/g, "&")
@@ -76,7 +149,7 @@ function decodeEntities(text = "") {
 function renderSegment(seg = {}) {
   const type = seg?.type || "unknown"
   if (type === "text") return decodeEntities(seg.text || "")
-  if (type === "at") return `@${seg.qq || ""}`
+  if (type === "at") return `@${getMentionTargetId(seg) || ""}`
   if (type === "reply") return `[回复:${seg.id || ""}]`
   if (type === "face") return `[表情:${seg.id || ""}]`
   if (type === "image") {
@@ -84,7 +157,15 @@ function renderSegment(seg = {}) {
     return summary ? `[图片:${summary}]` : "[图片]"
   }
   if (type === "file") return `[文件:${seg.file || seg.name || ""}]`
-  if (type === "video") return "[视频]"
+  if (type === "video") return seg.url ? `[视频:${seg.url}]` : "[视频]"
+  if (type === "bilibili") {
+    const links = formatBilibiliHistoryLinks(seg)
+    return links ? `${formatBilibiliHistoryText(seg)} [${links}]` : formatBilibiliHistoryText(seg)
+  }
+  if (type === "douyin") {
+    const links = formatDouyinHistoryLinks(seg)
+    return links ? `${formatDouyinHistoryText(seg)} [${links}]` : formatDouyinHistoryText(seg)
+  }
   if (type === "record") return "[语音]"
   if (type === "json" || type === "xml" || type === "markdown") return `[${type}消息]`
   if (type === "notice") return decodeEntities(seg.text || "[群通知]")
@@ -96,9 +177,9 @@ function renderReadableMessage(record = {}) {
     const text = record.message.map(renderSegment).join("").trim()
     if (text) return text
   }
-  return decodeEntities(record.raw_message || "")
+  const decoded = decodeEntities(record.raw_message || "")
     .replace(/\[CQ:reply,id=([^\],]+)[^\]]*\]/g, "[回复:$1]")
-    .replace(/\[CQ:at,qq=([^\],]+)[^\]]*\]/g, "@$1")
+  return replaceCqMentions(decoded)
     .replace(/\[CQ:image(?:,[^\]]*summary=([^,\]]+))?[^\]]*\]/g, (_, summary) => summary ? `[图片:${decodeEntities(summary)}]` : "[图片]")
     .replace(/\[CQ:face,id=([^\],]+)[^\]]*\]/g, "[表情:$1]")
     .replace(/\[CQ:record[^\]]*\]/g, "[语音]")
@@ -193,31 +274,56 @@ export class MessageArchiveManager {
     return String(e?.group_id || "") === String(groupId) && e?.sender?.role === "owner"
   }
 
-  async recordMessage(e) {
+  async appendRecordOnce(file, record) {
+    return await archiveWriteQueue.run(file, async () => {
+      const identity = archiveRecordIdentity(record)
+      const identities = await getArchiveIdentityIndex(file)
+      if (identity && identities.has(identity)) return false
+      await fs.promises.appendFile(file, `${JSON.stringify(record)}\n`, "utf8")
+      if (identity) identities.add(identity)
+      return true
+    })
+  }
+
+  async recordMessage(e, options = {}) {
     const cfg = this.getConfig()
     if (!this.shouldRecord(e, cfg)) return
     try {
-      const record = this.buildRecord(e, cfg)
+      const enrichedMessage = Array.isArray(options.preEnrichedMessage)
+        ? options.preEnrichedMessage
+        : await enrichDouyinMessageSegments(
+          await enrichBilibiliMessageSegments(e.message, e.raw_message || e.msg || ""),
+          e.raw_message || e.msg || ""
+        )
+      const record = this.buildRecord({ ...e, message: enrichedMessage }, cfg)
+      // 播放直链有时效，不写入 NDJSON/Redis；实时搬运仍需在本轮使用它。
+      Object.defineProperty(record, "runtimeMessage", { value: enrichedMessage, enumerable: false })
       const dir = path.join(this.getBaseDir(), record.message_type, String(record.group_id || record.user_id || "unknown"))
       await fs.promises.mkdir(dir, { recursive: true })
-      await fs.promises.appendFile(path.join(dir, `${formatDate(new Date(record.timestamp))}.ndjson`), `${JSON.stringify(record)}\n`, "utf8")
+      await this.appendRecordOnce(path.join(dir, `${formatDate(new Date(record.timestamp))}.ndjson`), record)
       this.cleanupExpired().catch(error => this.logger?.warn?.(`[MessageArchive] 清理过期归档失败: ${error.message}`))
+      return record
     } catch (error) {
       this.logger?.warn?.(`[MessageArchive] 写入失败: ${error.message}`)
+      if (options.throwOnError) throw error
+      return null
     }
   }
 
-  async recordNotice(e) {
+  async recordNotice(e, options = {}) {
     const cfg = this.getConfig()
     if (!this.shouldRecordNotice(e, cfg)) return
     try {
       const record = this.buildNoticeRecord(e)
       const dir = path.join(this.getBaseDir(), "group", String(record.group_id || "unknown"))
       await fs.promises.mkdir(dir, { recursive: true })
-      await fs.promises.appendFile(path.join(dir, `${formatDate(new Date(record.timestamp))}.ndjson`), `${JSON.stringify(record)}\n`, "utf8")
+      await this.appendRecordOnce(path.join(dir, `${formatDate(new Date(record.timestamp))}.ndjson`), record)
       this.cleanupExpired().catch(error => this.logger?.warn?.(`[MessageArchive] 清理过期归档失败: ${error.message}`))
+      return record
     } catch (error) {
       this.logger?.warn?.(`[MessageArchive] 通知写入失败: ${error.message}`)
+      if (options.throwOnError) throw error
+      return null
     }
   }
 
@@ -227,6 +333,7 @@ export class MessageArchiveManager {
     const maxLen = Math.max(100, Number(cfg.maxMessageLength) || DEFAULT_CONFIG.maxMessageLength)
     return {
       version: 1,
+      event_id: e.event_id || null,
       timestamp,
       time: formatTime(timestamp),
       message_type: e.message_type,
@@ -242,7 +349,7 @@ export class MessageArchiveManager {
         level: e.sender?.level || ""
       },
       message_id: e.message_id || null,
-      raw_message: raw.length > maxLen ? `${raw.slice(0, maxLen)}...` : raw,
+      raw_message: raw.length > maxLen ? safeTruncateUnicode(raw, maxLen, "...") : raw,
       raw_truncated: raw.length > maxLen,
       message: normalizeMessageSegments(e.message, cfg.storeMediaUrl),
       source: e.source || null
@@ -258,6 +365,7 @@ export class MessageArchiveManager {
     const raw = this.formatNoticeText(e, noticeType)
     return {
       version: 1,
+      event_id: e.event_id || null,
       archive_kind: "notice",
       timestamp,
       time: formatTime(timestamp),
@@ -314,6 +422,7 @@ export class MessageArchiveManager {
       const date = new Date(`${name}T23:59:59+08:00`)
       if (!Number.isNaN(date.getTime()) && date.getTime() < cutoff) {
         await fs.promises.unlink(file).catch(() => {})
+        archiveIdentityIndexes.delete(file)
       }
     }
   }
@@ -417,12 +526,13 @@ export class MessageArchiveManager {
     ].filter(Boolean).join("\n")
   }
 
-  formatRecord(record, { maxTextLength = 800 } = {}) {
+  formatRecord(record, { maxTextLength = 800, compact = false } = {}) {
     const name = record.archive_kind === "notice"
       ? "群通知"
       : record.sender?.card || record.sender?.nickname || "未知"
     let text = renderReadableMessage(record).replace(/\r/g, "")
-    if (text.length > maxTextLength) text = `${text.slice(0, maxTextLength)}...`
+    if (text.length > maxTextLength) text = safeTruncateUnicode(text, maxTextLength, "...")
+    if (compact) return `${formatClock(record.timestamp)} ${name}：${text || "[非文本消息]"}`
     return `[${record.time}] ${name}(${record.user_id})${record.message_id ? ` [${record.message_id}]` : ""}\n${text || "[非文本消息]"}`
   }
 }

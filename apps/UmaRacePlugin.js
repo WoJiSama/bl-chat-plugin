@@ -15,11 +15,14 @@ export class UmaRacePlugin extends plugin {
         { reg: "^[.。]赛马娘\\s*重新领养\\s+[\\s\\S]+$", fnc: "readoptUma" },
         { reg: "^[.。]赛马娘\\s*(弃养|放生)(\\s*确认)?\\s*$", fnc: "abandonUma" },
         { reg: "^[.。]赛马娘\\s*(我的赛马娘|赛马娘信息|属性|六维)\\s*$", fnc: "showUma" },
+        { reg: "^[.。]赛马娘\\s*(词条|小马词条)\\s*$", fnc: "showAffix" },
+        { reg: "^[.。]赛马娘\\s*(重铸|洗练|洗词条)\\s*$", fnc: "rerollAffix" },
+        { reg: "^[.。]赛马娘\\s*(词条池|词条列表)\\s*$", fnc: "showAffixPool" },
         { reg: "^[.。]赛马娘\\s*(训练|训练状态|训练进度)\\s*$", fnc: "showTrainingStatus" },
         { reg: "^[.。]赛马娘\\s*训练\\s+[\\s\\S]+$", fnc: "trainUma" },
         { reg: "^[.。]赛马娘\\s*(开始|开局|创建)\\s*$", fnc: "startRace" },
         { reg: "^[.。]赛马娘\\s*(加入|参加|上马|报名)([\\s\\S]*)$", fnc: "joinRace" },
-        { reg: "^[.。]赛马娘\\s*(决策|选择|行动)\\s+[\\s\\S]+$", fnc: "raceDecision" },
+        { reg: "^[.。]赛马娘\\s*(决策|选择|行动|策略)\\s+[\\s\\S]+$", fnc: "raceDecision" },
         { reg: "^[.。]赛马娘\\s*(开跑|开赛|比赛|冲|跑)\\s*$", fnc: "runRace" },
         { reg: "^[.。]赛马娘\\s*(取消|关闭|结束)\\s*$", fnc: "cancelRace" },
         { reg: "^[.。]赛马娘\\s*(加积分|改积分|调整积分)\\s+[\\s\\S]+$", fnc: "adjustScore" },
@@ -60,6 +63,21 @@ export class UmaRacePlugin extends plugin {
 
   async showUma(e) {
     await this.reply(e, umaRaceManager.showUma(e), { kind: "umaRaceResult" })
+    return true
+  }
+
+  async showAffix(e) {
+    await this.reply(e, umaRaceManager.showAffix(e), { kind: "umaRaceResult" })
+    return true
+  }
+
+  async rerollAffix(e) {
+    await this.reply(e, await umaRaceManager.rerollAffix(e), { kind: "umaRaceResult" })
+    return true
+  }
+
+  async showAffixPool(e) {
+    await this.reply(e, umaRaceManager.showAffixPool(), { kind: "diceLong" })
     return true
   }
 

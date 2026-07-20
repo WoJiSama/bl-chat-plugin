@@ -106,7 +106,8 @@ export class EmojiPackPlugin extends plugin {
         const result = await emojiPackManager.addFromBuffer(buffer, { source: "manual" })
         if (result.added) {
           const tagInfo = (result.item.tags || []).join(",") || "无标签"
-          results.push(`✅ ${result.item.hash.slice(0, 8)} [${tagInfo}]`)
+          const useCaseInfo = (result.item.useCases || []).join(",") || "无场景"
+          results.push(`✅ ${result.item.hash.slice(0, 8)} [${tagInfo}] 场景: ${useCaseInfo}`)
         } else if (result.reason === "duplicate") {
           results.push(`⚠️ ${hashShort(result.item?.hash)} 已存在`)
         } else if (result.reason === "full") {
@@ -139,12 +140,13 @@ export class EmojiPackPlugin extends plugin {
     const msgs = [`表情包列表 (第 ${page}/${totalPages} 页，共 ${items.length} 张)`]
     pageItems.forEach((item, i) => {
       const tags = (item.tags || []).join(",") || "无标签"
+      const useCases = (item.useCases || []).join(",") || "无场景"
       const desc = item.description ? `\n${item.description}` : ""
       const flags = []
       if (item.isBanned) flags.push("封禁")
       if (item.noFileFlag) flags.push("缺文件")
       const flagStr = flags.length ? ` [${flags.join("|")}]` : ""
-      const textLine = `${start + i + 1}. ${item.hash.slice(0, 8)}${flagStr}\n用 ${item.usedCount || 0} 次 | [${tags}]${desc}`
+      const textLine = `${start + i + 1}. ${item.hash.slice(0, 8)}${flagStr}\n用 ${item.usedCount || 0} 次 | 情绪 [${tags}] | 场景 [${useCases}]${desc}`
 
       const abs = emojiPackManager.getAbsoluteFilePath(item)
       if (!item.noFileFlag && fs.existsSync(abs)) {
@@ -198,7 +200,8 @@ export class EmojiPackPlugin extends plugin {
       const result = await emojiPackManager.retagByHashPrefix(prefix)
       if (!result.updated) return e.reply(`打标失败: ${result.error || "未找到匹配的表情包"}`)
       const tags = (result.item.tags || []).join(",") || "无标签"
-      return e.reply(`已更新 ${result.item.hash.slice(0, 8)}\n标签: ${tags}\n描述: ${result.item.description || "(无)"}`)
+      const useCases = (result.item.useCases || []).join(",") || "无场景"
+      return e.reply(`已更新 ${result.item.hash.slice(0, 8)}\n标签: ${tags}\n场景: ${useCases}\n描述: ${result.item.description || "(无)"}`)
     }
 
     const resolved = await this.resolveQuotedHashes(e)
@@ -212,7 +215,8 @@ export class EmojiPackPlugin extends plugin {
       const result = await emojiPackManager.retagByHashPrefix(hash)
       if (result.updated) {
         const tagInfo = (result.item?.tags || []).join(",") || "无标签"
-        lines.push(`✅ ${hash.slice(0, 8)}\n标签: ${tagInfo}\n描述: ${result.item?.description || "(无)"}`)
+        const useCaseInfo = (result.item?.useCases || []).join(",") || "无场景"
+        lines.push(`✅ ${hash.slice(0, 8)}\n标签: ${tagInfo}\n场景: ${useCaseInfo}\n描述: ${result.item?.description || "(无)"}`)
       } else {
         lines.push(`❌ 打标失败 ${hash.slice(0, 8)}: ${result.error || "未知"}`)
       }
@@ -290,9 +294,10 @@ export class EmojiPackPlugin extends plugin {
       const abs = emojiPackManager.getAbsoluteFilePath(item)
       if (!fs.existsSync(abs)) return e.reply(`文件丢失: ${abs}`)
       const tags = (item.tags || []).join(",") || "无标签"
+      const useCases = (item.useCases || []).join(",") || "无场景"
       await e.reply([
         segment.image(`file://${abs}`),
-        `\nhash: ${item.hash}\n标签: ${tags}\n描述: ${item.description || "(无)"}\n使用次数: ${item.usedCount || 0}`
+        `\nhash: ${item.hash}\n标签: ${tags}\n场景: ${useCases}\n描述: ${item.description || "(无)"}\n使用次数: ${item.usedCount || 0}`
       ])
       return true
     }
@@ -305,7 +310,8 @@ export class EmojiPackPlugin extends plugin {
       if (error) { lines.push(`❌ 下载失败: ${error}`); continue }
       if (!item) { lines.push(`⚠️ ${hash.slice(0, 8)} 不在库中（可能已删除）`); continue }
       const tags = (item.tags || []).join(",") || "无标签"
-      lines.push(`hash: ${item.hash}\n标签: ${tags}\n描述: ${item.description || "(无)"}\n使用次数: ${item.usedCount || 0}\n封禁: ${item.isBanned ? "是" : "否"}`)
+      const useCases = (item.useCases || []).join(",") || "无场景"
+      lines.push(`hash: ${item.hash}\n标签: ${tags}\n场景: ${useCases}\n描述: ${item.description || "(无)"}\n使用次数: ${item.usedCount || 0}\n封禁: ${item.isBanned ? "是" : "否"}`)
     }
     return e.reply(lines.join("\n----\n"))
   }
@@ -329,8 +335,10 @@ export class EmojiPackPlugin extends plugin {
       `周期维护: ${stats.enableMaintenance ? `已开启 (${cfg.checkIntervalMinutes || 10}分钟)` : "已关闭"}`,
       `总数: ${stats.total} / ${stats.maxItems}`,
       `已打标: ${stats.tagged}`,
+      `已标使用场景: ${stats.useCaseTagged}`,
       `已生成 embedding: ${stats.embedded}`,
       `封禁: ${stats.banned}`,
+      `冷门淘汰: ${stats.stalePruneEnabled ? `已开启 (${cfg.staleDays || 30}天未用, 每次${cfg.stalePruneCount || 1}张)` : "已关闭"}`,
       `存储目录: ${emojiPackManager.storeDir}`,
       `数据库文件: ${emojiPackManager.dbPath}`,
       `VLM 自动打标: ${cfg.visionTagOnAdd !== false ? "开" : "关"}`,
@@ -353,7 +361,8 @@ export class EmojiPackPlugin extends plugin {
         `· 清理无标签无向量残废: ${report.cleanedUntagged} 个`,
         `· 补登孤立文件: ${report.orphanRegistered} 个`,
         `· 新标记缺失文件: ${report.markedMissing} 个`,
-        `· 自愈已恢复文件: ${report.unmarkedRestored} 个`
+        `· 自愈已恢复文件: ${report.unmarkedRestored} 个`,
+        `· 冷门过期淘汰: ${report.prunedStale || 0} 个${report.prunedHashes?.length ? ` (${report.prunedHashes.join(", ")})` : ""}`
       ]
       e.reply(lines.join("\n"))
     } catch (err) {

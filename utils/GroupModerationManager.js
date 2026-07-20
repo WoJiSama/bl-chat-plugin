@@ -7,15 +7,18 @@ import {
   normalizeGroupModerationConfig,
   normalizeStringList
 } from "./groupModerationRules.js"
+import { getMentionTargetId } from "./mentionTargets.js"
+import { safeTruncateUnicode } from "./unicodeText.js"
 
 function getSegmentText(segment) {
   if (!segment) return ""
   if (typeof segment === "string") return segment
   if (segment.type === "text") return segment.text || segment.data?.text || ""
+  if (segment.type === "markdown") return segment.content || segment.data?.content || segment.data?.data || segment.data || ""
   if (segment.type === "json" || segment.type === "xml") return segment.data?.data || segment.data || ""
   if (segment.type === "face") return `[表情:${segment.id || segment.data?.id || ""}]`
   if (segment.type === "image") return "[图片]"
-  if (segment.type === "at") return `@${segment.qq || segment.data?.qq || ""}`
+  if (segment.type === "at") return `@${getMentionTargetId(segment) || ""}`
   if (segment.type === "forward") return "[合并转发]"
   return ""
 }
@@ -63,6 +66,28 @@ class GroupModerationManager {
 
   isNativeGroupAdmin(e) {
     return Boolean(e?.isMaster || ["owner", "admin"].includes(e?.sender?.role))
+  }
+
+  async getGroup(e, groupId) {
+    if (e?.group) return e.group
+    const bot = e?.bot || globalThis.Bot
+    return await bot?.pickGroup?.(groupId)
+  }
+
+  async getBotRole(e, groupId) {
+    try {
+      const group = await this.getGroup(e, groupId)
+      if (!group?.getMemberMap) return "member"
+      const members = await group.getMemberMap()
+      const botId = e?.self_id || globalThis.Bot?.uin
+      return members.get(Number(botId))?.role || "member"
+    } catch {
+      return "member"
+    }
+  }
+
+  async isBotAdmin(e, groupId) {
+    return ["owner", "admin"].includes(await this.getBotRole(e, groupId))
   }
 
   async getGroupMemberInfo(e, groupId, userId) {
@@ -115,7 +140,7 @@ class GroupModerationManager {
       const response = await bot.sendApi("get_forward_msg", { id: forwardId })
       const nodes = response?.data?.messages || response?.data || response?.messages || []
       const lines = this.flattenForwardNodes(nodes)
-      return lines.join("\n").slice(0, config.evidenceMaxChars)
+      return safeTruncateUnicode(lines.join("\n"), config.evidenceMaxChars)
     } catch (error) {
       globalThis.logger?.warn?.(`[GroupModeration] 读取合并转发失败 id=${forwardId}: ${error.message}`)
       return ""
@@ -169,7 +194,7 @@ class GroupModerationManager {
                 `规则层命中:${baseResult.rules.join("、") || "无"}`,
                 `规则层置信度:${baseResult.confidence.toFixed(2)}`,
                 "待判断内容:",
-                String(evidence || "").slice(0, 1800)
+                safeTruncateUnicode(evidence || "", 1800)
               ].join("\n")
             }
           ]
@@ -183,7 +208,7 @@ class GroupModerationManager {
         isAd: Boolean(parsed.isAd),
         confidence: clamp01(parsed.confidence),
         rules: normalizeStringList(parsed.rules),
-        reason: String(parsed.reason || "").slice(0, 120)
+        reason: safeTruncateUnicode(parsed.reason || "", 120)
       }
     } catch (error) {
       globalThis.logger?.warn?.(`[GroupModeration] 模型复核失败: ${error.message}`)
@@ -255,7 +280,7 @@ class GroupModerationManager {
       `置信度：${result.confidence.toFixed(2)}`,
       `建议动作：${formatActionName(result.action)}`,
       "",
-      String(evidence || "").slice(0, config.evidenceMaxChars)
+      safeTruncateUnicode(evidence || "", config.evidenceMaxChars)
     ].join("\n")
 
     let sent = false
@@ -294,6 +319,7 @@ class GroupModerationManager {
 
     const config = this.getConfig()
     if (!this.isGroupEnabled(config, groupId)) return false
+    if (!await this.isBotAdmin(e, groupId)) return false
     if (this.isConfiguredAdmin(config, groupId, userId) || this.isNativeGroupAdmin(e)) return false
 
     const member = await this.getGroupMemberInfo(e, groupId, userId)

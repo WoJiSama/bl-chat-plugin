@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "path";
 import config from "./model/config.js";
+import { installMessagePipeline } from "./utils/messagePipeline/runtime.js";
+import { collectPluginExports } from "./utils/pluginExportLoader.js";
 if (!global.segment) {
     global.segment = (await import("oicq")).segment
 }
@@ -30,6 +32,27 @@ for (let i in files) {
         logger.error(ret[i].reason);
         continue;
     }
-    apps[name] = ret[i].value[Object.keys(ret[i].value)[0]];
+    const pluginExports = collectPluginExports(ret[i].value, plugin);
+    if (!pluginExports.length) {
+        logger.error(`载入插件错误：${logger.red(name)} 没有找到有效的 plugin 导出`);
+        continue;
+    }
+    for (const item of pluginExports) {
+        const key = pluginExports.length === 1 ? name : `${name}:${item.exportName}`;
+        apps[key] = item.PluginClass;
+    }
 }
+let emojiCollector = null;
+try {
+    emojiCollector = (await import("./utils/EmojiPackManager.js")).emojiPackManager;
+} catch (error) {
+    logger.warn(`[MessagePipeline] 表情包自动收集模块不可用，核心消息管道继续启动：${error.message}`);
+}
+installMessagePipeline({
+    bot: globalThis.Bot,
+    redis: globalThis.redis,
+    logger: globalThis.logger,
+    pluginSettings: config.getConfig("message")?.pluginSettings || {},
+    emojiCollector
+});
 export { apps };

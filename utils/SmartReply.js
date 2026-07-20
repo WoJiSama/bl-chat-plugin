@@ -17,6 +17,8 @@ const STRUCTURED_KINDS = new Set([
   "diceLong"
 ])
 
+const KIND_TEMPLATE_OVERRIDES = {}
+
 let sharedTextImageTool = null
 
 async function getTextImageTool() {
@@ -45,7 +47,7 @@ export function analyzeReplyText(text = "", options = {}) {
     nonEmptyLines.length > thresholds.maxLines ||
     structuredRows >= thresholds.structuredRows ||
     (structuredKind && nonEmptyLines.length >= thresholds.structuredRows)
-  const template = shouldRender ? "document" : "chat"
+  const template = shouldRender ? (KIND_TEMPLATE_OVERRIDES[kind] || "document") : "chat"
 
   return {
     shouldRender,
@@ -68,10 +70,14 @@ export async function sendSmartReply(e, output, options = {}) {
 
   try {
     const tool = await getTextImageTool()
-    const result = await tool.execute({
+    const template = options.template || analysis.template
+    const payload = {
       text,
-      template: options.template || analysis.template
-    }, e)
+      template
+    }
+    if (template === "chat" && typeof options.nickname === "string" && options.nickname.trim()) payload.nickname = options.nickname
+    if (template === "chat" && typeof options.avatarUrl === "string" && options.avatarUrl.trim()) payload.avatarUrl = options.avatarUrl
+    const result = await tool.execute(payload, e)
     if (typeof result === "string" && result.trim().startsWith("error:")) {
       throw new Error(result)
     }

@@ -1,0 +1,374 @@
+const BILIBILI_CACHE_TTL_MS = 30 * 60 * 1000
+const BILIBILI_CACHE_MAX = 100
+export const BILIBILI_ARCHIVE_VIDEO_MAX_SECONDS = 30 * 60
+const metadataCache = new Map()
+const playbackPromiseCache = new Map()
+
+export function decodeBilibiliCardEntities(text = "") {
+  return String(text || "")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)))
+}
+
+function compactText(value = "", maxLength = 1000) {
+  const text = decodeBilibiliCardEntities(value).replace(/\s+/g, " ").trim()
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text
+}
+
+function normalizeUrl(value = "") {
+  const url = decodeBilibiliCardEntities(value).replace(/\\\//g, "/").trim()
+  if (!url) return ""
+  if (url.startsWith("//")) return `https:${url}`
+  if (/^http:\/\//i.test(url)) return url.replace(/^http:/i, "https:")
+  if (/^(?:b23\.tv|www\.bilibili\.com|m\.bilibili\.com)\//i.test(url)) return `https://${url}`
+  return url
+}
+
+function parseJson(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value
+  if (typeof value !== "string") return null
+  const decoded = decodeBilibiliCardEntities(value).trim()
+  if (!decoded) return null
+  try {
+    return JSON.parse(decoded)
+  } catch {
+    return null
+  }
+}
+
+function getSegmentPayload(segment = {}) {
+  if (typeof segment?.data === "string") return parseJson(segment.data)
+  if (typeof segment?.data?.data === "string") return parseJson(segment.data.data)
+  if (segment?.data && typeof segment.data === "object") return parseJson(segment.data)
+  return null
+}
+
+function getRawJsonPayload(rawMessage = "") {
+  const text = String(rawMessage || "")
+  const marker = "[CQ:json,data="
+  const start = text.indexOf(marker)
+  const end = text.lastIndexOf("]")
+  if (start < 0 || end <= start) return null
+  return parseJson(text.slice(start + marker.length, end))
+}
+
+function walkObjects(value, output = [], depth = 0) {
+  if (!value || typeof value !== "object" || depth > 7) return output
+  if (!Array.isArray(value)) output.push(value)
+  for (const item of Object.values(value)) walkObjects(item, output, depth + 1)
+  return output
+}
+
+function findFirstUrl(value, pattern) {
+  if (typeof value === "string") {
+    const url = normalizeUrl(value)
+    if (pattern.test(url)) return url
+  }
+  if (!value || typeof value !== "object") return ""
+  for (const item of Object.values(value)) {
+    const found = findFirstUrl(item, pattern)
+    if (found) return found
+  }
+  return ""
+}
+
+export function extractBilibiliBvid(value = "") {
+  return String(value || "").match(/\b(BV[0-9A-Za-z]{8,16})\b/i)?.[1] || ""
+}
+
+export function extractBilibiliShare(payload = {}) {
+  if (!payload || typeof payload !== "object") return null
+  const serialized = JSON.stringify(payload)
+  if (!/(?:哔哩哔哩|bilibili|b23\.tv|\/video\/BV[0-9A-Za-z]+)/i.test(serialized)) return null
+
+  const objects = walkObjects(payload)
+  const detail = objects.find(item => item.qqdocurl || item.preview || item.desc || item.title) || payload
+  const shortUrl = normalizeUrl(detail.qqdocurl || findFirstUrl(payload, /(?:b23\.tv|bilibili\.com\/video\/BV)/i))
+  const prompt = compactText(payload.prompt || "").replace(/^\[QQ小程序\]/i, "")
+  const genericTitle = /^(?:哔哩哔哩|bilibili)$/i.test(String(detail.title || "").trim()) ? "" : detail.title
+  const title = compactText(detail.desc || genericTitle || prompt || "B站视频", 300)
+  const coverUrl = normalizeUrl(detail.preview || detail.cover || detail.pic || "")
+  const bvid = extractBilibiliBvid(shortUrl || serialized)
+
+  return {
+    type: "bilibili",
+    platform: "bilibili",
+    title,
+    card_title: compactText(detail.title || "哔哩哔哩", 80),
+    short_url: shortUrl,
+    page_url: bvid ? `https://www.bilibili.com/video/${bvid}` : shortUrl,
+    video_url: bvid ? `https://www.bilibili.com/video/${bvid}` : shortUrl,
+    cover_url: coverUrl,
+    bvid,
+    shared_by: compactText(detail.host?.nick || "", 80),
+    shared_by_qq: detail.host?.uin ? String(detail.host.uin) : "",
+    metadata_status: bvid ? "identified" : "card"
+  }
+}
+
+export function extractBilibiliShareFromSegment(segment = {}, rawMessage = "") {
+  if (segment?.type === "bilibili") return { ...segment }
+  if (segment?.type !== "json") return null
+  return extractBilibiliShare(getSegmentPayload(segment) || getRawJsonPayload(rawMessage) || {})
+}
+
+function pruneCache() {
+  const now = Date.now()
+  for (const [key, item] of metadataCache) {
+    if (!item || item.expiresAt <= now) metadataCache.delete(key)
+  }
+  while (metadataCache.size > BILIBILI_CACHE_MAX) {
+    metadataCache.delete(metadataCache.keys().next().value)
+  }
+}
+
+async function fetchJson(fetchImpl, url, options = {}) {
+  const response = await fetchImpl(url, options)
+  if (!response?.ok) throw new Error(`B站接口返回 ${response?.status || "未知状态"}`)
+  return await response.json()
+}
+
+function normalizePages(pages = []) {
+  return (Array.isArray(pages) ? pages : []).slice(0, 50).map(page => ({
+    page: Number(page?.page || 0),
+    cid: Number(page?.cid || 0),
+    title: compactText(page?.part || "", 200),
+    duration: Number(page?.duration || 0)
+  }))
+}
+
+function normalizeBilibiliStats(stat = {}) {
+  if (!stat || typeof stat !== "object") return null
+  const result = {}
+  for (const key of ["view", "like", "coin", "share", "reply", "favorite", "danmaku"]) {
+    const value = Number(stat[key])
+    if (Number.isFinite(value) && value >= 0) result[key] = Math.floor(value)
+  }
+  return Object.keys(result).length ? result : null
+}
+
+async function requestBilibiliMetadata(card, { fetchImpl, timeoutMs }) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), Math.max(500, Number(timeoutMs) || 5000))
+  const headers = {
+    "User-Agent": "Mozilla/5.0",
+    Referer: "https://www.bilibili.com/"
+  }
+
+  try {
+    let resolvedUrl = normalizeUrl(card.page_url || card.short_url || "")
+    let bvid = extractBilibiliBvid(card.bvid || resolvedUrl)
+    if (!bvid && resolvedUrl) {
+      const response = await fetchImpl(resolvedUrl, { headers, redirect: "follow", signal: controller.signal })
+      resolvedUrl = normalizeUrl(response.url || resolvedUrl)
+      bvid = extractBilibiliBvid(resolvedUrl)
+      if (!bvid && !response?.ok) throw new Error(`B站短链返回 ${response?.status || "未知状态"}`)
+    }
+    if (!bvid) return { ...card, metadata_status: "card" }
+
+    const view = await fetchJson(
+      fetchImpl,
+      `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`,
+      { headers, signal: controller.signal }
+    )
+    if (Number(view?.code) !== 0 || !view?.data) throw new Error(view?.message || "B站视频信息为空")
+    const data = view.data
+    const pageUrl = `https://www.bilibili.com/video/${data.bvid || bvid}`
+    return {
+      ...card,
+      title: compactText(data.title || card.title || "B站视频", 300),
+      description: compactText(data.desc === "-" ? "" : data.desc || "", 1000),
+      bvid: String(data.bvid || bvid),
+      aid: Number(data.aid || 0),
+      cid: Number(data.cid || data.pages?.[0]?.cid || 0),
+      owner: compactText(data.owner?.name || "", 120),
+      owner_mid: data.owner?.mid ? String(data.owner.mid) : "",
+      duration: Number(data.duration || 0),
+      page_count: Number(data.videos || data.pages?.length || 1),
+      pages: normalizePages(data.pages),
+      cover_url: normalizeUrl(data.pic || card.cover_url || ""),
+      page_url: pageUrl,
+      video_url: pageUrl,
+      stats: normalizeBilibiliStats(data.stat),
+      published_at: data.pubdate ? Number(data.pubdate) * 1000 : null,
+      metadata_status: "resolved"
+    }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+export async function enrichBilibiliShare(card = {}, options = {}) {
+  if (!card || card.type !== "bilibili") return card
+  const fetchImpl = options.fetchImpl || globalThis.fetch
+  if (typeof fetchImpl !== "function") return card
+  const key = card.bvid || card.short_url || card.page_url
+  if (!key) return card
+
+  pruneCache()
+  const cached = metadataCache.get(key)
+  if (cached && cached.expiresAt > Date.now()) return await cached.promise
+
+  const promise = requestBilibiliMetadata(card, {
+    fetchImpl,
+    timeoutMs: options.timeoutMs || 5000
+  }).catch(() => ({ ...card, metadata_status: card.metadata_status || "card" }))
+  metadataCache.set(key, { promise, expiresAt: Date.now() + BILIBILI_CACHE_TTL_MS })
+  return await promise
+}
+
+export async function enrichBilibiliMessageSegments(segments = [], rawMessage = "", options = {}) {
+  const source = Array.isArray(segments) ? segments : []
+  const output = []
+  let found = false
+  for (const segment of source) {
+    const card = extractBilibiliShareFromSegment(segment, rawMessage)
+    if (!card) {
+      output.push(segment)
+      continue
+    }
+    found = true
+    output.push(await enrichBilibiliShare(card, options))
+  }
+  if (!found) {
+    const card = extractBilibiliShare(getRawJsonPayload(rawMessage) || {})
+    if (card) output.push(await enrichBilibiliShare(card, options))
+  }
+  return output
+}
+
+export function formatBilibiliDuration(seconds = 0) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0))
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const secs = total % 60
+  return hours
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+    : `${minutes}:${String(secs).padStart(2, "0")}`
+}
+
+export function formatBilibiliHistoryText(card = {}) {
+  const lines = [`分享了B站视频《${card.title || "未命名视频"}》`]
+  const basic = []
+  if (card.owner) basic.push(`UP:${card.owner}`)
+  if (card.bvid) basic.push(card.bvid)
+  if (card.duration) basic.push(`时长:${formatBilibiliDuration(card.duration)}`)
+  if (card.page_count > 1) basic.push(`${card.page_count}个分P`)
+  if (basic.length) lines.push(basic.join(" | "))
+  const stats = normalizeBilibiliStats(card.stats || card.stat)
+  if (stats) {
+    const labels = [
+      ["view", "播放"],
+      ["like", "点赞"],
+      ["coin", "投币"],
+      ["favorite", "收藏"],
+      ["share", "转发"],
+      ["reply", "评论"],
+      ["danmaku", "弹幕"]
+    ]
+    const summary = labels
+      .filter(([key]) => Object.hasOwn(stats, key))
+      .map(([key, label]) => `${label}:${stats[key]}`)
+      .join(" ")
+    if (summary) lines.push(`数据：${summary}`)
+  }
+  if (card.description) lines.push(`简介：${compactText(card.description, 240)}`)
+  return lines.join("\n")
+}
+
+export function formatBilibiliHistoryLinks(card = {}) {
+  return [
+    (card.page_url || card.video_url || card.short_url) ? `视频 URL:${card.page_url || card.video_url || card.short_url}` : "",
+    card.cover_url ? `封面 URL:${card.cover_url}` : ""
+  ].filter(Boolean).join("，")
+}
+
+export function shouldAttachBilibiliVideo(card = {}, maxSeconds = BILIBILI_ARCHIVE_VIDEO_MAX_SECONDS) {
+  const duration = Number(card.duration || 0)
+  return duration > 0 && duration <= Math.max(1, Number(maxSeconds) || BILIBILI_ARCHIVE_VIDEO_MAX_SECONDS)
+}
+
+async function requestBilibiliPlaybackResources(card = {}, options = {}) {
+  if (!shouldAttachBilibiliVideo(card, options.maxSeconds)) return []
+  const fetchImpl = options.fetchImpl || globalThis.fetch
+  if (typeof fetchImpl !== "function") return []
+  const bvid = String(card.bvid || extractBilibiliBvid(card.page_url || card.video_url || "")).trim()
+  if (!bvid) return []
+
+  const parts = Array.isArray(card.pages) && card.pages.length
+    ? card.pages
+    : [{ page: 1, cid: card.cid, title: card.title || "P1", duration: card.duration }]
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), Math.max(1000, Number(options.timeoutMs) || 8000))
+  const headers = {
+    "User-Agent": "Mozilla/5.0",
+    Referer: "https://www.bilibili.com/"
+  }
+  const resources = []
+
+  try {
+    for (const part of parts.slice(0, 20)) {
+      const cid = Number(part?.cid || 0)
+      if (!cid) continue
+      const url = [
+        "https://api.bilibili.com/x/player/playurl",
+        `?bvid=${encodeURIComponent(bvid)}`,
+        `&cid=${encodeURIComponent(cid)}`,
+        "&qn=6&fnval=0&fourk=0"
+      ].join("")
+      const response = await fetchImpl(url, { headers, signal: controller.signal })
+      if (!response?.ok) continue
+      const payload = await response.json()
+      if (Number(payload?.code) !== 0) continue
+      const durls = Array.isArray(payload?.data?.durl) ? payload.data.durl : []
+      for (const item of durls) {
+        const mediaUrl = normalizeUrl(item?.url || "")
+        if (!mediaUrl) continue
+        resources.push({
+          bvid,
+          cid,
+          page: Number(part?.page || 1),
+          quality: 6,
+          title: compactText(part?.title || card.title || "", 160),
+          duration: Number(item?.length ? item.length / 1000 : part?.duration || 0),
+          size: Number(item?.size || 0),
+          url: mediaUrl,
+          backup_urls: (Array.isArray(item?.backup_url) ? item.backup_url : []).map(normalizeUrl).filter(Boolean)
+        })
+      }
+    }
+    return resources
+  } catch {
+    return []
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+export async function resolveBilibiliPlaybackResources(card = {}, options = {}) {
+  const bvid = String(card.bvid || extractBilibiliBvid(card.page_url || card.video_url || "")).trim()
+  const parts = Array.isArray(card.pages) && card.pages.length
+    ? card.pages
+    : [{ page: 1, cid: card.cid }]
+  const identity = parts.map(part => `${Number(part?.page || 1)}:${Number(part?.cid || 0)}`).join(",")
+  const key = bvid ? `${bvid}:${identity}:qn6` : ""
+  if (!key) return await requestBilibiliPlaybackResources(card, options)
+  if (playbackPromiseCache.has(key)) return await playbackPromiseCache.get(key)
+  const promise = requestBilibiliPlaybackResources(card, options)
+  playbackPromiseCache.set(key, promise)
+  try {
+    return await promise
+  } finally {
+    if (playbackPromiseCache.get(key) === promise) playbackPromiseCache.delete(key)
+  }
+}
+
+export function clearBilibiliMetadataCache() {
+  metadataCache.clear()
+  playbackPromiseCache.clear()
+}

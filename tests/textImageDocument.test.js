@@ -2,6 +2,23 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 
+test('code and markdown default to document card rendering', async (t) => {
+  let shouldUseDocumentTemplateForTextImage
+  try {
+    shouldUseDocumentTemplateForTextImage = (await import('../functions/functions_tools/TextImageTool.js')).shouldUseDocumentTemplateForTextImage
+  } catch (error) {
+    if (error?.code === 'ERR_MODULE_NOT_FOUND') {
+      t.skip('render dependencies are not installed in this checkout')
+      return
+    }
+    throw error
+  }
+
+  assert.equal(shouldUseDocumentTemplateForTextImage('```js\nconst a = 1\nconsole.log(a)\n```'), true)
+  assert.equal(shouldUseDocumentTemplateForTextImage('## 标题\n\n- 第一项\n- 第二项\n- 第三项'), true)
+  assert.equal(shouldUseDocumentTemplateForTextImage('好呀，我在。'), false)
+})
+
 test('document template renders a readable html screenshot', async (t) => {
   let sharp
   let TextImageTool

@@ -1,5 +1,7 @@
 import { dependencies } from "../dependence/dependencies.js";
 import { removeToolPromptsFromMessages } from "../utils/textUtils.js"
+import { sanitizeJsonValue, sanitizeMessagesForJson } from "./unicodeText.js"
+import { resolveAgentBackend, shouldAcceptPlannerTextResponse, summarizeToolResultForAgent } from "./agentIntelligence.js"
 const { _path, fetch, fs, path } = dependencies;
 /**
  * 发送请求到 OpenAI API 或其他提供者并处理响应
@@ -7,7 +9,7 @@ const { _path, fetch, fs, path } = dependencies;
  * @param {Object} config - 配置对象
  * @returns {Object|null} - 返回处理后的响应数据或错误信息
  */
-export async function YTapi(requestData, config, toolContent, toolName) {
+export async function YTapi(requestData, config, toolContent, toolName, options = {}) {
     const provider = config.providers?.toLowerCase();
 
     try {
@@ -31,11 +33,11 @@ export async function YTapi(requestData, config, toolContent, toolName) {
             let openaiResponse;
             try {
                 // 使用config.OpenAiModel替换请求中的模型
-                const openaiRequestData = normalizeToolChoiceForToolsProvider({
+                const openaiRequestData = sanitizeJsonValue(normalizeToolChoiceForToolsProvider({
                     ...requestData,
                     model: config.toolsAiConfig.toolsAiModel,
                     stream: false
-                }, openaiUrl);
+                }, openaiUrl));
                 // logger.error(config.toolsAiConfig.toolsAiApikey, config.toolsAiConfig.toolsAiModel, JSON.stringify(openaiRequestData))
                 // logger.error('已触发全局AI对话', config.toolsAiConfig.toolsAiApikey, config.toolsAiConfig.toolsAiModel)
                 openaiResponse = await fetch(openaiUrl, {
@@ -67,6 +69,10 @@ export async function YTapi(requestData, config, toolContent, toolName) {
             const hasToolCalls = openaiData?.choices?.[0]?.message?.tool_calls?.length > 0;
             if (hasToolCalls) {
                 // 直接返回 tool_calls 响应，保持 OpenAI 模型
+                return processResponse(openaiData);
+            }
+            if (shouldAcceptPlannerTextResponse(openaiData)) {
+                logger.info(`[Agent路由] 工具模型选择直接文字回复，保留原始回答，不再交给快速模型重答`);
                 return processResponse(openaiData);
             }
 
@@ -108,21 +114,31 @@ export async function YTapi(requestData, config, toolContent, toolName) {
                 stream: false
             };
         } else {
-            // useTools 关闭，直接使用 OneAPI
-            if (!config.chatAiConfig.chatApiUrl || !config.chatAiConfig.chatApiModel || !config.chatAiConfig.chatApiKey?.length) {
+            const backend = options.taskBackend
+                ? resolveConfiguredTaskBackend(config, options.taskBackend)
+                : options.forceChatBackend
+                    ? resolveConfiguredChatBackend(config)
+                : resolveAgentBackend(config, requestData);
+            if (!backend.apiUrl || !backend.model || !backend.apiKey?.length) {
                 return { error: "OneAPI URL、模型或 API Key 未配置" };
             }
-            url = config.chatAiConfig.chatApiUrl.endsWith('completions') ? config.chatAiConfig.chatApiUrl : `${config.chatAiConfig.chatApiUrl}/v1/chat/completions`;
-            const oneApiKey = getChatApiKey(config.chatAiConfig.chatApiKey);
+            url = backend.apiUrl.endsWith('completions') ? backend.apiUrl : `${String(backend.apiUrl).replace(/\/+$/, '')}/v1/chat/completions`;
+            const oneApiKey = getChatApiKey(backend.apiKey);
             headers = {
                 'Authorization': `Bearer ${oneApiKey}`,
                 'Content-Type': 'application/json'
             };
             finalRequestData = {
-                model: config.chatAiConfig.chatApiModel,
+                model: backend.model,
                 messages: convertToolMessagesForChat(requestData.messages, toolName),
-                stream: false
+                stream: false,
+                ...buildGenerationOptions(requestData, options, backend)
             };
+            if (backend.label === "reasoning") {
+                logger.info(`[Agent路由] 复杂请求升档到 ${backend.model} score=${backend.complexity.score} signals=${backend.complexity.signals.join(',')}`);
+            } else if (options.taskBackend || options.forceChatBackend) {
+                logger.info(`[Agent路由] ${options.routeLabel || "紧凑请求"} 固定使用快速模型 ${backend.model}`);
+            }
         }
 
         // 发送 API 请求
@@ -136,19 +152,32 @@ export async function YTapi(requestData, config, toolContent, toolName) {
             delete finalRequestData.tools;
             delete finalRequestData.tool_choice;
         }
-        finalRequestData.messages = moveFinalToolPromptToEnd(
+        finalRequestData.messages = sanitizeMessagesForJson(moveFinalToolPromptToEnd(
             removeToolPromptsFromMessages(finalRequestData.messages || requestData.messages)
-        )
+        ))
+        finalRequestData = sanitizeJsonValue(finalRequestData)
         console.log('最终请求体:', finalRequestData);
         try {
-            response = await fetch(url, {
+            const sendRequest = () => fetch(url, {
                 method: 'POST',
                 headers,
                 body: JSON.stringify(finalRequestData)
             });
+            response = await sendRequest();
 
             if (!response.ok) {
-                const errorText = await response.text().catch(() => '无法读取错误内容');
+                let errorText = await response.text().catch(() => '无法读取错误内容');
+                const optionalFields = ["temperature", "top_p", "max_tokens", "max_completion_tokens", "reasoning_effort", "response_format"]
+                    .filter(field => Object.hasOwn(finalRequestData, field))
+                const mayRetryWithoutOptions = response.status === 400 && optionalFields.length > 0 &&
+                    /(?:unsupported|unknown|unrecognized|not support|invalid parameter|max_tokens|max_completion_tokens|reasoning_effort|temperature|response_format)/i.test(errorText)
+                if (mayRetryWithoutOptions) {
+                    logger.warn(`[API兼容] 可选生成参数不受支持，移除后在同一后端重试 fields=${optionalFields.join(',')}`)
+                    for (const field of optionalFields) delete finalRequestData[field]
+                    response = await sendRequest()
+                    if (response.ok) return processResponse(await response.json())
+                    errorText = await response.text().catch(() => '无法读取错误内容')
+                }
                 logger.error(`API 请求失败：${response.status} ${response.statusText} - ${errorText}`);
                 return { error: `API 请求失败：${response.status} ${response.statusText} - ${errorText}` };
             }
@@ -171,6 +200,49 @@ export async function YTapi(requestData, config, toolContent, toolName) {
         console.error('YTapi 异常:', error);
         return { error: `发生异常：${error.message}` };
     }
+}
+
+function resolveConfiguredChatBackend(config = {}) {
+    const chat = config?.chatAiConfig || {}
+    return {
+        apiUrl: chat.chatApiUrl,
+        model: chat.chatApiModel,
+        apiKey: chat.chatApiKey,
+        label: "chat"
+    }
+}
+
+function resolveConfiguredTaskBackend(config = {}, taskName = "") {
+    const task = config?.taskAiConfig?.[String(taskName || "").trim()] || {}
+    if (task.apiUrl && task.model && task.apiKey?.length) {
+        return {
+            apiUrl: task.apiUrl,
+            model: task.model,
+            apiKey: task.apiKey,
+            label: `task:${taskName}`,
+            maxTokensField: task.maxTokensField,
+            reasoningEffort: task.reasoningEffort
+        }
+    }
+    return { ...resolveConfiguredChatBackend(config), label: `task:${taskName}:chat-fallback` }
+}
+
+function buildGenerationOptions(requestData = {}, options = {}, backend = {}) {
+    const generation = options.generation || {}
+    const output = {}
+    for (const field of ["temperature", "top_p", "max_tokens", "max_completion_tokens", "reasoning_effort", "response_format"]) {
+        if (requestData[field] !== undefined) output[field] = requestData[field]
+    }
+    if (generation.temperature !== undefined) output.temperature = generation.temperature
+    if (generation.topP !== undefined) output.top_p = generation.topP
+    const maxOutputTokens = Number(generation.maxOutputTokens)
+    if (Number.isFinite(maxOutputTokens) && maxOutputTokens > 0) {
+        const field = String(generation.maxTokensField || backend.maxTokensField || "max_tokens")
+        if (["max_tokens", "max_completion_tokens"].includes(field)) output[field] = Math.floor(maxOutputTokens)
+    }
+    const reasoningEffort = generation.reasoningEffort || backend.reasoningEffort
+    if (reasoningEffort) output.reasoning_effort = reasoningEffort
+    return output
 }
 
 function getChatApiKey(chatApiKey) {
@@ -274,7 +346,7 @@ function moveFinalToolPromptToEnd(messages = []) {
 }
 
 function summarizeToolResultForChat(toolName, content = '') {
-    const text = String(content || '');
+    const text = summarizeToolResultForAgent(toolName, content);
     return `content: ${text}`;
 }
 function processResponse(responseData) {

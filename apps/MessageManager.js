@@ -1,15 +1,38 @@
 import { MessageManager } from '../utils/MessageManager.js'
 import { messageArchiveManager } from '../utils/MessageArchiveManager.js'
-import { emojiPackManager } from '../utils/EmojiPackManager.js'
 import fs from 'fs';
+import path from 'path';
 import YAML from 'yaml';
+import { buildBilibiliArchiveRelaySegments, cleanupBilibiliArchiveRelayFiles } from '../utils/bilibiliMediaRelay.js';
+import { getInstalledMessagePipeline } from '../utils/messagePipeline/runtime.js';
+
+function readMessageCacheOptions() {
+    const root = process.cwd();
+    const defaultPath = path.join(root, 'plugins/bl-chat-plugin/config_default/message.yaml');
+    const userPath = path.join(root, 'plugins/bl-chat-plugin/config/message.yaml');
+    const readSettings = file => {
+        try {
+            return fs.existsSync(file) ? (YAML.parse(fs.readFileSync(file, 'utf8'))?.pluginSettings || {}) : {};
+        } catch (error) {
+            logger.warn(`[MessageRecord] 读取近期消息 TTL 配置失败：${error.message}`);
+            return {};
+        }
+    };
+    const defaults = readSettings(defaultPath);
+    const user = readSettings(userPath);
+    return {
+        cacheExpireMinutes: user.groupChatMemoryMinutes ?? defaults.groupChatMemoryMinutes ?? 60,
+        cacheExpireDays: user.groupChatMemoryDays ?? defaults.groupChatMemoryDays
+    };
+}
+
 export class MessageRecordPlugin extends plugin {
     constructor() {
         super({
             name: '消息记录',
             dsc: '记录群聊和私聊消息',
             event: 'message',
-            priority: -Infinity,
+            priority: 500,
             task: {
                 name: 'messageRecord',
                 fnc: () => { },
@@ -42,9 +65,9 @@ export class MessageRecordPlugin extends plugin {
                     fnc: 'searchArchive'
                 },
                 {
-                    reg: '.*',
-                    fnc: 'onMessage',
-                    log: false
+                    reg: '^[.。#]消息管道状态(?:\\s+\\d{5,12})?\\s*$',
+                    fnc: 'showMessagePipelineStatus',
+                    permission: 'master'
                 },
                 {
                     reg: '^#全局方案(添加|删除)(白名单群组|Gemini密钥|触发前缀|过滤消息|Gemini工具列表|OpenAI工具列表|OneAPI工具列表|OneAPI密钥|GrokSSO|WorkosCursorToken|Gemini代理列表).*$',
@@ -54,14 +77,9 @@ export class MessageRecordPlugin extends plugin {
             ]
         });
         this.configPath = './plugins/bl-chat-plugin/config/message.yaml';
-        this.messageManager = new MessageManager();
+        // 此插件与主聊天链路写入同一 Redis key，必须使用同一短期 TTL。
+        this.messageManager = new MessageManager(readMessageCacheOptions());
         this.archiveManager = messageArchiveManager;
-    }
-
-    async onMessage(e) {
-        await this.messageManager.recordMessage(e);
-        emojiPackManager.maybeAutoCollect(e).catch(() => {});
-        return false;
     }
 
     parseArchiveSearch(msg = "", e = {}) {
@@ -120,16 +138,81 @@ export class MessageRecordPlugin extends plugin {
         ].join("\n");
     }
 
-    buildArchiveForwardMessages(records = []) {
+    async showMessagePipelineStatus(e) {
+        const runtime = getInstalledMessagePipeline();
+        if (!runtime?.store) {
+            await e.reply(runtime?.unavailableReason
+                ? `消息管道当前不可用：${runtime.unavailableReason}`
+                : '消息管道尚未初始化或已关闭');
+            return true;
+        }
+        const groupId = String(e.msg || '').match(/\b\d{5,12}\b/)?.[0] || '';
+        try {
+            const [allEvents, allDeliveries] = await Promise.all([
+                runtime.store.list('event'),
+                runtime.store.list('delivery')
+            ]);
+            const events = groupId
+                ? allEvents.filter(job => String(job?.envelope?.groupId || '') === groupId)
+                : allEvents;
+            const deliveries = groupId
+                ? allDeliveries.filter(job => String(job?.groupId || '') === groupId)
+                : allDeliveries;
+            const summarize = jobs => {
+                const counts = new Map();
+                for (const job of jobs) {
+                    const state = String(job?.state || 'unknown');
+                    counts.set(state, (counts.get(state) || 0) + 1);
+                }
+                return [...counts.entries()].sort().map(([state, count]) => `${state}=${count}`).join('，') || '无';
+            };
+            const recentProblems = [...events, ...deliveries]
+                .filter(job => job?.lastError || job?.uncertain)
+                .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))
+                .slice(0, 5);
+            const lines = [
+                `消息管道：${runtime.config?.enabled !== false && !runtime.pipeline?.stopped ? '运行中' : '已停止'}${groupId ? `（群 ${groupId}）` : ''}`,
+                `事件：${summarize(events)}`,
+                `媒体投递：${summarize(deliveries)}`
+            ];
+            if (recentProblems.length) {
+                lines.push('最近异常：');
+                for (const job of recentProblems) {
+                    lines.push(`[${job.state}] group=${job.groupId || job.envelope?.groupId || 'private'} id=${job.id}${job.uncertain ? '（结果不确定，未自动重试）' : ''}\n${String(job.lastError || '发送结果不确定').slice(0, 180)}`);
+                }
+            }
+            await e.reply(lines.join('\n'));
+        } catch (error) {
+            logger.error(`[MessagePipeline] 状态查询失败: ${error.stack || error.message}`);
+            await e.reply(`消息管道状态查询失败：${error.message}`);
+        }
+        return true;
+    }
+
+    getBilibiliSegment(record = {}) {
+        return Array.isArray(record.message)
+            ? record.message.find(item => item?.type === 'bilibili') || null
+            : null;
+    }
+
+    async buildArchiveForwardMessages(records = []) {
         const messages = [];
+        const tempFiles = [];
         for (const record of records) {
+            const message = [this.archiveManager.formatRecord(record, { compact: true })];
+            const bilibili = this.getBilibiliSegment(record);
+            if (bilibili) {
+                const relay = await buildBilibiliArchiveRelaySegments(bilibili, { logger });
+                message.push(...relay.segments);
+                tempFiles.push(...relay.tempFiles);
+            }
             messages.push({
                 user_id: record.user_id || record.sender?.user_id || Bot.uin,
                 nickname: record.sender?.card || record.sender?.nickname || String(record.user_id || "未知"),
-                message: this.archiveManager.formatRecord(record)
+                message
             });
         }
-        return messages;
+        return { messages, tempFiles };
     }
 
     async searchArchive(e) {
@@ -161,11 +244,15 @@ export class MessageRecordPlugin extends plugin {
                 `共 ${records.length} 条`
             ].filter(Boolean).join(" | ");
             logger.info(`[MessageArchive] ${title}`);
-            const forwardMsgs = this.buildArchiveForwardMessages(records);
-            const summary = e.group?.makeForwardMsg
-                ? await e.group.makeForwardMsg(forwardMsgs)
-                : forwardMsgs.map(item => item.message).join("\n\n");
-            await e.reply(summary);
+            const { messages: forwardMsgs, tempFiles } = await this.buildArchiveForwardMessages(records);
+            try {
+                const summary = e.group?.makeForwardMsg
+                    ? await e.group.makeForwardMsg(forwardMsgs)
+                    : forwardMsgs.map(item => Array.isArray(item.message) ? item.message.filter(part => typeof part === 'string').join('') : item.message).join("\n\n");
+                await e.reply(summary);
+            } finally {
+                await cleanupBilibiliArchiveRelayFiles(tempFiles);
+            }
         } catch (error) {
             logger.error(`[MessageArchive] 查询失败: ${error.stack || error.message}`);
             await e.reply(`查询失败：${error.message}`);

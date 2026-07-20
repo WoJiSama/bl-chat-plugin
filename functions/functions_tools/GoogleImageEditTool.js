@@ -4,21 +4,37 @@ import { dependencies } from "../../dependence/dependencies.js";
 import fs from "fs";
 import YAML from "yaml";
 import path from "path";
+import { serializeMultipartFormData } from "../../utils/multipartFormData.js";
+import { sendImageReliably } from "../../utils/reliableImageSender.js";
+import { extractImageResult } from "../../utils/imageResult.js";
+import { randomUUID } from "crypto";
+import {
+    generateImageEditWithFallbacks,
+    matchesImageProvider,
+    resolveRequestedImageProvider,
+    resolveImageEditConfigs,
+    selectImageConfigsByProvider,
+    shouldRetryWithoutUrlResponseFormat,
+    toImageEditUrl
+} from "../../utils/imageGenerationFallback.js";
 
-const { mimeTypes } = dependencies;
+const { mimeTypes, FormData } = dependencies;
 const DEFAULT_CHAT_IMAGE_EDIT_URL = 'https://api.openai.com/v1/chat/completions';
 const DEFAULT_IMAGE_EDIT_URL = 'https://api.openai.com/v1/images/edits';
 const IMAGE_EDIT_TIMEOUT_MS = 240000;
+const IMAGE_EDIT_JOB_PREFIX = "ytbot:image_edit_job:";
+const IMAGE_EDIT_JOB_TTL_SECONDS = 24 * 60 * 60;
 const IMAGE_EDIT_PROGRESS_MESSAGES = [
-    "好的，我会画。我会照着这张图和你说的方向来，出来就发你看。",
-    "好呀，我会画的。你前面说的我也会一起看，不会只盯着这一句。",
-    "嗯嗯，我会画。我先按你的要求来，画出来直接发你。",
-    "好，我来画这版。参考图我会保留住，再按你说的感觉改。"
+    "收到，我按你的要求改这张图，完成后直接发你。",
+    "好，我来处理这张图，只改你指定的部分。",
+    "嗯，我按你这次说的要求改，其他内容尽量保持不变。",
+    "好，我开始改这张图，弄好后直接发出来。"
 ];
 
 export class GoogleImageEditTool extends AbstractTool {
     constructor() {
         super();
+        this.recoveringJobIds = new Set();
         this.name = 'googleImageEditTool';
         this.description = '使用Google Gemini处理用户的任意图片（或用户的群聊头像），支持编辑图片内容。当用户请求编辑图片/头像时调用此工具。';
         this.parameters = {
@@ -32,6 +48,10 @@ export class GoogleImageEditTool extends AbstractTool {
                     type: 'array',
                     description: '用户提供的图片链接数组，需保留原始URL完整性。QQ头像格式："https://q1.qlogo.cn/g?b=qq&nk=用户QQ号&s=640"',
                     items: { type: 'string' }
+                },
+                provider: {
+                    type: 'string',
+                    description: '仅当用户明确指定图片渠道或模型名称时填写，例如 Grok；未指定时不要填写'
                 }
             },
             required: ['prompt', 'images'],
@@ -40,18 +60,38 @@ export class GoogleImageEditTool extends AbstractTool {
     }
 
     async func(opts, e) {
+        const config = this.loadConfig();
+        const requestedProvider = this.resolveRequestedProvider(config, opts, e);
+        const effectiveOpts = requestedProvider ? { ...opts, provider: requestedProvider } : opts;
+        const job = this.createDurableJob(effectiveOpts, e);
+        await this.persistDurableJob(job);
+        try {
+            return await this.performImageEdit(effectiveOpts, e);
+        } finally {
+            await this.removeDurableJob(job.id);
+        }
+    }
+
+    async performImageEdit(opts, e, options = {}) {
         const STREAM = false;
 
         try {
             const config = this.loadConfig();
             const { prompt } = opts;
+            const requestedProvider = this.resolveRequestedProvider(config, opts, e);
             const rawImages = this.normalizeArray(opts.images);
 
             if (!rawImages.length) {
                 return { error: '未检测到有效的图片链接' };
             }
 
-            await this.sendProgress(e, prompt);
+            const { imageEditApiUrl, imageEditApiKey, imageEditApiModel } = config.imageEditAiConfig || {};
+            const apiUrl = imageEditApiUrl || DEFAULT_CHAT_IMAGE_EDIT_URL;
+            const apiKey = imageEditApiKey || 'sk-xxxxxx';
+            const model = imageEditApiModel || "gemini-3-pro-image-preview";
+            this.validateRequestedImageEditProvider(config, apiUrl, requestedProvider);
+
+            if (!options.skipProgressNotice) await this.sendProgress(e, prompt);
 
             // 处理图片URL
             const images = await normalizeImageUrls(rawImages);
@@ -61,22 +101,22 @@ export class GoogleImageEditTool extends AbstractTool {
             }
 
             // 调用API
-            const { imageEditApiUrl, imageEditApiKey, imageEditApiModel } = config.imageEditAiConfig || {};
-            const apiUrl = imageEditApiUrl || DEFAULT_CHAT_IMAGE_EDIT_URL;
-            const apiKey = imageEditApiKey || 'sk-xxxxxx';
-            const model = imageEditApiModel || "gemini-3-pro-image-preview";
-
-            const imageUrl = this.shouldUseImageEditEndpoint(apiUrl)
-                ? await this.generateImageEdit({ apiUrl, apiKey, model, prompt, images })
-                : await this.generateChatImageEdit({ apiUrl, apiKey, model, prompt, images, stream: STREAM });
-
+            const imageUrl = await this.generateConfiguredImageEdit(config, {
+                apiUrl,
+                apiKey,
+                model,
+                prompt,
+                images,
+                stream: STREAM,
+                provider: requestedProvider
+            });
             const processedUrl = this.extractImageUrl(imageUrl);
 
             if (processedUrl) {
-                await e.reply([segment.image(processedUrl)]);
+                await sendImageReliably(e, processedUrl);
                 return '图片编辑成功';
             }
-            return { error: '图片编辑失败' };
+            return { error: '图片编辑失败: 未接收到有效图片' };
 
         } catch (error) {
             console.error('图片编辑失败:', error);
@@ -84,19 +124,174 @@ export class GoogleImageEditTool extends AbstractTool {
         }
     }
 
+    createDurableJob(opts, e = {}) {
+        const groupId = e.group_id || "";
+        const userId = e.user_id || e.sender?.user_id || "";
+        const messageId = e.message_id || randomUUID();
+        return {
+            id: `${groupId || "private"}:${userId || "unknown"}:${messageId}:${randomUUID().slice(0, 8)}`,
+            opts: {
+                prompt: String(opts?.prompt || ""),
+                images: this.normalizeArray(opts?.images),
+                ...(opts?.provider ? { provider: String(opts.provider) } : {})
+            },
+            groupId: String(groupId || ""),
+            userId: String(userId || ""),
+            messageId: String(messageId || ""),
+            messageType: e.message_type || (groupId ? "group" : "private"),
+            selfId: String(e.self_id || ""),
+            sender: {
+                user_id: userId ? Number(userId) : undefined,
+                nickname: e.sender?.nickname || e.nickname || "",
+                card: e.sender?.card || ""
+            },
+            createdAt: Date.now()
+        };
+    }
+
+    getRedis() {
+        return globalThis.redis || (typeof redis !== "undefined" ? redis : null);
+    }
+
+    async persistDurableJob(job) {
+        const store = this.getRedis();
+        if (!store || !job?.id) return;
+        await store.set(`${IMAGE_EDIT_JOB_PREFIX}${job.id}`, JSON.stringify(job), { EX: IMAGE_EDIT_JOB_TTL_SECONDS });
+    }
+
+    async removeDurableJob(jobId) {
+        const store = this.getRedis();
+        if (store && jobId) await store.del(`${IMAGE_EDIT_JOB_PREFIX}${jobId}`);
+    }
+
+    async scanDurableJobKeys() {
+        const store = this.getRedis();
+        if (!store) return [];
+        const pattern = `${IMAGE_EDIT_JOB_PREFIX}*`;
+        if (typeof store.scanIterator === "function") {
+            const keys = [];
+            for await (const key of store.scanIterator({ MATCH: pattern, COUNT: 100 })) {
+                if (Array.isArray(key)) keys.push(...key); else keys.push(key);
+            }
+            return keys;
+        }
+        return typeof store.keys === "function" ? await store.keys(pattern) : [];
+    }
+
+    buildRecoveredEvent(record = {}) {
+        const bot = globalThis.Bot || (typeof Bot !== "undefined" ? Bot : null);
+        const groupId = Number(record.groupId || 0) || null;
+        const userId = Number(record.userId || 0) || 0;
+        const event = {
+            group_id: groupId,
+            user_id: userId,
+            sender: { ...(record.sender || {}), user_id: userId },
+            message_id: record.messageId || "",
+            message_type: record.messageType || (groupId ? "group" : "private"),
+            self_id: record.selfId || bot?.uin || "",
+            bot
+        };
+        event.reply = async message => {
+            if (groupId) return await bot.pickGroup(groupId).sendMsg(message);
+            return await bot.pickFriend(userId).sendMsg(message);
+        };
+        return event;
+    }
+
+    async recoverDurableJobs() {
+        const keys = await this.scanDurableJobKeys();
+        if (!keys.length) return;
+        this.logInfo(`[图片编辑恢复] 发现 ${keys.length} 个未完成任务`);
+        for (const key of keys) {
+            const raw = await this.getRedis().get(key);
+            if (!raw) continue;
+            let record;
+            try { record = JSON.parse(raw); } catch { await this.getRedis().del(key); continue; }
+            if (!record?.id || this.recoveringJobIds.has(record.id)) continue;
+            this.recoveringJobIds.add(record.id);
+            const event = this.buildRecoveredEvent(record);
+            try {
+                await event.reply("刚刚我这边重启了一下，不过这张图的修改要求还记着。我继续处理，完成后直接发出来。");
+                await this.performImageEdit(record.opts || {}, event, { skipProgressNotice: true });
+            } catch (error) {
+                this.logError(`[图片编辑恢复] 恢复任务失败 id=${record.id}:`, error);
+            } finally {
+                await this.removeDurableJob(record.id);
+                this.recoveringJobIds.delete(record.id);
+            }
+        }
+    }
+
     // ========== 工具方法 ==========
 
     shouldUseImageEditEndpoint(apiUrl = "") {
-        return /\/images\/edits\/?$/i.test(String(apiUrl || ""));
+        const url = String(apiUrl || "").trim();
+        if (!url) return true;
+        if (/\/chat\/completions\/?$/i.test(url)) return false;
+        return /(?:\/images\/edits\/?|\/v1\/?|\/openai\/v1\/?|\/api\/v1\/?|\/)$/.test(url);
     }
 
     toImageEditUrl(apiUrl = DEFAULT_IMAGE_EDIT_URL) {
-        const url = String(apiUrl || "").trim();
-        if (!url) return DEFAULT_IMAGE_EDIT_URL;
-        if (/\/images\/edits\/?$/i.test(url)) return url;
-        if (/\/chat\/completions\/?$/i.test(url)) return url.replace(/\/chat\/completions\/?$/i, "/images/edits");
-        if (/\/v1\/?$/i.test(url)) return url.replace(/\/?$/i, "/images/edits");
-        return url;
+        return toImageEditUrl(apiUrl);
+    }
+
+    resolveImageEditConfigs(config = {}) {
+        return resolveImageEditConfigs(config);
+    }
+
+    resolveRequestedProvider(config = {}, opts = {}, e = {}) {
+        const sourceText = [e?.msg, e?.raw_message, opts?.prompt].filter(Boolean).join("\n");
+        return resolveRequestedImageProvider(config, sourceText, opts?.provider);
+    }
+
+    validateRequestedImageEditProvider(config = {}, apiUrl = "", provider = "") {
+        const requestedProvider = String(provider || "").trim();
+        if (!requestedProvider) return;
+        const requestedChatPrimary = !this.shouldUseImageEditEndpoint(apiUrl) &&
+            matchesImageProvider(config.imageEditAiConfig || {}, requestedProvider);
+        if (requestedChatPrimary) return;
+        selectImageConfigsByProvider(this.resolveImageEditConfigs(config), requestedProvider, "图片编辑");
+    }
+
+    async generateConfiguredImageEdit(config, { apiUrl, apiKey, model, prompt, images, stream = false, provider = "" }) {
+        let editConfigs = this.resolveImageEditConfigs(config);
+        const requestedProvider = String(provider || "").trim();
+        const primaryIsChat = !this.shouldUseImageEditEndpoint(apiUrl);
+        const requestedChatPrimary = Boolean(
+            requestedProvider &&
+            primaryIsChat &&
+            matchesImageProvider(config.imageEditAiConfig || {}, requestedProvider)
+        );
+
+        if (requestedProvider) {
+            if (requestedChatPrimary) {
+                this.logInfo(`[图片渠道] 用户指定 ${requestedProvider}，仅使用当前 chat 图片编辑通道`);
+                return await this.generateChatImageEdit({ apiUrl, apiKey, model, prompt, images, stream });
+            }
+            editConfigs = selectImageConfigsByProvider(editConfigs, requestedProvider, "图片编辑");
+            this.logInfo(`[图片渠道] 用户指定 ${requestedProvider}，本次禁止跨名称 fallback`);
+            return await this.generateImageEdit(editConfigs, prompt, images);
+        }
+
+        if (this.shouldUseImageEditEndpoint(apiUrl)) {
+            if (!editConfigs.length) throw new Error("未配置可用的图片编辑通道");
+            return await this.generateImageEdit(editConfigs, prompt, images);
+        }
+
+        let primaryError = null;
+        try {
+            const chatResult = await this.generateChatImageEdit({ apiUrl, apiKey, model, prompt, images, stream });
+            if (this.extractImageUrl(chatResult)) return chatResult;
+            primaryError = new Error("未接收到有效图片");
+        } catch (error) {
+            primaryError = error;
+        }
+
+        if (editConfigs.length) {
+            this.logWarn(`[图片编辑] 当前图片编辑通道失败，使用相同原 prompt 尝试下一个 edits 候选: ${primaryError?.message || "未接收到有效图片"}`);
+            return await this.generateImageEdit(editConfigs, prompt, images);
+        }
+        throw primaryError || new Error("未接收到有效图片");
     }
 
     async generateChatImageEdit({ apiUrl, apiKey, model, prompt, images, stream = false }) {
@@ -119,30 +314,31 @@ export class GoogleImageEditTool extends AbstractTool {
             : await this.handleChatResponse(response);
     }
 
-    async generateImageEdit({ apiUrl, apiKey, model, prompt, images }) {
-        let result = await this.parseImageEditResponse(
-            await this.requestImageEdit({ apiUrl, apiKey, model, prompt, images }, "url")
-        );
-
-        if (!result.ok && this.shouldRetryWithoutUrlResponseFormat(result.errorMessage)) {
-            this.logInfo("[图片编辑] 上游不支持 response_format=url，退回默认返回格式");
-            result = await this.parseImageEditResponse(
-                await this.requestImageEdit({ apiUrl, apiKey, model, prompt, images })
-            );
-        }
-
-        if (result.ok) return result.image;
-        throw new Error(result.errorMessage);
+    async generateImageEdit(configs, prompt, images) {
+        return await generateImageEditWithFallbacks(configs, prompt, images, {
+            request: (editConfig, inputPrompt, inputImages, responseFormat) => this.requestImageEdit({
+                apiUrl: editConfig.apiUrl,
+                apiKey: editConfig.apiKey,
+                model: editConfig.model,
+                prompt: inputPrompt,
+                images: inputImages
+            }, responseFormat),
+            parseResponse: response => this.parseImageEditResponse(response),
+            logInfo: (...args) => this.logInfo(...args),
+            logWarn: (...args) => this.logWarn(...args)
+        });
     }
 
     async requestImageEdit({ apiUrl, apiKey, model, prompt, images }, responseFormat = "") {
         const formData = await this.buildImageEditFormData({ model, prompt, images, responseFormat });
+        const multipart = await serializeMultipartFormData(formData);
         return await this.fetchWithTimeout(this.toImageEditUrl(apiUrl), {
             method: "POST",
             headers: {
+                ...multipart.headers,
                 Authorization: `Bearer ${apiKey}`,
             },
-            body: formData,
+            body: multipart.body,
         });
     }
 
@@ -154,7 +350,11 @@ export class GoogleImageEditTool extends AbstractTool {
 
         for (let index = 0; index < images.length; index++) {
             const image = await this.buildImageFile(images[index], index);
-            formData.append("image", image.blob, image.filename);
+            formData.append("image", image.buffer, {
+                filename: image.filename,
+                contentType: image.mimeType,
+                knownLength: image.buffer.length,
+            });
         }
 
         return formData;
@@ -178,7 +378,8 @@ export class GoogleImageEditTool extends AbstractTool {
 
         const ext = mimeTypes.extension(parsed.mimeType) || "png";
         return {
-            blob: new Blob([parsed.buffer], { type: parsed.mimeType }),
+            buffer: parsed.buffer,
+            mimeType: parsed.mimeType,
             filename: `image_${index}.${ext}`,
         };
     }
@@ -211,7 +412,7 @@ export class GoogleImageEditTool extends AbstractTool {
     }
 
     shouldRetryWithoutUrlResponseFormat(errorMessage = "") {
-        return /response_format|unsupported|not support|unknown parameter|invalid parameter|不支持|未知参数/i.test(String(errorMessage));
+        return shouldRetryWithoutUrlResponseFormat(errorMessage);
     }
 
     async readJsonResponse(response) {
@@ -233,6 +434,17 @@ export class GoogleImageEditTool extends AbstractTool {
         if (!response.ok) {
             return { ok: false, errorMessage: this.formatApiError(response, data), data };
         }
+        if (data?.error) {
+            const message = data.error.message || "unknown provider error";
+            const type = data.error.type || data.error.code || "provider_error";
+            this.logWarn(`[图片编辑] 服务返回错误 status=${response.status} type=${type} message=${message}`);
+            return {
+                ok: false,
+                errorMessage: `图片编辑服务错误: ${type}: ${message}`,
+                errorKind: "provider_error",
+                data
+            };
+        }
 
         const item = data?.data?.[0];
         if (item?.url) {
@@ -247,7 +459,23 @@ export class GoogleImageEditTool extends AbstractTool {
         const chatImage = this.extractChatImageResult(data);
         if (chatImage) return { ok: true, image: chatImage, format: "chat" };
 
-        return { ok: false, errorMessage: "未接收到有效图片", data };
+        this.logWarn(`[图片编辑] 空结果响应结构 ${JSON.stringify(this.summarizeResponseShape(data)).slice(0, 1800)}`);
+        return { ok: false, errorMessage: "未接收到有效图片", errorKind: "empty_image", data };
+    }
+
+    summarizeResponseShape(value, depth = 0) {
+        if (depth > 4) return "<max-depth>";
+        if (Array.isArray(value)) return value.slice(0, 3).map(item => this.summarizeResponseShape(item, depth + 1));
+        if (!value || typeof value !== "object") {
+            if (typeof value === "string") return value.length > 240 ? `<string length=${value.length} prefix=${value.slice(0, 160)}>` : value;
+            return value;
+        }
+        const result = {};
+        for (const [key, item] of Object.entries(value)) {
+            if (/b64|base64/i.test(key)) result[key] = typeof item === "string" ? `<base64 length=${item.length}>` : "<base64-value>";
+            else result[key] = this.summarizeResponseShape(item, depth + 1);
+        }
+        return result;
     }
 
     extractChatImageResult(data) {
@@ -268,12 +496,6 @@ export class GoogleImageEditTool extends AbstractTool {
     }
 
     getProgressMessage(prompt = "") {
-        const content = String(prompt || "");
-        if (/(引用|回复|上下文|前面|刚才|近期相关对话|被引用内容|用户前面说)/.test(content)) {
-            return Math.random() < 0.5
-                ? "好呀，我会画的。你前面说的我也会一起看，不会只盯着这一句。"
-                : "好的，我会画。我会把这张图和前面那些话一起对上，出来就发你看。";
-        }
         return IMAGE_EDIT_PROGRESS_MESSAGES[Math.floor(Math.random() * IMAGE_EDIT_PROGRESS_MESSAGES.length)];
     }
 
@@ -363,32 +585,7 @@ export class GoogleImageEditTool extends AbstractTool {
     }
 
     extractImageUrl(content) {
-        if (!content) return null;
-
-        // 匹配 Markdown 图片格式: ![xxx](url)
-        const mdMatch = content.match(/!\[.*?\]\((data:image\/[^;]+;base64,[^)]+|https?:\/\/[^)]+)\)/);
-        if (mdMatch) {
-            const url = mdMatch[1];
-            if (url.startsWith('data:image')) {
-                const base64Data = url.replace(/^data:image\/[^;]+;base64,/, '');
-                return `base64://${base64Data}`;
-            }
-            return url;
-        }
-
-        // 匹配纯 base64 data URI
-        const base64Match = content.match(/data:image\/[^;]+;base64,([A-Za-z0-9+/=]+)/);
-        if (base64Match) {
-            return `base64://${base64Match[1]}`;
-        }
-
-        // 匹配 https 链接
-        const httpsMatch = content.match(/https?:\/\/[^\s)'"<>]+\.(png|jpg|jpeg|gif|webp|bmp)[^\s)'"<>]*/i);
-        if (httpsMatch) {
-            return httpsMatch[0];
-        }
-
-        return null;
+        return extractImageResult(content);
     }
 
     // ========== 图片URL处理 ==========

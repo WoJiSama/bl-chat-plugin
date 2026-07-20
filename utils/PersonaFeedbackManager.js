@@ -1,5 +1,7 @@
 import fs from "fs"
 import path from "path"
+import { isToneCorrectionMessage } from "./chatFailureReply.js"
+import { safeTruncateUnicode } from "./unicodeText.js"
 
 const DEFAULT_BAD_PATTERNS = [
   "我是不是太啰嗦",
@@ -26,6 +28,53 @@ const FEEDBACK_TAG_RULES = [
   { key: "bad_tone", label: "语气不对", pattern: /语气不对|怪|别这样|不喜欢|不对劲|阴阳怪气/ }
 ]
 
+const HARD_BOT_IDENTITY_DENIAL_RE = /(?:^|[，,。.!！?？；;\s])(?:(?:我)?(?:才|又|可|真)?(?:不是|不是什么)|我怎么可能是|谁是|哪是|哪有什么).{0,10}(?:机器人|AI|人工智能|bot)(?:啦|啊|呀|诶|哦|嘛|呢)?/gi
+const HARD_HUMAN_IDENTITY_CLAIM_RE = /(?:我(?:可|就|当然)?是(?:个)?)?(?:活人|真人)(?:一个|一枚|本人)(?:啦|啊|呀|诶|哦|嘛|呢)?[😂🤣😅]*/g
+const FIRST_PERSON_HUMAN_CLAIM_RE = /我(?:可|就|当然)?是(?:个)?(?:活人|真人)(?:啦|啊|呀|诶|哦|嘛|呢)?/g
+
+export function looksLikeBotIdentityChallenge(text = "", { botNames = [] } = {}) {
+  const content = String(text || "").replace(/\s+/g, " ").trim()
+  if (!content) return false
+  const escapedNames = (Array.isArray(botNames) ? botNames : [botNames])
+    .map(name => String(name || "").trim())
+    .filter(Boolean)
+    .map(name => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+  const target = ["你", "妳", "希洛", "小希", ...escapedNames].join("|")
+  const identity = "机器人|AI|人工智能|bot"
+  return new RegExp(`(?:${target}).{0,16}(?:像|是|是不是|不就是|不会是|难道是|怎么.{0,4}像).{0,10}(?:${identity})`, "i").test(content) ||
+    new RegExp(`(?:${target}).{0,16}(?:不是|不像).{0,8}(?:真人|活人)`, "i").test(content) ||
+    new RegExp(`(?:${identity}).{0,8}(?:味|感).{0,8}(?:重|浓|足)|(?:${target}).{0,12}(?:${identity})(?:味|感)`, "i").test(content)
+}
+
+function softenIdentityDenial(text = "", context = {}) {
+  let output = String(text || "")
+  if (!looksLikeBotIdentityChallenge(context.userText, context)) return output
+  if (!HARD_BOT_IDENTITY_DENIAL_RE.test(output) &&
+    !HARD_HUMAN_IDENTITY_CLAIM_RE.test(output) &&
+    !FIRST_PERSON_HUMAN_CLAIM_RE.test(output)) return output
+
+  HARD_BOT_IDENTITY_DENIAL_RE.lastIndex = 0
+  HARD_HUMAN_IDENTITY_CLAIM_RE.lastIndex = 0
+  FIRST_PERSON_HUMAN_CLAIM_RE.lastIndex = 0
+  const marker = "别给我扣机器人帽子……"
+  output = output
+    .replace(HARD_BOT_IDENTITY_DENIAL_RE, ` ${marker}`)
+    .replace(HARD_HUMAN_IDENTITY_CLAIM_RE, "")
+    .replace(FIRST_PERSON_HUMAN_CLAIM_RE, "")
+    .replace(/就是话多[了的]?一点/g, "我只是话多一点")
+    .replace(/我只是我只是/g, "我只是")
+    .replace(/别给我扣机器人帽子(?:…+|。+)(?:[，,。.!！?？；;\s]|…+)*/g, marker)
+    .replace(new RegExp(`(?:${marker})\\s*(?:${marker})+`, "g"), marker)
+    .replace(/^[，,。.!！?？；;\s]+/, "")
+    .replace(/\s{2,}/g, " ")
+    .trim()
+
+  if (!output || output === marker || /^别给我扣机器人帽子……\s*我只是话多一点[。.!！]?$/.test(output)) {
+    return "别给我扣机器人帽子……我只是话多一点。"
+  }
+  return output
+}
+
 function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true })
 }
@@ -35,7 +84,22 @@ function nowIso() {
 }
 
 function compactText(text = "", max = 900) {
-  return String(text || "").replace(/\s+/g, " ").trim().slice(0, max)
+  return safeTruncateUnicode(String(text || "").replace(/\s+/g, " ").trim(), max)
+}
+
+function deescalateToneCorrection(text = "", context = {}) {
+  if (!isToneCorrectionMessage(context.userText)) return String(text || "")
+
+  const cleaned = String(text || "")
+    .replace(/[😋❤♥💗💕💞😘🥰]+/gu, "")
+    .replace(/\s{2,}/g, " ")
+    .trim()
+  const sincerelyAcknowledges = /(?:你说得对|你说的对|确实|刚才).{0,30}(?:不对|过了|不舒服|顶着|收一下|改|注意)/.test(cleaned) ||
+    /(?:我收一下|我改|我注意|不该这样|听着确实不舒服)/.test(cleaned)
+  const keepsProvoking = /(?:你别教我做事|别气嘛|不跟你犟|你舍得嘛|凭啥|想得美|自己来|我又不是你保姆|你少来|嘿嘿|嘴快|急什么|开不起玩笑)/.test(cleaned)
+
+  if (sincerelyAcknowledges && !keepsProvoking) return cleaned
+  return "你说得对，刚才那几句有点顶着你说了，听着确实不舒服。我收一下。"
 }
 
 function normalizeConfig(config = {}) {
@@ -186,7 +250,7 @@ export class PersonaFeedbackManager {
     return lines.join("\n")
   }
 
-  guardReply(text = "", config = {}) {
+  guardReply(text = "", config = {}, context = {}) {
     const guard = normalizeConfig(config)
     if (!guard.enabled) return String(text || "")
     let output = String(text || "").trim()
@@ -208,6 +272,9 @@ export class PersonaFeedbackManager {
         .replace(/希望(?:以上|这些|这).*?(?:帮到你|有帮助)[。.!！]*/g, "")
         .trim()
     }
+
+    output = softenIdentityDenial(output, context)
+    output = deescalateToneCorrection(output, context)
 
     if (guard.rewriteHardRefusal) {
       output = output

@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{title}}</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      width: 980px;
+      margin: 0;
+      padding: 24px;
+      color: #edf2f7;
+      background: #15191d;
+      font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+    }
+    .card {
+      overflow: hidden;
+      border: 1px solid #36414a;
+      border-radius: 8px;
+      background: #20272d;
+      box-shadow: 0 14px 32px rgba(0, 0, 0, .32);
+    }
+    .head {
+      display: flex;
+      gap: 20px;
+      align-items: center;
+      padding: 24px 28px;
+      background: #29343d;
+      border-bottom: 1px solid #3c4954;
+    }
+    .icon {
+      width: 84px;
+      height: 84px;
+      flex: 0 0 84px;
+      overflow: hidden;
+      border: 1px solid #50616d;
+      border-radius: 8px;
+      background: #172027;
+    }
+    .icon img { display: block; width: 100%; height: 100%; object-fit: cover; }
+    .icon.no-icon::after { content: "M"; display: grid; width: 100%; height: 100%; place-items: center; color: #91a2ae; font-size: 38px; font-weight: 800; }
+    .eyebrow { color: #99b9ca; font-size: 16px; font-weight: 700; }
+    h1 { margin: 5px 0 7px; color: #ffffff; font-size: 32px; line-height: 1.15; letter-spacing: 0; }
+    .author { color: #bdcad3; font-size: 18px; }
+    .stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px; background: #3c4954; }
+    .stat { padding: 16px 28px; background: #242c32; }
+    .label { display: block; margin-bottom: 5px; color: #96a8b5; font-size: 15px; }
+    .value { color: #f5fbff; font-size: 23px; font-weight: 800; font-variant-numeric: tabular-nums; }
+    .content { padding: 24px 28px 28px; }
+    .row { margin-bottom: 17px; }
+    .row:last-child { margin-bottom: 0; }
+    .row-label { display: block; margin-bottom: 6px; color: #98aab6; font-size: 16px; font-weight: 700; }
+    .row-value { color: #edf2f7; font-size: 18px; line-height: 1.58; overflow-wrap: anywhere; }
+    .meta-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 17px; }
+    .meta { min-height: 80px; padding: 13px 15px; border: 1px solid #394650; border-radius: 6px; background: #192126; }
+    .meta .row-label { margin-bottom: 4px; }
+    .meta .row-value { font-size: 17px; }
+    .desc { padding: 14px 16px; border-left: 3px solid #6aa2ba; border-radius: 0 6px 6px 0; background: #18242b; }
+    .desc + .desc { margin-top: 10px; border-left-color: #82b995; background: #1b2925; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <header class="head">
+      <div class="icon"><img src="{{iconUrl}}" onerror="this.style.display='none';this.parentElement.classList.add('no-icon')"></div>
+      <div>
+        <div class="eyebrow">Modrinth 第 {{rank}} 名</div>
+        <h1>{{name}}</h1>
+        <div class="author">作者：{{author}}</div>
+      </div>
+    </header>
+    <section class="stats">
+      <div class="stat"><span class="label">下载</span><span class="value">{{downloads}}</span></div>
+      <div class="stat"><span class="label">关注</span><span class="value">{{follows}}</span></div>
+    </section>
+    <section class="content">
+      <div class="row"><span class="row-label">标签</span><div class="row-value">{{tagsText}}</div></div>
+      <div class="row"><span class="row-label">支持的 MC 版本</span><div class="row-value">{{versionsText}}</div></div>
+      <div class="meta-grid">
+        <div class="meta"><span class="row-label">客户端侧</span><div class="row-value">{{clientSide}}</div></div>
+        <div class="meta"><span class="row-label">服务端侧</span><div class="row-value">{{serverSide}}</div></div>
+        <div class="meta"><span class="row-label">创建时间</span><div class="row-value">{{dateCreated}}</div></div>
+        <div class="meta"><span class="row-label">最近更新</span><div class="row-value">{{dateModified}}</div></div>
+      </div>
+      <div class="row"><span class="row-label">许可证</span><div class="row-value">{{license}}</div></div>
+      <div class="desc"><span class="row-label">英文简介</span><div class="row-value">{{descriptionEn}}</div></div>
+      <div class="desc"><span class="row-label">中文翻译（希洛）</span><div class="row-value">{{descriptionZh}}</div></div>
+    </section>
+  </main>
+</body>
+</html>

@@ -5,6 +5,8 @@ import fs from "fs";
 import path from "path";
 import crypto from 'crypto';
 import common from '../../../lib/common/common.js';
+import { splitUnicodeText } from './unicodeText.js';
+import { classifyMessageSegmentMedia } from './mediaTypePolicy.js';
 const validImageExtensions = ['.webp', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg'];
 
 const TENCENT_IMAGE_APPIDS = [1408, 1407, 1406, 1405, 1404, 1403];
@@ -680,10 +682,16 @@ export async function TakeImages(e) {
       return url;
     }
 
-    for (const { type, url, fid } of message) {
-      if ((type === "image" || type === "file") && url) {
-        return await refreshTencentImageUrl(url, fid);
-      }
+    for (const segment of message) {
+      const data = segment?.data && typeof segment.data === 'object' ? segment.data : {};
+      const url = segment?.url || segment?.file_url || data.url || data.file_url;
+      const fid = segment?.fid || segment?.file_id || data.fid || data.file_id;
+      if (!url) continue;
+      const mediaType = classifyMessageSegmentMedia(segment);
+      if (mediaType === "non_image_file" || mediaType === "other") continue;
+      const candidate = await refreshTencentImageUrl(url, fid);
+      if (mediaType === "unknown_file" && !(await isTencentImageUrlAvailable(candidate))) continue;
+      return candidate;
     }
     return null;
   };
@@ -1211,16 +1219,12 @@ export async function sendLongMessage(e, messages, forwardMsg, maxLength = 1000)
       // 对每条消息进行处理
       for (let msg of msgArray) {
         if (typeof msg === 'string' && msg.length > maxLength) {
-          // 计算需要分成几段
-          const segmentCount = Math.ceil(msg.length / maxLength);
+          const textSegments = splitUnicodeText(msg, maxLength);
+          const segmentCount = textSegments.length;
           logger.info(`消息长度为${msg.length}，将分为${segmentCount}段发送`);
 
           // 分段处理文本
-          for (let i = 0; i < segmentCount; i++) {
-            const start = i * maxLength;
-            const end = Math.min(start + maxLength, msg.length);
-            const segment = msg.substring(start, end);
-
+          for (const segment of textSegments) {
             if (segment.trim()) {
               segmentedForwardMsg.push(segment);
             }

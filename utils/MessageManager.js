@@ -2,6 +2,13 @@ import { dependencies } from '../dependence/dependencies.js';
 const { axios, moment } = dependencies;
 import schedule from 'node-schedule';
 import { refreshTencentImageUrl } from './fileUtils.js';
+import { safeTruncateUnicode } from './unicodeText.js';
+import { enrichBilibiliMessageSegments, formatBilibiliHistoryLinks, formatBilibiliHistoryText } from './bilibiliMessage.js';
+import { enrichDouyinMessageSegments, formatDouyinHistoryLinks, formatDouyinHistoryText } from './douyinMessage.js';
+import { resolveMessageCacheTtlSeconds } from './messageCacheTtl.js';
+import { KeyedSerialQueue } from './messagePipeline/keyedSerialQueue.js';
+
+const recentMessageWriteQueue = new KeyedSerialQueue();
 
 export class MessageManager {
   /**
@@ -10,20 +17,31 @@ export class MessageManager {
    * @param {number} [options.privateMaxMessages=20] 私聊消息上限
    * @param {number} [options.groupMaxMessages=35] 群聊消息上限 
    * @param {number} [options.messageMaxLength=200] 单条消息最大长度
-   * @param {number} [options.cacheExpireDays=7] 缓存过期时间(天)
+   * @param {number} [options.cacheExpireSeconds] 缓存过期时间（秒，优先级最高）
+   * @param {number} [options.cacheExpireMinutes] 缓存过期时间（分钟）
+   * @param {number} [options.cacheExpireDays] 旧版缓存过期时间（天）
    */
   constructor(options = {}) {
     // 可配置参数
     this.PRIVATE_MAX_MESSAGES = options.privateMaxMessages || 20;  // 私聊消息上限
     this.GROUP_MAX_MESSAGES = options.groupMaxMessages || 100;      // 群聊消息上限(可由用户配置)
     this.MESSAGE_MAX_LENGTH = options.messageMaxLength || 200;     // 单条消息最大长度（不计图片/文件链接）
-    this.CACHE_EXPIRE_DAYS = options.cacheExpireDays || 1;         // 缓存过期时间（天）
+    this.setCacheExpire(options);
 
     // 固定参数
     this.REDIS_KEY_PREFIX = 'ytbot:messages:';                     // Redis key前缀
 
     // 初始化定时任务
     // this.initScheduledTasks();
+  }
+
+  /**
+   * 统一使用秒保存 Redis TTL。旧的天级配置仍可读取，避免外部调用方升级后失效。
+   */
+  setCacheExpire(options = {}) {
+    this.CACHE_EXPIRE_SECONDS = resolveMessageCacheTtlSeconds(options);
+    // 兼容可能读取该公开字段的旧插件；实际写 Redis 时只使用秒级字段。
+    this.CACHE_EXPIRE_DAYS = this.CACHE_EXPIRE_SECONDS / (24 * 60 * 60);
   }
 
   /**
@@ -162,8 +180,10 @@ export class MessageManager {
    * @returns {Promise<string|null>} 文件URL
    */
   async getFileUrl(e, type) {
-    if (e.message?.[0]?.type === 'file') {
-      const { fid } = e.message[0];
+    const fileSegment = Array.isArray(e?.message) ? e.message.find(item => item?.type === 'file') : null;
+    if (fileSegment) {
+      const { fid, url } = fileSegment;
+      if (url) return url;
       if (fid) {
         return type === 'group'
           ? await e.group?.getFileUrl(fid)
@@ -236,6 +256,7 @@ export class MessageManager {
             break;
           case 'video':
             action = '发送了一个视频';
+            urlPart = msg.url ? ` [视频:${msg.url}]` : '';
             break;
           case 'record':
             action = '发送了一条语音';
@@ -256,6 +277,16 @@ export class MessageManager {
           case 'json':
             action = '发送了卡片消息';
             break;
+          case 'bilibili':
+            action = formatBilibiliHistoryText(msg);
+            urlPart = formatBilibiliHistoryLinks(msg);
+            if (urlPart) urlPart = ` [${urlPart}]`;
+            break;
+          case 'douyin':
+            action = formatDouyinHistoryText(msg);
+            urlPart = formatDouyinHistoryLinks(msg);
+            if (urlPart) urlPart = ` [${urlPart}]`;
+            break;
           default:
             action = `发送了 ${msg.type} 类型消息`;
         }
@@ -273,10 +304,10 @@ export class MessageManager {
             if (separatorLength) {
               content += '，';
             }
-            content += action.substring(0, remainingLength) + '...';
+            content += safeTruncateUnicode(action, remainingLength, '...');
           } else if (content.length === 0) {
             // 第一条消息就超长，直接截断
-            content = action.substring(0, this.MESSAGE_MAX_LENGTH - 3) + '...';
+            content = safeTruncateUnicode(action, this.MESSAGE_MAX_LENGTH - 3, '...');
           } else {
             content += '...';
           }
@@ -308,7 +339,7 @@ export class MessageManager {
       }
 
       if (action.length > this.MESSAGE_MAX_LENGTH) {
-        content = action.substring(0, this.MESSAGE_MAX_LENGTH - 3) + '...';
+        content = safeTruncateUnicode(action, this.MESSAGE_MAX_LENGTH - 3, '...');
       } else {
         content = action;
       }
@@ -327,9 +358,16 @@ export class MessageManager {
    * @param {Object} message 消息对象
    * @returns {Promise<Object>} 格式化后的消息对象
    */
-  async formatMessage(message) {
+  async formatMessage(message, options = {}) {
     const isGroup = message.message_type === 'group';
     const isBot = message.sender.user_id === Bot.uin;
+    const enrichedMessage = Array.isArray(options.preEnrichedMessage)
+      ? options.preEnrichedMessage
+      : await enrichDouyinMessageSegments(
+        await enrichBilibiliMessageSegments(message.message, message.raw_message),
+        message.raw_message
+      );
+    const formattedMessage = { ...message, message: enrichedMessage };
 
     return {
       time: moment(message.time * 1000).format('YYYY-MM-DD HH:mm:ss'),
@@ -341,13 +379,14 @@ export class MessageManager {
         level: message.sender.level,
         identity: isBot ? '[Bot]' : this.getSenderTitle(message.sender, isGroup)  // 为 bot 添加标识
       },
-      content: await this.formatMessageContent(message),
+      content: await this.formatMessageContent(formattedMessage),
+      event_id: message.event_id || null,
       message_id: message.message_id,
       message_type: message.message_type,
       source: message.source || null,
       group_id: isGroup ? message.group_id : null,
       group_name: isGroup ? message.group_name : null,
-      message: message.message, // 保存原始消息用于后续处理
+      message: enrichedMessage,
       raw_message: message.raw_message
     };
   }
@@ -371,36 +410,44 @@ export class MessageManager {
    */
   async recordMessage(e, options = {}) {
     try {
-      if (!e.sender) {
-        e.sender = {
+      const event = {
+        ...e,
+        sender: e.sender || {
           user_id: Bot.uin,
           nickname: Bot.nickname,
           role: 'bot'
-        };
-      }
-      const isGroup = e.message_type === 'group';
-      const id = isGroup ? e.group_id : e.sender.user_id;
+        }
+      };
+      const isGroup = event.message_type === 'group';
+      const id = isGroup ? event.group_id : event.sender.user_id;
       const type = isGroup ? 'group' : 'private';
       const redisKey = this.getRedisKey(type, id);
 
-      let messages = await this.getMessages(type, id);
-      messages.unshift(await this.formatMessage(e)); // 在数组开头添加新消息
+      return await recentMessageWriteQueue.run(redisKey, async () => {
+        let messages = await this.getMessages(type, id, { throwOnError: true });
+        const formatted = await this.formatMessage(event, options);
+        const existingIndex = messages.findIndex(item => {
+          if (formatted.event_id) return String(item.event_id || '') === String(formatted.event_id)
+          return formatted.message_id !== undefined
+            && formatted.message_id !== null
+            && formatted.message_id !== ''
+            && String(item.message_id || '') === String(formatted.message_id)
+        });
+        if (existingIndex >= 0) messages[existingIndex] = formatted;
+        else messages.unshift(formatted);
 
-      // 使用自定义群聊消息上限或默认值
-      const maxMessages = isGroup
-        ? (options.groupMaxMessages || this.GROUP_MAX_MESSAGES)
-        : this.PRIVATE_MAX_MESSAGES;
+        const maxMessages = isGroup
+          ? (options.groupMaxMessages || this.GROUP_MAX_MESSAGES)
+          : this.PRIVATE_MAX_MESSAGES;
 
-      if (messages.length > maxMessages) {
-        messages = messages.slice(0, maxMessages); // 保留最新的消息
-      }
-
-      await redis.set(redisKey, JSON.stringify(messages), {
-        EX: this.CACHE_EXPIRE_DAYS * 24 * 60 * 60
+        if (messages.length > maxMessages) messages = messages.slice(0, maxMessages);
+        await redis.set(redisKey, JSON.stringify(messages), { EX: this.CACHE_EXPIRE_SECONDS });
+        return formatted;
       });
-
     } catch (error) {
       logger.error(`记录消息失败: ${error}`);
+      if (options.throwOnError) throw error;
+      return null;
     }
   }
 
@@ -410,7 +457,7 @@ export class MessageManager {
    * @param {number} id 用户ID或群ID
    * @returns {Promise<Array>} 消息历史数组
    */
-  async getMessages(type, id) {
+  async getMessages(type, id, options = {}) {
     try {
       const redisKey = this.getRedisKey(type, id);
       const data = await redis.get(redisKey);
@@ -423,6 +470,7 @@ export class MessageManager {
       });
     } catch (error) {
       logger.error(`获取消息历史失败: ${error}`);
+      if (options.throwOnError) throw error;
       return [];
     }
   }

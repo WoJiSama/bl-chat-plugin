@@ -9,6 +9,7 @@ import permission from "./permission.js"
 import groupGuard from "./groupGuard.js"
 import groupNotice from "./groupNotice.js"
 import messageArchive from "./messageArchive.js"
+import messagePipeline from "./messagePipeline.js"
 import persona from "./persona.js"
 import aiCore from "./aiCore.js"
 import tracking from "./tracking.js"
@@ -32,6 +33,7 @@ export const schemas = [
   groupGuard,
   groupNotice,
   messageArchive,
+  messagePipeline,
   tracking,
   aiModels,
   emotion,

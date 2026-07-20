@@ -4,6 +4,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
+import { safeTruncateUnicode } from "./unicodeText.js"
 
 const DEFAULT_SETTINGS = {
   connectTimeoutMs: 30000,
@@ -799,7 +800,7 @@ export class MCPClientManager {
 
     const limit = Number(maxChars || DEFAULT_SETTINGS.toolResultMaxChars)
     if (text.length > limit) {
-      text = `${text.slice(0, limit)}...(MCP工具结果已截断)`
+      text = safeTruncateUnicode(text, limit, "...(MCP工具结果已截断)")
     }
     return text
   }

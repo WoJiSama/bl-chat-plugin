@@ -2,6 +2,7 @@ import { extractFile } from '../../functions/tools/textract.js';
 import { getBufferFile } from '../../functions/tools/UploadFile.js';
 import { TotalTokens } from '../../functions/tools/CalculateToken.js';
 import { dependencies } from "../../dependence/dependencies.js";
+import { safeTruncateUnicode } from "../../utils/unicodeText.js";
 const { mimeTypes } = dependencies;
 
 /**
@@ -27,7 +28,7 @@ export async function processUploadedFile(fileUrl, fileName, userMessage, maxTok
     console.log('文件总 token:', tokens);
 
     const contentText = tokens > maxTokens
-      ? result.substring(0, maxTokens) + '...'
+      ? safeTruncateUnicode(result, maxTokens, '...')
       : result;
 
     const separator = '='.repeat(50);

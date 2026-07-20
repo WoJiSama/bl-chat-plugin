@@ -44,6 +44,22 @@ export class RedisStore {
     await this._setRaw(KEY.facts(groupId), JSON.stringify(slimGroupFacts(facts)))
   }
 
+  async getWorkflows(groupId) {
+    const value = await this._getJson(KEY.workflows(groupId), [])
+    return Array.isArray(value) ? value : []
+  }
+  async saveWorkflows(groupId, workflows) {
+    await this._setRaw(KEY.workflows(groupId), JSON.stringify(Array.isArray(workflows) ? workflows : []))
+  }
+
+  async getKnowledge(groupId) {
+    const value = await this._getJson(KEY.knowledge(groupId), [])
+    return Array.isArray(value) ? value : []
+  }
+  async saveKnowledge(groupId, entries) {
+    await this._setRaw(KEY.knowledge(groupId), JSON.stringify(Array.isArray(entries) ? entries : []))
+  }
+
   async getMeta(groupId) {
     return { ...DEFAULT_META, ...(await this._getJson(KEY.meta(groupId), {}) || {}) }
   }
@@ -52,7 +68,7 @@ export class RedisStore {
   }
 
   async clearGroup(groupId) {
-    const keys = [KEY.entities(groupId), KEY.alias(groupId), KEY.facts(groupId), KEY.meta(groupId)]
+    const keys = [KEY.entities(groupId), KEY.alias(groupId), KEY.facts(groupId), KEY.workflows(groupId), KEY.knowledge(groupId), KEY.meta(groupId)]
     for (const k of keys) await this.redis.del(k)
     return keys.length
   }

@@ -4,7 +4,9 @@ import { dependencies } from "../../dependence/dependencies.js"
 import fs from "fs"
 import YAML from "yaml"
 import path from "path"
+import { serializeMultipartFormData } from "../../utils/multipartFormData.js"
 const { mimeTypes } = dependencies
+const { FormData } = dependencies
 
 /**
  * 视频处理工具类，用于处理用户的视频相关请求
@@ -15,7 +17,7 @@ export class VideoAnalysisTool extends AbstractTool {
     this.name = "videoAnalysisTool"
     this.description =
       "视频分析工具。当用户需要分析、解读、评价、识别视频内容时调用，例如：『分析一下这个视频』『这视频讲什么』『评价一下』。" +
-      "支持两种来源：(1)当前消息中直接附带的视频；(2)引用消息（回复某条视频）中的视频。" +
+      "支持三种来源：(1)当前消息中直接附带的视频；(2)引用消息（回复某条视频）中的视频；(3)合并转发或嵌套转发中的视频。" +
       "你不需要在参数里传视频链接，工具会自动从当前消息或引用消息中提取，提取不到会返回错误。"
     this.parameters = {
       type: "object",
@@ -151,8 +153,12 @@ export class VideoAnalysisTool extends AbstractTool {
         .filter(Boolean)
     }
 
-    // 优先用当前消息中的视频，没有再用引用消息中的
-    return [...videosInMessage, ...quotedVideos]
+    const groupContextVideos = (e?._groupContextAssets?.videos || [])
+      .map(item => item?.source || item?.url)
+      .filter(Boolean)
+
+    // 优先用当前消息，其次引用消息，再读取合并转发/嵌套转发中的群内视频。
+    return [...new Set([...videosInMessage, ...quotedVideos, ...groupContextVideos])]
   }
 
   /**
@@ -164,13 +170,18 @@ export class VideoAnalysisTool extends AbstractTool {
     try {
       if (!apiKey) throw new Error("视频上传 API Key 未配置")
       const formData = new FormData()
-      const blob = new Blob([buffer], { type: "video/mp4" })
-      formData.append("file", blob, `video_${Date.now()}.mp4`)
+      formData.append("file", buffer, {
+        filename: `video_${Date.now()}.mp4`,
+        contentType: "video/mp4",
+        knownLength: buffer.length
+      })
+      const multipart = await serializeMultipartFormData(formData)
 
       const response = await fetch("https://www.bigmodel.cn/api/biz/file/uploadTemporaryImage", {
         method: "POST",
-        body: formData,
+        body: multipart.body,
         headers: {
+          ...multipart.headers,
           authorization: `Bearer ${apiKey}`,
         },
       })

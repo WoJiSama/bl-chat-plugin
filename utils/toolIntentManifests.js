@@ -1,6 +1,14 @@
+import { classifyEmojiToolExposure, getEmojiToolIntentPatterns } from "./emojiToolPolicy.js"
+import { buildExcelToolParams } from "./excelRequestPolicy.js"
+import { parseModrinthRequestOptions } from "./modrinth.js"
+import { extractGroupKnowledgeForgetTarget, isExplicitGroupKnowledgeForgetRequest } from "./groupKnowledgeForgetPolicy.js"
+
 function normalizeText(text = "") {
   return String(text || "")
     .replace(/\[CQ:[^\]]+\]/g, " ")
+    // TRSS strips a configured bot alias before this layer. Preserve the request
+    // while removing the punctuation left by forms such as "希洛，查一下...".
+    .replace(/^\s*[，,、。:：;；!?！？]+\s*/, "")
     .replace(/\s+/g, " ")
     .trim()
 }
@@ -94,23 +102,63 @@ const TOOL_INTENT_MANIFESTS = {
     ].join("\n")
   },
   sendLocalEmojiTool: {
-    triggers: [
-      /表情包|斗图|来.*表情|发.*表情|找.*表情|搜.*表情|配.*表情|来.*图|发.*图/
-    ],
+    triggers: getEmojiToolIntentPatterns(),
     disclosure: [
       "【sendLocalEmojiTool 详细用法】",
       "用途：从本地表情包库挑一张合适的表情包发送。",
+      "它是主对话的一种回复形态：不调用=纯文字；不填配文=纯表情；leadText 在表情前说，followUpText 在表情后补。请先规划整轮节奏，不要机械地每轮调用。",
       "调用边界：",
       "- 用户明确要表情包/斗图/发个表情时优先调用。",
-      "- 闲聊中需要轻微接梗、无语、笑死、害羞、得意等情绪反应时也可以少量调用。",
-      "- 严肃问答、技术排查、长说明、工具结果汇报时不要调用。",
+      "- 普通轻松闲聊中，如果表情比文字更自然，可以主动调用。",
+      "- 表情已经足够表达当前情绪时，只发表情包，不要填写任何配文。",
+      "- 需要先抛一句再甩图时填 leadText；表情之后仍有事实、行动或转折必须补充时填 followUpText。",
+      "- leadText 和 followUpText 默认只选一个；只有两段含义不同且表情放在中间明显更自然时才两边都填。",
+      "- 严肃问答、技术排查、长说明、工具结果汇报、群管理处理时不要调用。",
       "参数规则：",
-      "- query 要写成 10-30 字的情境描述，不要只写“开心/无语”两个字。",
-      "- followUpText 可选，用来先发一句短文字再发表情；用户只要表情时可以不填。",
+      "- tags 按相关度填写 1-5 个真实情绪标签，第一个是主情绪；例如无语、震惊、笑死、吐槽、尴尬、疲惫、委屈、安慰。",
+      "- useCases 可补 1-4 个真实场景；例如无言以对、看到离谱、接梗吐槽、群友翻车、场面尴尬、安慰对方。",
+      "- query 只补充标签未覆盖的短关键词，不要写完整场景长句。",
+      "- leadText/followUpText 都不超过 80 字，不要把一个句子的主谓宾拆到表情两侧。",
       "- 一次只发一张，别连发刷屏。",
       "等价例子：",
-      "- “来个无语表情包” -> {\"query\":\"听到离谱发言后无语又绷不住的表情\"}",
-      "- “希洛发个笑死的图” -> {\"query\":\"看到群友翻车想笑死接梗的表情\",\"followUpText\":\"笑死\"}"
+      "- “来个无语表情包” -> {\"tags\":[\"无语\",\"震惊\"],\"useCases\":[\"无言以对\",\"看到离谱\"]}",
+      "- 群友翻车时只想甩图 -> {\"tags\":[\"笑死\",\"吐槽\"],\"useCases\":[\"群友翻车\",\"接梗吐槽\"]}",
+      "- 先吐槽再甩图 -> {\"tags\":[\"无语\",\"吐槽\"],\"leadText\":\"你又来了\"}",
+      "- 甩图后补充到达信息 -> {\"tags\":[\"认怂\",\"无奈\"],\"useCases\":[\"认怂求饶\"],\"followUpText\":\"我马上到\"}"
+    ].join("\n")
+  },
+  mentionMembersTool: {
+    triggers: [
+      /(?:帮(?:我|忙)?|麻烦|请|可以|能不能)?[^\n]{0,40}(?:艾特|@|通知|喊(?:一下|人)?|叫(?:一下|人)?)/i
+    ],
+    disclosure: [
+      "【mentionMembersTool 详细用法】",
+      "用途：在当前群里真实艾特指定成员并发送通知。",
+      "调用边界：",
+      "- 只在用户明确要求通知/@具体成员，或已教会的群工作流明确匹配且当前用户要求执行时调用。",
+      "- targets 优先填可靠上下文给出的 QQ 号；没有明确对象时不要猜。",
+      "- 不要把普通讨论当作通知命令。",
+      "等价例子：",
+      "- ‘有人要挂团，帮我艾特’ -> 按群工作流提供的 targets 通知",
+      "- ‘通知 @小明和@小红开会’ -> targets=[小明,小红], message=开会"
+    ].join("\n")
+  },
+  forgetGroupKnowledgeTool: {
+    triggers: [
+      /(?:忘(?:掉|记)?|删(?:掉|除)?|清除|移除).{0,48}(?:记忆|群知识|记住|教会|定义|我的|我之前)/u,
+      /(?:我的|我之前|群里的?).{0,48}(?:记忆|群知识|记住|教会|定义)?.{0,24}(?:忘(?:掉|记)?|删(?:掉|除)?|清除|移除)/u
+    ],
+    disclosure: [
+      "【forgetGroupKnowledgeTool 详细用法】",
+      "用途：删除当前用户在当前群明确教会的某一条群知识。",
+      "调用边界：",
+      "- 只有用户明确说忘掉、删除、清除自己之前教会的群知识时调用。",
+      "- memory 填用户要忘掉的称呼；‘我的星怒’里的‘我的’必须保留。",
+      "- 工具只删除当前用户创建的唯一匹配项；找不到或多条候选时不会删除。",
+      "- 不能用于聊天记录、群文件本体、其他人的记忆或泛泛的‘忘了吧’。",
+      "等价例子：",
+      "- ‘忘掉我的星怒’ -> {\"memory\":\"我的星怒\"}",
+      "- ‘把我之前教你的地图删掉’ -> {\"memory\":\"地图\"}"
     ].join("\n")
   },
   emojiSearchTool: {
@@ -189,6 +237,64 @@ const TOOL_INTENT_MANIFESTS = {
       "- “把这段 Java 学习路线做成思维导图” -> {\"prompt\":\"Java 学习路线...\"}"
     ].join("\n")
   },
+  excelWorkbookTool: {
+    triggers: [
+      /Excel|\.xlsx\b|\.xlsm\b|工作簿|工作表|sheet|tab页|单元格/i,
+      /(?:表格|文件).{0,24}\b[A-Z]{1,3}[1-9]\d{0,6}\b/i,
+      /(?:查|看|读|告诉我).{0,20}\b[A-Z]{1,3}[1-9]\d{0,6}\b/i,
+      /(?:附近|周围|相邻).{0,20}(?:单元格|格子)|(?:单元格|格子).{0,30}(?:开头|结尾|包含|等于)/i
+    ],
+    disclosure: [
+      "【excelWorkbookTool 详细用法】",
+      "用途：读取用户当前、引用、最近上传或当前群文件仓库中的 .xlsx/.xlsm 工作簿；查询 tab、单元格、区域或搜索内容。",
+      "操作选择：",
+      "- 问群文件里有哪些 Excel/列出群文件表格 -> operation=list_group_excels，可用 query 过滤文件名",
+      "- 问有哪些 tab/sheet/工作表 -> operation=list_sheets",
+      "- 问某个格子（如 Sheet1 的 B7） -> operation=read_cell，sheetName=Sheet1，cell=B7",
+      "- 问一小块区域 -> operation=read_range，range=A1:D10",
+      "- 在某个 tab 里找文字、数字或公式 -> operation=find，query=关键词，可填 sheetName",
+      "- 用户说‘开头是/结尾是/完全等于/包含’时，把语义分别映射为 matchMode=starts_with/ends_with/exact/contains。不要要求用户改成固定格式。",
+      "- 用户说‘某个单元格附近/周围’时，从当前对话和上一轮 Excel 结果理解中心格，使用 operation=find + anchorCell；rowRadius/columnRadius 控制邻域。若用户明确给区域则改填 range。",
+      "- 用户只说‘附近’但上下文没有任何中心单元格时，不要编一个地址；省略 anchorCell，搜索指定 sheet 或整个工作簿。",
+      "- sheetName 既可填名称，也可填从 1 开始的序号；用户说第二个 tab 时直接填 sheetName=2，不要先 list_sheets。",
+      "- 用户问“与某概念相关”且原词可能不会字面出现时，可填写 relatedTerms；工具会区分原词精确命中与关联词命中。",
+      "结果规则：",
+      "- read_cell 会返回精确公式、工作簿保存的计算值和显示值；最终回复必须原样列出公式和值，禁止自行改写公式或猜计算结果。",
+      "- 用户上传/引用了文件时不要填写 fileUrl；工具会自动找文件。用户说“群文件里的预算.xlsx”时填写 fileName=预算.xlsx；同名时再填 folderPath。",
+      "- 只有用户明确给 HTTP/HTTPS Excel 链接时才填写 fileUrl。",
+      "- 如果用户既没说 sheet 名也没说序号，且工作簿有多个 tab，才先 list_sheets；明确说第几个时直接用序号。",
+      "- 旧版 .xls 不支持，提示另存为 .xlsx。",
+      "等价例子：",
+      "- “查一下预算表这个 tab 的 C12，公式和值都给我” -> {\"operation\":\"read_cell\",\"sheetName\":\"预算表\",\"cell\":\"C12\"}",
+      "- “在明细这个 sheet 里找订单 20260715” -> {\"operation\":\"find\",\"sheetName\":\"明细\",\"query\":\"20260715\",\"searchIn\":\"all\"}",
+      "- “这个 Excel 有哪些 tab” -> {\"operation\":\"list_sheets\"}",
+      "- “群文件里有哪些 Excel” -> {\"operation\":\"list_group_excels\"}",
+      "- “第二个 tab 里找跟 .st 有关的内容” -> {\"operation\":\"find\",\"sheetName\":\"2\",\"query\":\".st\",\"relatedTerms\":[\"属性\",\"技能\",\"STR\",\"CON\",\"DEX\",\"POW\",\"EDU\",\"SAN\"]}",
+      "- 上一轮刚查过 B40，用户接着说‘看附近有没有一个是尚虹叙开头的，告诉我单元格’ -> {\"operation\":\"find\",\"query\":\"尚虹叙\",\"matchMode\":\"starts_with\",\"anchorCell\":\"B40\",\"rowRadius\":10,\"columnRadius\":5}",
+      "- “查群文件预算.xlsx里预算表的 C12” -> {\"operation\":\"read_cell\",\"fileName\":\"预算.xlsx\",\"sheetName\":\"预算表\",\"cell\":\"C12\"}"
+    ].join("\n")
+  },
+  modrinthTool: {
+    triggers: [
+      /(?:^|[\s（(，,])Modrinth(?=.{0,36}(?:模组|mods?|排行|排名|前\s*\d+|热门|下载量|关注|版本|Fabric|Forge|NeoForge|Quilt))/i,
+      /(?:查|看|搜|告诉我|给我说|发我).{0,6}Modrinth(?=.{0,36}(?:模组|mods?|排行|排名|前\s*\d+|热门|下载量|关注|版本|Fabric|Forge|NeoForge|Quilt))/i,
+      /(?:MC|Minecraft|我的世界).{0,24}(?:模组|mod).{0,24}(?:排行|排名|前\s*\d+|热门|下载量|关注)/i,
+      /(?:模组|mod).{0,24}(?:排行|排名|前\s*\d+|热门|下载量|关注).{0,24}(?:MC|Minecraft|我的世界|Fabric|Forge|NeoForge|Quilt)/i
+    ],
+    disclosure: [
+      "【modrinthTool 详细用法】",
+      "用途：查询 Modrinth Minecraft 模组公开排名和英文原始简介。",
+      "参数规则：",
+      "- 默认 sort=downloads、limit=5。用户说下载量最高/热门前几 -> sort=downloads；关注最多 -> follows；最新发布 -> newest；最近更新 -> updated；带关键词找模组 -> relevance + query。",
+      "- 用户给出 MC 版本时填写 gameVersion，例如 1.21.1；给出 Fabric/Forge/NeoForge/Quilt 时填写 loader。",
+      "- 用户要求优化、冒险、装饰等分类时填写 Modrinth category slug，例如 optimization/adventure/decoration。",
+      "- 工具返回的是英文官方简介。最终每个项目必须同时展示英文简介和‘中文翻译（希洛）’，中文只能忠实翻译英文，不能自行补充功能或兼容结论。",
+      "- 只发项目页，绝不自动下载或发送 jar 文件。",
+      "等价例子：",
+      "- ‘查一下 Modrinth 1.21.1 Fabric 下载量前五的优化模组’ -> {\"sort\":\"downloads\",\"limit\":5,\"gameVersion\":\"1.21.1\",\"loader\":\"fabric\",\"category\":\"optimization\"}",
+      "- ‘Modrinth 最近更新的机械模组前 3 个’ -> {\"sort\":\"updated\",\"limit\":3,\"query\":\"technology\"}"
+    ].join("\n")
+  },
   textImageTool: {
     triggers: [
       /转成图片|生成图片版|长图|发成图|做成图|代码.*图片|Markdown.*图片|避免刷屏/
@@ -238,7 +344,7 @@ const TOOL_INTENT_MANIFESTS = {
   },
   changeCardTool: {
     triggers: [
-      /改群名片|改名片|改昵称|群昵称|把.*名字改成|改.*群名/
+      /改群名片|改名片|改昵称|群昵称|把.*名字改成|改.*群名|群名片.{0,12}(?:改成|改为|换成|换为)/
     ],
     disclosure: [
       "【changeCardTool 详细用法】",
@@ -280,6 +386,10 @@ export function selectToolIntentCandidates(text = "", availableToolNames = []) {
   const candidates = []
   for (const [toolName, manifest] of Object.entries(TOOL_INTENT_MANIFESTS)) {
     if (!available.has(toolName)) continue
+    if (toolName === "sendLocalEmojiTool") {
+      if (classifyEmojiToolExposure(content) !== "none") candidates.push(toolName)
+      continue
+    }
     if (manifest.triggers.some(pattern => pattern.test(content))) candidates.push(toolName)
   }
   return resolveCandidateConflicts(candidates, content)
@@ -288,7 +398,19 @@ export function selectToolIntentCandidates(text = "", availableToolNames = []) {
 function resolveCandidateConflicts(candidates = [], content = "") {
   let resolved = [...candidates]
 
+  // A reaction image must never turn an explicit operational request back into
+  // a free-form chat turn. Explicitly asking for an emoji remains an override.
+  if (resolved.includes("sendLocalEmojiTool") && classifyEmojiToolExposure(content) !== "explicit") {
+    const hasOperationalTool = resolved.some(name => name !== "sendLocalEmojiTool")
+    if (hasOperationalTool) {
+      resolved = resolved.filter(name => name !== "sendLocalEmojiTool")
+    }
+  }
+
   if (resolved.includes("githubRepoTool")) {
+    resolved = resolved.filter(name => name !== "webParserTool" && name !== "searchInformationTool")
+  }
+  if (resolved.includes("modrinthTool")) {
     resolved = resolved.filter(name => name !== "webParserTool" && name !== "searchInformationTool")
   }
 
@@ -311,4 +433,48 @@ export function buildToolIntentDisclosure(toolNames = []) {
 
 export function hasToolIntentManifest(toolName = "") {
   return Boolean(TOOL_INTENT_MANIFESTS[toolName])
+}
+
+function extractSingleUrl(text = "") {
+  const urls = String(text || "").match(/https?:\/\/[^\s<>"']+/gi) || []
+  if (urls.length !== 1) return ""
+  return urls[0].replace(/[，。！？、；：,.!?;:]+$/u, "")
+}
+
+const DETERMINISTIC_TOOL_RESOLVERS = {
+  forgetGroupKnowledgeTool: text => {
+    const memory = extractGroupKnowledgeForgetTarget(text)
+    return memory ? { memory } : null
+  },
+  excelWorkbookTool: (text, context) => buildExcelToolParams(text, {
+    hasExcelContext: context.hasExcelContext === true
+  }),
+  modrinthTool: text => parseModrinthRequestOptions(text),
+  githubRepoTool: text => {
+    const repoUrl = extractSingleUrl(text)
+    return /https?:\/\/github\.com\/[^/\s]+\/[^/\s]+/i.test(repoUrl) ? { repoUrl } : null
+  },
+  webParserTool: text => {
+    const url = extractSingleUrl(text)
+    return url && /(?:解析|总结|读取|看看|看下|提取|网页|页面|链接)/i.test(text) ? { url } : null
+  }
+}
+
+export function resolveDeterministicToolIntent(text = "", availableToolNames = [], context = {}) {
+  const candidates = selectToolIntentCandidates(text, availableToolNames)
+  if (candidates.length !== 1) return null
+  const toolName = candidates[0]
+  const resolver = DETERMINISTIC_TOOL_RESOLVERS[toolName]
+  if (!resolver) return null
+  const params = resolver(normalizeText(text), context)
+  if (!params || typeof params !== "object") return null
+  return { intent: "tool", toolName, params, reason: "deterministic_manifest" }
+}
+
+export function resolveToolRequestMergeMs(text = "", availableToolNames = [], options = {}) {
+  const defaultValue = Number(options.defaultMs)
+  const defaultMs = Number.isFinite(defaultValue) ? Math.max(0, defaultValue) : 3000
+  const fastValue = Number(options.fastMs)
+  const fastMs = Number.isFinite(fastValue) ? Math.max(0, fastValue) : 600
+  return resolveDeterministicToolIntent(text, availableToolNames, options) ? fastMs : defaultMs
 }

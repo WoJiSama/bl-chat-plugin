@@ -4,7 +4,8 @@ import {
   buildMissingImageAnalysisReply,
   looksLikeImageAuthenticityRequest,
   looksLikeImageVerificationRequest,
-  looksLikeVisualInspectionRequest
+  looksLikeVisualInspectionRequest,
+  shouldAskForMissingImageForVisualRequest
 } from '../utils/imageRequestGuard.js'
 
 test('detects visual inspection requests without explicit image word', () => {
@@ -15,6 +16,29 @@ test('detects visual inspection requests without explicit image word', () => {
 test('does not treat non-visual body advice as image inspection', () => {
   assert.equal(looksLikeVisualInspectionRequest('看看腿疼怎么办'), false)
   assert.equal(looksLikeVisualInspectionRequest('帮我看看腿怎么练'), false)
+})
+
+test('only asks for a missing image when the wording points to an image', () => {
+  assert.equal(shouldAskForMissingImageForVisualRequest('@这里是希洛! 看看腿'), false)
+  assert.equal(shouldAskForMissingImageForVisualRequest('帮我看看这个细节'), true)
+  assert.equal(shouldAskForMissingImageForVisualRequest('看一下这张图的腿'), true)
+})
+
+test('treats commentary about prior chat as conversation rather than a missing image', () => {
+  const cases = [
+    '希洛你能不能锐评一下他上面一直找项目的事情',
+    '锐评一下他上面说的话',
+    '评价一下他前面的发言',
+    '分析一下上面一直找工作的事情'
+  ]
+  for (const text of cases) {
+    assert.equal(looksLikeVisualInspectionRequest(text), false, text)
+    assert.equal(shouldAskForMissingImageForVisualRequest(text), false, text)
+    assert.equal(looksLikeImageVerificationRequest(text), false, text)
+  }
+  assert.equal(looksLikeVisualInspectionRequest('锐评一下这张图里的穿搭'), true)
+  assert.equal(shouldAskForMissingImageForVisualRequest('锐评一下这张图里的穿搭'), true)
+  assert.equal(shouldAskForMissingImageForVisualRequest('评价一下上面的穿搭'), true)
 })
 
 test('detects image-grounded verification and latest-info requests', () => {

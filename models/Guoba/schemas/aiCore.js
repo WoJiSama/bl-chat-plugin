@@ -21,6 +21,114 @@ export default [
   },
   {
     component: "Divider",
+    label: "Agent 智能路由"
+  },
+  {
+    field: "agentIntelligence.enabled",
+    label: "智能上下文与模型路由",
+    component: "Switch",
+    bottomHelpMessage: "启用相关历史选择、复杂请求升档和动态工具轮次"
+  },
+  {
+    field: "agentIntelligence.recentHistoryMessages",
+    label: "保留最近连续消息数",
+    component: "InputNumber",
+    componentProps: { min: 4, max: 30, placeholder: "10" }
+  },
+  {
+    field: "agentIntelligence.relevantHistoryMessages",
+    label: "补充相关历史消息数",
+    component: "InputNumber",
+    componentProps: { min: 0, max: 20, placeholder: "6" }
+  },
+  {
+    field: "agentIntelligence.maxSelectedHistoryMessages",
+    label: "最终上下文消息上限",
+    component: "InputNumber",
+    bottomHelpMessage: "从最近消息、引用邻居和相关历史中选择，不再原样堆满全部历史",
+    componentProps: { min: 8, max: 50, placeholder: "18" }
+  },
+  {
+    field: "agentIntelligence.complexModelRouting",
+    label: "复杂请求自动使用工具模型",
+    component: "Switch",
+    bottomHelpMessage: "长请求、多人物、引用指代、工具总结等场景自动升到 toolsAiConfig 模型"
+  },
+  {
+    field: "agentIntelligence.complexMaxToolRounds",
+    label: "复杂任务最大工具轮次",
+    component: "InputNumber",
+    componentProps: { min: 2, max: 6, placeholder: "3" }
+  },
+  {
+    component: "Divider",
+    label: "紧凑任务模型"
+  },
+  {
+    field: "taskAiConfig.translation.apiUrl",
+    label: "翻译任务 API URL",
+    component: "Input",
+    bottomHelpMessage: "留空时复用聊天模型；配置后 Modrinth 等短翻译任务使用此后端"
+  },
+  {
+    field: "taskAiConfig.translation.model",
+    label: "翻译任务模型",
+    component: "Input",
+    bottomHelpMessage: "按用途配置，不限制厂商或模型名称"
+  },
+  {
+    field: "taskAiConfig.translation.apiKey",
+    label: "翻译任务 API Key",
+    component: "InputPassword"
+  },
+  {
+    field: "taskAiConfig.translation.maxTokensField",
+    label: "翻译输出参数名",
+    component: "Select",
+    componentProps: {
+      options: [
+        { label: "max_tokens", value: "max_tokens" },
+        { label: "max_completion_tokens", value: "max_completion_tokens" }
+      ]
+    }
+  },
+  {
+    field: "taskAiConfig.translation.reasoningEffort",
+    label: "翻译推理强度",
+    component: "Input",
+    bottomHelpMessage: "后端支持时可填 low/none；留空不发送 reasoning_effort"
+  },
+  {
+    component: "Divider",
+    label: "回复节奏"
+  },
+  {
+    field: "replyRhythm.enabled",
+    label: "自然回复节奏",
+    component: "Switch",
+    bottomHelpMessage: "默认单条；只把短反应加独立补话拆成两条，并统一约束表情包位置"
+  },
+  {
+    field: "replyRhythm.maxTextMessages",
+    label: "单轮最多文字消息数",
+    component: "InputNumber",
+    componentProps: { min: 1, max: 2, placeholder: "2" }
+  },
+  {
+    field: "replyRhythm.maxEmojiReplyMessages",
+    label: "含表情时最多消息数",
+    component: "InputNumber",
+    bottomHelpMessage: "包括文字和表情包；设为 3 才允许少量文字-表情-文字结构",
+    componentProps: { min: 1, max: 3, placeholder: "3" }
+  },
+  {
+    field: "replyRhythm.allowThreePartEmojiReply",
+    label: "允许少量三段式表情回复",
+    component: "Switch",
+    bottomHelpMessage: "仅当表情前后两段含义不同且位置自然时使用，不代表每轮都拆三条"
+  },
+  {
+    component: "Divider",
     label: "理解增强"
   },
   {

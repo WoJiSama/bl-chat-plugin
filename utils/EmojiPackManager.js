@@ -4,6 +4,7 @@ import path from "path"
 import crypto from "crypto"
 import YAML from "yaml"
 import sharp from "sharp"
+import { buildEmojiCandidatePool, filterEmojiSelectionCriteriaToCatalog, normalizeEmojiSelectionCriteria, structuredEmojiRelevanceScore } from "./emojiSelection.js"
 
 const _path = process.cwd()
 const CONFIG_PATH = path.join(_path, "plugins/bl-chat-plugin/config/message.yaml")
@@ -23,6 +24,11 @@ const DEFAULT_EMOJI_CONFIG = {
   doReplace: false,
   enableMaintenance: false,
   checkIntervalMinutes: 10,
+  stalePruneEnabled: false,
+  staleDays: 30,
+  staleCandidatePoolSize: 20,
+  stalePruneCount: 1,
+  minItemsToKeep: 50,
   avoidRecentEnabled: true,
   avoidRecentCount: 20,
   avoidRecentTtlMinutes: 30,
@@ -40,6 +46,11 @@ const TAG_BLACKLIST = new Set([
   "插画", "立绘", "美术", "壁纸",
   "真人", "自拍", "明星"
 ])
+
+const COMMON_QUERY_STOPWORDS = [
+  "表情包", "表情", "来个", "发个", "找个", "配个", "一张", "一个",
+  "希洛", "帮我", "给我", "想要", "可以", "一下", "这种", "那种", "图片"
+]
 
 let instance = null
 
@@ -129,13 +140,95 @@ export class EmojiPackManager {
       return this.cache.items
     }
     const data = await fsp.readFile(this.dbPath, "utf-8")
+    let normalized = false
     const items = data.split("\n").map(line => {
       const trimmed = line.trim()
       if (!trimmed) return null
-      try { return JSON.parse(trimmed) } catch { return null }
+      try {
+        const item = JSON.parse(trimmed)
+        const changed = this.normalizeItem(item)
+        if (changed) normalized = true
+        return item
+      } catch { return null }
     }).filter(Boolean)
     this.cache = { mtimeMs: stat.mtimeMs, items, loaded: true }
+    if (normalized) this.scheduleSave(items)
     return items
+  }
+
+  getSelectionVocabularySync() {
+    this.refreshConfig()
+    let items = this.cache.loaded ? this.cache.items : []
+    if (!items.length && fs.existsSync(this.dbPath)) {
+      try {
+        items = fs.readFileSync(this.dbPath, "utf8")
+          .split("\n")
+          .map(line => line.trim())
+          .filter(Boolean)
+          .map(line => JSON.parse(line))
+      } catch (error) {
+        logWarn(`读取表情词表失败: ${error.message}`)
+        items = []
+      }
+    }
+
+    const countValues = field => {
+      const counts = new Map()
+      for (const item of items) {
+        for (const value of (Array.isArray(item?.[field]) ? item[field] : [])) {
+          const text = String(value || "").trim()
+          if (text) counts.set(text, (counts.get(text) || 0) + 1)
+        }
+      }
+      return [...counts.entries()]
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "zh-CN"))
+        .map(([value]) => value)
+    }
+
+    return { tags: countValues("tags"), useCases: countValues("useCases") }
+  }
+
+  normalizeItem(item) {
+    if (!item || typeof item !== "object") return false
+    let changed = false
+    if (!Array.isArray(item.tags)) { item.tags = []; changed = true }
+    const normalizedTags = [...new Set(item.tags.map(t => String(t).trim()).filter(Boolean).map(t => t.slice(0, 8)))]
+    if (JSON.stringify(normalizedTags) !== JSON.stringify(item.tags)) {
+      item.tags = normalizedTags
+      changed = true
+    }
+    if (!Array.isArray(item.useCases)) {
+      item.useCases = this.deriveUseCasesFromDescription(item.description)
+      changed = true
+    } else {
+      const normalized = [...new Set(item.useCases.map(t => String(t).trim()).filter(Boolean).map(t => t.slice(0, 16)))].slice(0, 8)
+      if (JSON.stringify(normalized) !== JSON.stringify(item.useCases)) {
+        item.useCases = normalized
+        changed = true
+      }
+    }
+    if (typeof item.description !== "string") { item.description = ""; changed = true }
+    if (typeof item.usedCount !== "number") { item.usedCount = Number(item.usedCount) || 0; changed = true }
+    if (!("lastUsedAt" in item)) { item.lastUsedAt = null; changed = true }
+    if (!item.registeredAt) { item.registeredAt = new Date().toISOString(); changed = true }
+    if (!("isBanned" in item)) { item.isBanned = false; changed = true }
+    return changed
+  }
+
+  deriveUseCasesFromDescription(description = "") {
+    const text = String(description || "")
+    const matches = []
+    const patterns = [
+      /(?:使用场景|场合|适合|用于|用来|群聊里)(?:是|：|:)?([^。；;\n]{2,24})/g,
+      /(?:看到|听到|被人|对方|群友)([^。；;\n]{2,18})(?:时|的时候)/g
+    ]
+    for (const pattern of patterns) {
+      let match
+      while ((match = pattern.exec(text)) && matches.length < 5) {
+        matches.push(match[1].replace(/[，,、]$/, "").trim())
+      }
+    }
+    return [...new Set(matches.filter(Boolean))].slice(0, 5)
   }
 
   async saveItems(items) {
@@ -237,10 +330,11 @@ export class EmojiPackManager {
       }
     }
 
-    // 第二道闸：库仍满（此时 doReplace 必为 true）→ LLM 决策替换
+    // 第二道闸：库仍满（此时 doReplace 必为 true）→ 先按冷门过期策略替换，再兜底 LLM
     if (items.length >= maxItems) {
       try {
-        const removedHash = await this.replaceOldestByLLM(items)
+        let removedHash = await this.pickStaleLowUsageHash(items)
+        if (!removedHash) removedHash = await this.replaceOldestByLLM(items)
         if (removedHash) {
           const removeIdx = items.findIndex(i => i.hash === removedHash)
           if (removeIdx >= 0) {
@@ -267,6 +361,7 @@ export class EmojiPackManager {
       hash,
       file,
       tags: [],
+      useCases: [],
       description: "",
       embedding: null,
       usedCount: 0,
@@ -280,6 +375,7 @@ export class EmojiPackManager {
       try {
         const tagResult = await this.tagWithVLM(buffer, ext)
         record.tags = tagResult.tags
+        record.useCases = tagResult.useCases
         record.description = tagResult.description
         if (!record.tags.length && !record.description) {
           throw new Error("VLM 未返回有效标签或描述")
@@ -303,8 +399,8 @@ export class EmojiPackManager {
 
     if (autoEmbed && this.config.useEmbedding !== false && record.description) {
       try {
-        // embedding 只用 description（详细 LLM 识别内容），不混 tags 避免短词稀释语义
-        record.embedding = await this.getEmbedding(record.description)
+        const embeddingText = this.buildSemanticText(record)
+        record.embedding = await this.getEmbedding(embeddingText)
       } catch (err) {
         logWarn(`embedding 生成失败 (${hash.slice(0, 8)}): ${err.message}`)
       }
@@ -359,7 +455,7 @@ export class EmojiPackManager {
     const prepared = await this.prepareVLMImage(buffer, ext)
     const dataUrl = `data:${prepared.mime};base64,${prepared.buffer.toString("base64")}`
 
-    const prompt = `请观察这张表情包图片，输出严格的 JSON 格式（不要 markdown 代码块），只包含两个字段：
+    const prompt = `请观察这张表情包图片，输出严格的 JSON 格式（不要 markdown 代码块），只包含三个字段：
 
 - "description": **详细描述这张表情包**（40-120 字），要覆盖三层信息：
   1. **画面**：图里是什么角色（猫/狗/动漫角色/人物）、在做什么动作（捂脸/翻白眼/竖中指/比心）、有什么文字（如"我谢谢你""绷不住了"）
@@ -368,6 +464,8 @@ export class EmojiPackManager {
   描述要具体，不要写"一张表情包图片"这种废话。
 
 - "tags": 3-5 个**情绪/反应**标签（每个不超过 4 个字）。例：开心、笑死、无奈、吐槽、惊讶、嘲讽、卖萌、震惊、敷衍、崩溃、得意、委屈、傲娇、社死、摆烂、绝望、心动。**禁止**用画风/物体词（卡通形象、二次元、插画、可爱、动物、猫咪）。
+
+- "use_cases": 3-5 个**使用场景**短标签（每个 2-10 字）。要写“什么时候发”，不要写画面物体。例：看到离谱、群友翻车、被人夸奖、想装无辜、拒绝加班、无言以对、轻微嘲讽、安慰对方、接梗吐槽、认怂求饶。
 
 只输出 JSON，不要任何其他文字。`
 
@@ -397,6 +495,13 @@ export class EmojiPackManager {
             .map(t => t.slice(0, 4))
             .slice(0, 5)
         : [],
+      useCases: Array.isArray(parsed.use_cases) || Array.isArray(parsed.useCases)
+        ? (parsed.use_cases || parsed.useCases)
+            .map(t => String(t).trim())
+            .filter(Boolean)
+            .map(t => t.slice(0, 10))
+            .slice(0, 5)
+        : this.deriveUseCasesFromDescription(parsed.description),
       description: String(parsed.description || "").slice(0, 300)
     }
   }
@@ -517,6 +622,50 @@ ${list}
     return sample[idx].hash
   }
 
+  isStaleForPrune(item, now = Date.now()) {
+    const staleDays = Math.max(1, Number(this.config.staleDays) || 30)
+    const cutoff = now - staleDays * 24 * 60 * 60 * 1000
+    if (!item.lastUsedAt) return true
+    const t = new Date(item.lastUsedAt).getTime()
+    return !Number.isFinite(t) || t < cutoff
+  }
+
+  pickStaleLowUsageHash(items) {
+    const minKeep = Math.max(0, Number(this.config.minItemsToKeep) || 50)
+    if (!Array.isArray(items) || items.length <= minKeep) return null
+    const now = Date.now()
+    const poolSize = Math.max(1, Number(this.config.staleCandidatePoolSize) || 20)
+    const candidates = items
+      .filter(item => !item.isBanned && this.isStaleForPrune(item, now))
+      .sort((a, b) => {
+        const usageDiff = (a.usedCount || 0) - (b.usedCount || 0)
+        if (usageDiff !== 0) return usageDiff
+        const at = a.lastUsedAt ? new Date(a.lastUsedAt).getTime() : 0
+        const bt = b.lastUsedAt ? new Date(b.lastUsedAt).getTime() : 0
+        return at - bt
+      })
+      .slice(0, poolSize)
+    if (!candidates.length) return null
+    return candidates[Math.floor(Math.random() * candidates.length)].hash
+  }
+
+  async pruneStaleLowUsage(items, removeCount = null) {
+    const count = Math.max(0, Number(removeCount ?? this.config.stalePruneCount) || 0)
+    if (!count) return { removed: 0, removedItems: [] }
+    const removedItems = []
+    for (let i = 0; i < count; i++) {
+      const hash = this.pickStaleLowUsageHash(items)
+      if (!hash) break
+      const idx = items.findIndex(item => item.hash === hash)
+      if (idx < 0) break
+      const [removed] = items.splice(idx, 1)
+      const abs = path.join(this.storeDir, path.basename(removed.file))
+      try { await fsp.unlink(abs) } catch {}
+      removedItems.push(removed)
+    }
+    return { removed: removedItems.length, removedItems }
+  }
+
   async getEmbedding(input) {
     const cfg = this.embeddingAiConfig
     if (!cfg?.embeddingApiUrl || !cfg?.embeddingApiKey || cfg.embeddingApiKey.includes("sk-xxx")) {
@@ -533,6 +682,70 @@ ${list}
     }
     const json = await response.json()
     return json.data?.[0]?.embedding || null
+  }
+
+  buildSemanticText(item) {
+    const tags = Array.isArray(item?.tags) ? item.tags.join("，") : ""
+    const useCases = Array.isArray(item?.useCases) ? item.useCases.join("，") : ""
+    return [
+      item?.description ? `描述：${item.description}` : "",
+      tags ? `情绪标签：${tags}` : "",
+      useCases ? `使用场景：${useCases}` : ""
+    ].filter(Boolean).join("\n")
+  }
+
+  tokenizeQuery(text) {
+    const lower = String(text || "").toLowerCase()
+    const cleaned = COMMON_QUERY_STOPWORDS.reduce((acc, word) => acc.replaceAll(word, " "), lower)
+      .replace(/[^\p{L}\p{N}\s]+/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+    const words = cleaned.split(/\s+/).filter(Boolean)
+    const chunks = []
+    const chineseParts = cleaned.match(/[\p{Script=Han}]{2,}/gu) || []
+    for (const part of chineseParts) {
+      if (part.length <= 4) {
+        chunks.push(part)
+        continue
+      }
+      for (let len = 2; len <= 4; len++) {
+        for (let i = 0; i <= part.length - len; i++) chunks.push(part.slice(i, i + len))
+      }
+    }
+    return [...new Set([...words, ...chunks].filter(t => t.length >= 2))]
+  }
+
+  localTextRelevanceScore(item, query) {
+    const q = String(query || "").toLowerCase().trim()
+    if (!q) return 0
+    const tokens = this.tokenizeQuery(q)
+    if (!tokens.length) return 0
+    const tags = Array.isArray(item.tags) ? item.tags.map(t => String(t).toLowerCase()) : []
+    const useCases = Array.isArray(item.useCases) ? item.useCases.map(t => String(t).toLowerCase()) : []
+    const description = String(item.description || "").toLowerCase()
+
+    let score = 0
+    for (const token of tokens) {
+      if (tags.some(tag => tag === token || tag.includes(token) || token.includes(tag))) score += 0.32
+      if (useCases.some(scene => scene === token || scene.includes(token) || token.includes(scene))) score += 0.24
+      if (description.includes(token)) score += 0.08
+    }
+    const fullText = [...tags, ...useCases, description].join(" ")
+    for (const phrase of [...tags, ...useCases]) {
+      if (phrase && q.includes(phrase)) score += 0.18
+    }
+    if (fullText.includes(q)) score += 0.2
+    return Math.min(1, score)
+  }
+
+  localRelevanceScore(item, input) {
+    const criteria = normalizeEmojiSelectionCriteria(input)
+    const structuredScore = structuredEmojiRelevanceScore(item, criteria)
+    const textScore = this.localTextRelevanceScore(item, criteria.query)
+
+    if (!structuredScore) return textScore
+    // query 只用于轻量打破同标签候选的并列，不允许自由文本盖过精确 tag/useCase。
+    return Math.min(1, structuredScore + (textScore * 0.06))
   }
 
   cosineSimilarity(a, b) {
@@ -623,14 +836,10 @@ ${list}
    * 3) 加权 —— score³ × min(1.5, usageFactor)，让 score 主导，避免冷图碾压热图
    * candidates: [{ item, score }]，score 在 [0,1]
    */
-  weightedSampleByUsage(candidates) {
+  weightedSampleByUsage(candidates, options = {}) {
     if (!candidates?.length) return null
 
-    const sorted = [...candidates].sort((a, b) => (b.score || 0) - (a.score || 0))
-    const topScore = sorted[0].score || 0
-    const eligibleMin = Math.max(0.6, topScore - 0.1)
-    const eligible = sorted.filter(c => (c.score || 0) >= eligibleMin)
-    const pool = eligible.length >= 2 ? eligible : sorted.slice(0, Math.min(3, sorted.length))
+    const pool = buildEmojiCandidatePool(candidates, options)
 
     const now = Date.now()
     const cooldownPenalty = (lastUsedAt) => {
@@ -660,7 +869,7 @@ ${list}
     return pool[pool.length - 1]
   }
 
-  async selectEmoji(query, options = {}) {
+  async selectEmoji(input, options = {}) {
     this.refreshConfig()
     const allItems = await this.loadItems()
     const usableAll = allItems.filter(i => {
@@ -681,12 +890,28 @@ ${list}
       }
     }
 
-    const q = String(query || "").trim()
+    const requestedCriteria = normalizeEmojiSelectionCriteria(input)
+    const criteria = filterEmojiSelectionCriteriaToCatalog(requestedCriteria, usableAll)
+    const q = criteria.query
     const useEmbed = this.config.useEmbedding !== false
     const hasEmbedCfg = !!(this.embeddingAiConfig?.embeddingApiUrl
       && this.embeddingAiConfig?.embeddingApiKey
       && !String(this.embeddingAiConfig.embeddingApiKey).includes("sk-xxx"))
     const embeddedItems = items.filter(i => Array.isArray(i.embedding) && i.embedding.length)
+
+    // L0: 本地标签/使用场景召回。命中明确标签时不需要调用 embedding，省钱且更稳定。
+    if (q) {
+      const localRanked = items
+        .map(item => ({ item, score: this.localRelevanceScore(item, criteria) }))
+        .filter(r => r.score >= 0.18)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, Math.max(3, Number(this.config.selectionTopK) || 5))
+      if (localRanked.length) {
+        const preserveStrongMatch = criteria.tags.length > 0 || criteria.useCases.length > 0
+        const picked = this.weightedSampleByUsage(localRanked, { preserveStrongMatch })
+        return { item: picked.item, strategy: "tag_scene", score: picked.score, criteria }
+      }
+    }
 
     // L1: embedding 召回（基于 LLM 识别的 description）
     if (q && useEmbed && hasEmbedCfg && embeddedItems.length) {
@@ -702,7 +927,7 @@ ${list}
             .slice(0, topK)
           if (ranked.length) {
             const picked = this.weightedSampleByUsage(ranked)
-            return { item: picked.item, strategy: "embedding" }
+            return { item: picked.item, strategy: "embedding", score: picked.score, criteria }
           }
         }
       } catch (err) {
@@ -715,7 +940,7 @@ ${list}
     // 让所有候选通过相关性门，由 usageFactor + cooldownPenalty 主导多样性
     const fallback = items.map(item => ({ item, score: 0.7 }))
     const picked = this.weightedSampleByUsage(fallback)
-    return { item: picked.item, strategy: "fallback_random" }
+    return { item: picked.item, strategy: "fallback_random", score: picked.score, criteria }
   }
 
   scheduleSave(items) {
@@ -777,10 +1002,11 @@ ${list}
     try {
       const tagResult = await this.tagWithVLM(buffer, ext)
       target.tags = tagResult.tags
+      target.useCases = tagResult.useCases
       target.description = tagResult.description
       if (this.config.useEmbedding !== false && target.description) {
         try {
-          target.embedding = await this.getEmbedding(target.description)
+          target.embedding = await this.getEmbedding(this.buildSemanticText(target))
         } catch (err) {
           logWarn(`重新打标 embedding 失败: ${err.message}`)
         }
@@ -801,6 +1027,7 @@ ${list}
     return {
       total: items.length,
       tagged: items.filter(i => Array.isArray(i.tags) && i.tags.length).length,
+      useCaseTagged: items.filter(i => Array.isArray(i.useCases) && i.useCases.length).length,
       embedded: items.filter(i => Array.isArray(i.embedding) && i.embedding.length).length,
       banned: items.filter(i => i.isBanned).length,
       maxItems: this.config.maxItems || 200,
@@ -808,7 +1035,8 @@ ${list}
       autoCollect: !!this.config.autoCollect,
       contentFiltration: !!this.config.contentFiltration,
       doReplace: !!this.config.doReplace,
-      enableMaintenance: !!this.config.enableMaintenance
+      enableMaintenance: !!this.config.enableMaintenance,
+      stalePruneEnabled: this.config.stalePruneEnabled === true
     }
   }
 
@@ -840,7 +1068,7 @@ ${list}
     if (!this.config.enabled) return { skipped: true }
     const items = await this.loadItems(true)
     let changed = false
-    const report = { markedMissing: 0, unmarkedRestored: 0, orphanRegistered: 0, cleanedUntagged: 0 }
+    const report = { markedMissing: 0, unmarkedRestored: 0, orphanRegistered: 0, cleanedUntagged: 0, prunedStale: 0, prunedHashes: [] }
 
     // 1. 记录指向的文件不存在 → 标记 noFileFlag
     for (const item of items) {
@@ -873,6 +1101,7 @@ ${list}
           hash: hashFromName.toLowerCase(),
           file: `emoji_files/${f}`,
           tags: [],
+          useCases: [],
           description: "",
           embedding: null,
           usedCount: 0,
@@ -905,6 +1134,17 @@ ${list}
         }
       }
       if (report.cleanedUntagged) logInfo(`维护：清理 ${report.cleanedUntagged} 个无标签无向量的残废记录（含磁盘文件）`)
+    }
+
+    // 4. 可选：冷门过期淘汰。只在显式开启时执行，避免默认误删用户收藏。
+    if (this.config.stalePruneEnabled === true) {
+      const pruneResult = await this.pruneStaleLowUsage(items)
+      if (pruneResult.removed) {
+        report.prunedStale = pruneResult.removed
+        report.prunedHashes = pruneResult.removedItems.map(item => item.hash.slice(0, 8))
+        changed = true
+        logInfo(`维护：淘汰 ${report.prunedStale} 个冷门过期表情 [${report.prunedHashes.join(",")}]`)
+      }
     }
 
     if (changed) await this.saveItems(items)

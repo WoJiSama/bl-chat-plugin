@@ -142,6 +142,13 @@ export default [
     componentProps: { min: 0, max: 5000, step: 100, placeholder: "3000" }
   },
   {
+    field: "smartTrigger.toolRequestMergeMs",
+    label: "明确工具合并窗口 (ms)",
+    component: "InputNumber",
+    bottomHelpMessage: "唯一工具且参数可确定时使用更短窗口；开放式请求和图片任务不受影响",
+    componentProps: { min: 0, max: 3000, step: 100, placeholder: "600" }
+  },
+  {
     field: "smartTrigger.directTriggerMergeMaxMessages",
     label: "触发合并保留条数",
     component: "InputNumber",

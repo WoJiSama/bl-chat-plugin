@@ -1,5 +1,6 @@
 import puppeteer from "../../../lib/puppeteer/puppeteer.js";
 import Qqinfo from "../model/qqinfo.js";
+import { collectMentionTargetIds } from "../utils/mentionTargets.js";
 export class QQinfo extends plugin {
     constructor() {
         super({
@@ -18,11 +19,8 @@ export class QQinfo extends plugin {
 
     async getInfo(e) {
         const bot = e.bot ?? Bot
-        let atMsg
-        atMsg = e.message?.filter(msg => {
-            return msg.type == "at"
-        })[0]
-        let mid = atMsg?.qq || e.msg.replace(/#| |查询qq/g, "")
+        const mentionedUserId = collectMentionTargetIds(e, bot.uin)[0]
+        let mid = mentionedUserId || e.msg.replace(/#| |查询qq/g, "")
         if (mid == "") {
             return e.reply("请输入qq号或者直接艾特再发送命令", true)
         }

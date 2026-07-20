@@ -25,6 +25,7 @@
     "chalk": "1.0.0",
     "crypto-js": "^4.2.0",
     "dotenv": "^16.4.5",
+    "exceljs": "^4.4.0",
     "fetch-undici": "^3.0.1",
     "form-data": "^4.0.0",
     "https-proxy-agent": "^7.0.4",

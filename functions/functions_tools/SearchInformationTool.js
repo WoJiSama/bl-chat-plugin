@@ -3,6 +3,7 @@ import { TotalTokens } from "../../functions/tools/CalculateToken.js";
 import fs from "fs";
 import YAML from "yaml";
 import path from "path";
+import { safeTruncateUnicode } from "../../utils/unicodeText.js";
 /**
  * Search 工具类，用于自由搜索并控制返回结果的大小
  */
@@ -43,7 +44,7 @@ export class SearchInformationTool extends AbstractTool {
     // 如果超出限制，按比例截断文本
     const ratio = this.maxTokens / tokens.completion_tokens;
     const truncatedLength = Math.floor(text.length * ratio);
-    const truncated = text.substring(0, truncatedLength);
+    const truncated = safeTruncateUnicode(text, truncatedLength);
 
     return `${truncated}\n\n[注意：结果已截断，显示内容已达到长度限制]`;
   }

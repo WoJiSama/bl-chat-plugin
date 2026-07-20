@@ -1,5 +1,7 @@
 import fs from "fs"
 import path from "path"
+import { safeTruncateUnicode } from "./unicodeText.js"
+import { buildExpressionObservation } from "./expressionSequence.js"
 
 const DEFAULT_CONFIG = {
   enabled: true,
@@ -16,7 +18,9 @@ const DEFAULT_CONFIG = {
   autoSummaryEnabled: true,
   autoSummaryMinNewSamples: 300,
   autoSummaryCooldownHours: 12,
-  autoSummaryMinTotalSamples: 120
+  autoSummaryMinTotalSamples: 120,
+  sequenceWindowMs: 20000,
+  maxSequenceTurns: 3
 }
 
 const TONE_WORDS = ["草", "笑死", "绷", "啊？", "诶", "确实", "离谱", "好吧", "不是", "哈哈", "呃", "唔"]
@@ -57,6 +61,12 @@ const ESSENCE_RULES = [
     label: "解释收紧",
     rule: "解释复杂事情时按“结论-原因-下一步”组织，少用首先其次总结。",
     pattern: text => /结论|原因|所以|因为|简单说|换句话/.test(text)
+  },
+  {
+    key: "multi_message_rhythm",
+    label: "整轮消息节奏",
+    rule: "学习整轮而非单句：默认一条；短反应加独立补话可分两条；表情包只占一个有明确作用的位置，不要每轮都拆分。",
+    pattern: text => /\[下一条\]|\[表情包\]/.test(text)
   }
 ]
 
@@ -90,6 +100,12 @@ const DROSS_RULES = [
     label: "讲大道理",
     rule: "避免无请求时突然讲大道理或长篇说教。",
     pattern: /我们应该|大家都要|从本质上来说|这告诉我们|综上所述/
+  },
+  {
+    key: "antagonistic_flirting",
+    label: "批评时顶嘴调情",
+    rule: "用户在批评、纠正或表达不舒服时，不要顶嘴、抬杠、调情或用挑衅表情。",
+    pattern: /你别教我做事|别气嘛|不跟你犟|你舍得嘛|凭啥|想得美|😋|❤/
   }
 ]
 
@@ -125,6 +141,8 @@ function normalizeConfig(config = {}) {
     autoSummaryMinNewSamples: safeNumber(config.autoSummaryMinNewSamples, DEFAULT_CONFIG.autoSummaryMinNewSamples, 20, 100000),
     autoSummaryCooldownHours: safeNumber(config.autoSummaryCooldownHours, DEFAULT_CONFIG.autoSummaryCooldownHours, 1, 720),
     autoSummaryMinTotalSamples: safeNumber(config.autoSummaryMinTotalSamples, DEFAULT_CONFIG.autoSummaryMinTotalSamples, 10, 100000),
+    sequenceWindowMs: safeNumber(config.sequenceWindowMs, DEFAULT_CONFIG.sequenceWindowMs, 3000, 120000),
+    maxSequenceTurns: safeNumber(config.maxSequenceTurns, DEFAULT_CONFIG.maxSequenceTurns, 2, 5),
     baseDir: config.baseDir || DEFAULT_CONFIG.baseDir
   }
 }
@@ -137,14 +155,20 @@ function cleanText(text = "") {
 }
 
 function sanitizeSample(text = "") {
-  return cleanText(text)
+  return safeTruncateUnicode(cleanText(text)
     .replace(/https?:\/\/\S+/gi, "[链接]")
     .replace(/www\.\S+/gi, "[链接]")
     .replace(/@\S{1,24}/g, "@某人")
     .replace(/\b\d{5,12}\b/g, "[数字]")
     .replace(/\s+/g, " ")
-    .slice(0, 140)
-    .trim()
+    .trim(), 140)
+}
+
+function sanitizeSequenceSample(items = []) {
+  return safeTruncateUnicode(items
+    .map(item => item === "[表情包]" ? item : sanitizeSample(item))
+    .filter(Boolean)
+    .join(" [下一条] "), 280)
 }
 
 function inc(map, key, amount = 1) {
@@ -378,6 +402,8 @@ export class GlobalStyleLearnerManager {
     this.dirty = false
     this.flushTimer = null
     this.autoSummaryRunning = false
+    this.recentSpeakerSequences = new Map()
+    this.lastGroupSequenceSpeaker = new Map()
   }
 
   getDataDir(config = {}) {
@@ -433,12 +459,25 @@ export class GlobalStyleLearnerManager {
     const cfg = normalizeConfig(config)
     if (!cfg.enabled) return
     const text = cleanText(e?.msg || e?.raw_message || "")
-    if (!text || text.length < 2) return
+    const sequenceText = buildExpressionObservation(e?.msg || e?.raw_message || "", {
+      userId: e?.user_id,
+      messageId: e?.message_id,
+      message: e?.message
+    })?.sample || ""
+    if ((!text || text.length < 2) && !sequenceText) return
     if (/^[#＃.。]\S+/.test(text)) return
     if (String(e?.user_id || "") === String(globalThis.Bot?.uin || "")) return
 
     const memory = this.readMemory(cfg)
     const groupId = String(e?.group_id || "private")
+    const sequenceRecorded = this.observeSpeakerSequence(e, sequenceText, cfg, memory)
+    if (!text || text.length < 2) {
+      if (sequenceRecorded) {
+        memory.updatedAt = nowIso()
+        this.scheduleFlush(cfg)
+      }
+      return
+    }
     const length = [...text].length
     memory.totalSamples += 1
     inc(memory.groupCount, groupId)
@@ -494,6 +533,66 @@ export class GlobalStyleLearnerManager {
     }
     memory.updatedAt = nowIso()
     this.scheduleFlush(cfg)
+  }
+
+  observeSpeakerSequence(e, text = "", cfg = normalizeConfig(), memory = this.readMemory(cfg)) {
+    const content = String(text || "").trim()
+    if (!content) return false
+    const groupId = String(e?.group_id || "private")
+    const userId = String(e?.user_id || "")
+    if (!userId) return false
+    const key = `${groupId}:${userId}`
+    const lastSpeaker = this.lastGroupSequenceSpeaker.get(groupId)
+    if (lastSpeaker && lastSpeaker !== userId) this.recentSpeakerSequences.delete(key)
+    this.lastGroupSequenceSpeaker.set(groupId, userId)
+    const now = Date.now()
+    const previous = this.recentSpeakerSequences.get(key)
+    const messageId = String(e?.message_id || "")
+    const withinWindow = previous && now - previous.at <= cfg.sequenceWindowMs
+    const differentMessage = !messageId || !previous?.messageId || messageId !== previous.messageId
+    const items = withinWindow && differentMessage
+      ? [...previous.items, content].slice(-cfg.maxSequenceTurns)
+      : [content]
+    this.recentSpeakerSequences.set(key, { at: now, messageId, items })
+
+    if (this.recentSpeakerSequences.size > 300) {
+      for (const [entryKey, entry] of this.recentSpeakerSequences) {
+        if (now - entry.at > cfg.sequenceWindowMs * 2) this.recentSpeakerSequences.delete(entryKey)
+      }
+    }
+    if (items.length < 2) return false
+
+    const sample = sanitizeSequenceSample(items)
+    if (!sample) return false
+    memory.totalSequenceSamples = (Number(memory.totalSequenceSamples) || 0) + 1
+    inc(memory.featureCount, "multi_message_sequence")
+    inc(memory.essence, "multi_message_rhythm")
+    if (items.includes("[表情包]") || items.some(item => item.includes("[表情包]"))) {
+      inc(memory.featureCount, "emoji_interleave_sequence")
+    }
+    memory.recentSignals = [
+      {
+        at: nowIso(),
+        groupId,
+        essence: ["multi_message_rhythm"],
+        dross: [],
+        hash: this.hashText(sample),
+        sequence: true
+      },
+      ...(memory.recentSignals || [])
+    ].slice(0, cfg.maxRecentSignals)
+    memory.samplePool = [
+      {
+        at: nowIso(),
+        groupId,
+        text: sample,
+        essence: ["multi_message_rhythm"],
+        dross: [],
+        sequence: true
+      },
+      ...(memory.samplePool || [])
+    ].slice(0, cfg.summarySampleLimit * 3)
+    return true
   }
 
   hashText(text = "") {
@@ -612,6 +711,7 @@ export class GlobalStyleLearnerManager {
         content: [
           "你是聊天机器人希洛的全局表达学习总结器。",
           "任务是从跨群样本里取其精华、去其糟粕，生成可长期注入的表达准则。",
+          "样本中的 [下一条] 表示同一群友短时间内继续发下一条，[表情包] 表示该位置发了表情包；学习整轮节奏和位置，不要照抄具体内容。",
           "不要模仿具体群友，不要吸收人身攻击、歧视、隐私、群内私梗、阴阳怪气和客服腔。",
           "只输出严格 JSON，不要 Markdown。"
         ].join("\n")

@@ -11,6 +11,8 @@ import { Embeddings, cosineSimilarity } from './memory/embeddings.js'
 import { Reflector } from './memory/reflector.js'
 import { clamp, compactText, AUTHORITY_RANK } from './memory/constants.js'
 import { memStats } from './memory/stats.js'
+import { formatGroupWorkflowExecutionPrompt, selectRelevantGroupWorkflowRules } from './memory/groupWorkflow.js'
+import { findGroupKnowledgeDeletionCandidates, formatGroupKnowledgePrompt, parseSemanticGroupKnowledgeOutput, selectRelevantGroupKnowledge, shouldUseSemanticGroupKnowledgeExtraction } from './memory/groupKnowledge.js'
 
 const DAY_MS = 86400000
 
@@ -36,10 +38,27 @@ const DEFAULT_CONFIG = {
   recallMaxMentionedEntities: 3,
   proactiveWindowDaysBefore: 3,
   proactiveWindowDaysAfter: 7,
-  semanticDupCosine: 0.88
+  semanticDupCosine: 0.88,
+  maxGroupWorkflows: 50,
+  workflowPromptMaxRules: 12,
+  maxGroupKnowledge: 100,
+  knowledgePromptMaxEntries: 8
 }
 
 function nowMs() { return Date.now() }
+
+function membersFromContext(memberMap, text = '') {
+  if (!memberMap?.values) return []
+  const query = String(text || '').toLowerCase()
+  return Array.from(memberMap.values())
+    .filter(member => member?.user_id)
+    .filter(member => {
+      const name = String(member.card || member.nickname || '').trim().toLowerCase()
+      return name.length >= 2 && query.includes(name)
+    })
+    .map(member => ({ userId: String(member.user_id), displayName: compactText(member.card || member.nickname || member.user_id, 80) }))
+    .slice(0, 12)
+}
 
 export class MemoryManager {
   constructor(config = {}, { redis } = {}) {
@@ -332,6 +351,166 @@ export class MemoryManager {
       query,
       config: this.config
     })
+  }
+
+  // ---- 明确教学的群工作流（独立于普通事实，具备执行语义）----
+  async upsertGroupWorkflowRules(groupId, rules = []) {
+    if (!this.config.enabled || !Array.isArray(rules) || !rules.length) return { written: 0, rules: [] }
+    return this.enqueueGroup(groupId, async () => {
+      const meta = await this.store.getMeta(groupId)
+      if (meta.disabled) return { written: 0, rules: [] }
+      const existing = await this.store.getWorkflows(groupId)
+      const next = Array.isArray(existing) ? [...existing] : []
+      const saved = []
+      for (const raw of rules) {
+        const condition = compactText(raw?.condition, 120)
+        const targetUserIds = [...new Set((Array.isArray(raw?.targetUserIds) ? raw.targetUserIds : [])
+          .map(value => String(value || '').trim())
+          .filter(value => /^\d+$/.test(value)))]
+        if (!condition || !targetUserIds.length || raw?.kind !== 'mention_members') continue
+        const conditionKey = compactText(raw?.conditionKey || condition.toLowerCase().replace(/[\s，,。；;：:！!？?、@]/g, ''), 160)
+        if (!conditionKey) continue
+        const targetsById = new Map((Array.isArray(raw?.targets) ? raw.targets : []).map(item => [String(item?.userId || ''), item]))
+        const targets = targetUserIds.map(userId => ({
+          userId,
+          displayName: compactText(targetsById.get(userId)?.displayName || userId, 80)
+        }))
+        const rule = {
+          id: '',
+          kind: 'mention_members',
+          condition,
+          conditionKey,
+          targetUserIds,
+          targets,
+          sourceText: compactText(raw?.sourceText, 300),
+          createdBy: String(raw?.createdBy || ''),
+          at: Number(raw?.at) || nowMs(),
+          updatedAt: nowMs(),
+          enabled: raw?.enabled !== false
+        }
+        const index = next.findIndex(item => item?.kind === rule.kind && item?.conditionKey === rule.conditionKey)
+        if (index >= 0) {
+          rule.id = String(next[index].id || `wf_${nowMs().toString(36)}_${index}`)
+          rule.at = Number(next[index].at) || rule.at
+          next[index] = rule
+        } else {
+          rule.id = `wf_${nowMs().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+          next.push(rule)
+        }
+        saved.push(rule)
+      }
+      const max = Math.max(1, Number(this.config.maxGroupWorkflows) || 50)
+      next.sort((a, b) => Number(b.updatedAt || b.at || 0) - Number(a.updatedAt || a.at || 0))
+      await this.store.saveWorkflows(groupId, next.slice(0, max))
+      return { written: saved.length, rules: saved }
+    })
+  }
+
+  async getGroupWorkflowRules(groupId) {
+    if (!this.config.enabled) return []
+    const meta = await this.store.getMeta(groupId)
+    if (meta.disabled) return []
+    return this.store.getWorkflows(groupId)
+  }
+
+  async getGroupWorkflowPrompt(groupId, message) {
+    const rules = await this.getGroupWorkflowRules(groupId)
+    const relevant = selectRelevantGroupWorkflowRules(rules, message, this.config.workflowPromptMaxRules)
+    return formatGroupWorkflowExecutionPrompt(relevant, message)
+  }
+
+  // ---- 明确教学的群知识（成员定义、成员组、群文件关系）----
+  async upsertGroupKnowledgeEntries(groupId, entries = []) {
+    if (!this.config.enabled || !Array.isArray(entries) || !entries.length) return { written: 0, entries: [] }
+    return this.enqueueGroup(groupId, async () => {
+      const meta = await this.store.getMeta(groupId)
+      if (meta.disabled) return { written: 0, entries: [] }
+      const existing = await this.store.getKnowledge(groupId)
+      const next = Array.isArray(existing) ? [...existing] : []
+      const saved = []
+      for (const raw of entries) {
+        const kind = ['group_file', 'member_set', 'member_definition'].includes(raw?.kind) ? raw.kind : ''
+        const subject = compactText(raw?.subject, 80)
+        const subjectKey = compactText(raw?.subjectKey || subject.toLowerCase().replace(/[\s，,。；;：:！!？?、@]/g, ''), 120)
+        if (!kind || !subject || !subjectKey) continue
+        const targetUserIds = [...new Set((Array.isArray(raw?.targetUserIds) ? raw.targetUserIds : [])
+          .map(value => String(value || '').trim()).filter(value => /^\d+$/.test(value)))]
+        const resource = kind === 'group_file' && raw?.resource?.fileName
+          ? {
+              fileName: compactText(raw.resource.fileName, 180),
+              fileId: compactText(raw.resource.fileId, 180),
+              folderPath: compactText(raw.resource.folderPath, 240),
+              origin: compactText(raw.resource.origin, 40)
+            }
+          : null
+        if (kind === 'group_file' && !resource) continue
+        if (kind !== 'group_file' && !targetUserIds.length) continue
+        const targetsById = new Map((Array.isArray(raw?.targets) ? raw.targets : []).map(item => [String(item?.userId || ''), item]))
+        const targets = targetUserIds.map(userId => ({ userId, displayName: compactText(targetsById.get(userId)?.displayName || userId, 80) }))
+        const aliases = [...new Set((Array.isArray(raw?.aliases) ? raw.aliases : [subject])
+          .map(value => compactText(value, 80)).filter(Boolean))]
+        const entry = {
+          id: '', kind, subject, subjectKey, aliases,
+          ownerQQ: /^\d+$/.test(String(raw?.ownerQQ || '')) ? String(raw.ownerQQ) : '',
+          ownerDisplay: compactText(raw?.ownerDisplay, 80),
+          targetUserIds, targets, resource,
+          sourceText: compactText(raw?.sourceText, 300),
+          createdBy: String(raw?.createdBy || ''),
+          at: Number(raw?.at) || nowMs(), updatedAt: nowMs(), enabled: raw?.enabled !== false
+        }
+        // File ownership definitions can coexist by owner; member/role definitions replace the same named subject.
+        const index = next.findIndex(item => item?.kind === kind && item?.subjectKey === subjectKey &&
+          (kind !== 'group_file' || String(item?.ownerQQ || '') === entry.ownerQQ))
+        if (index >= 0) {
+          entry.id = String(next[index].id || `knowledge_${nowMs().toString(36)}_${index}`)
+          entry.at = Number(next[index].at) || entry.at
+          next[index] = entry
+        } else {
+          entry.id = `knowledge_${nowMs().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+          next.push(entry)
+        }
+        saved.push(entry)
+      }
+      const max = Math.max(1, Number(this.config.maxGroupKnowledge) || 100)
+      next.sort((a, b) => Number(b.updatedAt || b.at || 0) - Number(a.updatedAt || a.at || 0))
+      await this.store.saveKnowledge(groupId, next.slice(0, max))
+      return { written: saved.length, entries: saved }
+    })
+  }
+
+  async getGroupKnowledgeEntries(groupId) {
+    if (!this.config.enabled) return []
+    const meta = await this.store.getMeta(groupId)
+    if (meta.disabled) return []
+    return this.store.getKnowledge(groupId)
+  }
+
+  async getGroupKnowledgePrompt(groupId, { speakerQQ = '', message = '' } = {}) {
+    const entries = await this.getGroupKnowledgeEntries(groupId)
+    const relevant = selectRelevantGroupKnowledge(entries, { text: message, speakerQQ, limit: this.config.knowledgePromptMaxEntries })
+    return formatGroupKnowledgePrompt(relevant, { speakerQQ })
+  }
+
+  async interpretExplicitGroupKnowledge(context = {}) {
+    if (!shouldUseSemanticGroupKnowledgeExtraction(context?.text) || !this.extractor.canUse()) return []
+    const members = membersFromContext(context.memberMap, context.text)
+    const prompt = [
+      `发言者：QQ:${context.creatorQQ || ''}，群名片：${context.creatorDisplay || '未知'}`,
+      `机器人 QQ:${context.botId || ''}`,
+      `原话：${compactText(context.text, 500)}`,
+      `当前群成员候选：${members.map(member => `${member.displayName}(QQ:${member.userId})`).join('；') || '无'}`,
+      '只输出 JSON 数组。字段：kind(member_definition 或 member_set)、subject(去掉“我的/你的”等代词后的关系名)、owner(speaker/bot/QQ号/空)、targetNames(群成员显示名数组)。',
+      '“我/我的/本人”一定指发言者；“你/你的/希洛”一定指机器人。不要把代词原样放进 subject，不要编造成员。没有明确教学关系时输出 []。'
+    ].join('\n')
+    try {
+      const raw = await this.extractor._callChat([
+        { role: 'system', content: '你是群聊显式关系教学解析器，只输出严格 JSON 数组，不解释。' },
+        { role: 'user', content: prompt }
+      ], 400)
+      return parseSemanticGroupKnowledgeOutput(raw, context)
+    } catch {
+      return []
+    }
   }
 
   // §0.4 query 向量：embeddings 可用且 query 非空时算一次，否则 null。失败/未启用 → null。
@@ -629,10 +808,14 @@ export class MemoryManager {
   // ---- admin 命令（保留返回契约）----
   // §P0-3 返回真实字段（去掉不存在的 importanceThreshold/lastAttemptAt 等）。
   async adminStatus({ groupId, userId } = {}) {
-    const meta = await this.store.getMeta(groupId)
-    const entities = await this.store.getEntities(groupId)
-    const facts = await this.store.getFacts(groupId)
-    const aliasDoc = await this.store.getAlias(groupId)
+    const [meta, entities, facts, aliasDoc, workflows, knowledge] = await Promise.all([
+      this.store.getMeta(groupId),
+      this.store.getEntities(groupId),
+      this.store.getFacts(groupId),
+      this.store.getAlias(groupId),
+      this.store.getWorkflows(groupId),
+      this.store.getKnowledge(groupId)
+    ])
     const userEntity = userId ? entities[String(userId)] : null
     const optedOut = userId ? (meta.optedOut || []).map(String).includes(String(userId)) : false
     const activeUserFacts = userEntity ? (userEntity.facts || []).filter(f => !f.superseded) : []
@@ -647,6 +830,8 @@ export class MemoryManager {
         entityCount: Object.keys(entities).length,
         factCount: activeGroupFacts.length,
         aliasCount: Object.keys(aliasDoc).length,
+        workflowCount: workflows.filter(rule => rule?.enabled !== false).length,
+        knowledgeCount: knowledge.filter(entry => entry?.enabled !== false).length,
         disabled: meta.disabled,
         lastExtractAt: Number(meta.lastExtractAt) || 0,
         failureCount: Number(meta.failureCount) || 0
@@ -718,6 +903,51 @@ export class MemoryManager {
   async adminClearMemories({ groupId } = {}) {
     const n = await this.store.clearGroup(groupId)
     return { cleared: n, groupId }
+  }
+
+  async adminDeleteGroupWorkflow({ groupId, id } = {}) {
+    const target = String(id || '').trim()
+    if (!target) return { deleted: false, reason: 'missing-id' }
+    return this.enqueueGroup(groupId, async () => {
+      const workflows = await this.store.getWorkflows(groupId)
+      const next = workflows.filter(rule => String(rule?.id || '') !== target)
+      if (next.length === workflows.length) return { deleted: false, reason: 'not-found' }
+      await this.store.saveWorkflows(groupId, next)
+      return { deleted: true, id: target }
+    })
+  }
+
+  async adminDeleteGroupKnowledge({ groupId, id } = {}) {
+    const target = String(id || '').trim()
+    if (!target) return { deleted: false, reason: 'missing-id' }
+    return this.enqueueGroup(groupId, async () => {
+      const entries = await this.store.getKnowledge(groupId)
+      const next = entries.filter(entry => String(entry?.id || '') !== target)
+      if (next.length === entries.length) return { deleted: false, reason: 'not-found' }
+      await this.store.saveKnowledge(groupId, next)
+      return { deleted: true, id: target }
+    })
+  }
+
+  async forgetGroupKnowledge({ groupId, requesterQQ, query } = {}) {
+    const requester = String(requesterQQ || '').trim()
+    const target = compactText(query, 180)
+    if (!groupId || !requester || !target) return { deleted: false, reason: 'invalid-request' }
+    return this.enqueueGroup(groupId, async () => {
+      const entries = await this.store.getKnowledge(groupId)
+      const candidates = findGroupKnowledgeDeletionCandidates(entries, {
+        query: target,
+        speakerQQ: requester,
+        createdBy: requester
+      })
+      if (candidates.length === 0) return { deleted: false, reason: 'not-found' }
+      if (candidates.length > 1) return { deleted: false, reason: 'ambiguous', candidates }
+      const entry = candidates[0]
+      const next = entries.filter(item => String(item?.id || '') !== String(entry.id || ''))
+      if (next.length === entries.length) return { deleted: false, reason: 'not-found' }
+      await this.store.saveKnowledge(groupId, next)
+      return { deleted: true, entry }
+    })
   }
 
   // §0.2 per-user opt-out：enabled=false → 把 userId 加入 meta.optedOut；enabled=true → 移除。

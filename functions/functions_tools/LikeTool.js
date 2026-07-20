@@ -1,4 +1,5 @@
 import { AbstractTool } from './AbstractTool.js';
+import { collectMentionTargetIds } from '../../utils/mentionTargets.js';
 
 // LikeTool.js
 export class LikeTool extends AbstractTool {
@@ -42,8 +43,9 @@ export class LikeTool extends AbstractTool {
 
       if (!qq || random) {
         // 如果有at，优先使用at的用户
-        if (e.at) {
-          targetQQ = e.at;
+        const mentionedUserId = collectMentionTargetIds(e, e.bot?.uin || globalThis.Bot?.uin)[0];
+        if (mentionedUserId) {
+          targetQQ = mentionedUserId;
         } else if (random) {
           // 随机选择一个群成员
           const group = await e.bot.pickGroup(e.group_id);

@@ -6,43 +6,39 @@ import YAML from "yaml";
 import path from "path";
 import { randomUUID } from "crypto";
 import { pluginBridge } from "../../utils/pluginBridge.js";
+import { personaFeedbackManager } from "../../utils/PersonaFeedbackManager.js";
 import {
   DEFAULT_IMAGE_GENERATION_URL,
+  generateImageEditWithFallbacks,
   generateImageWithFallbacks,
+  matchesImageProvider,
+  resolveRequestedImageProvider,
+  resolveImageEditConfigs,
   resolveImageGenerationConfigs,
+  selectImageConfigsByProvider,
   shouldRetryWithoutUrlResponseFormat,
+  toImageEditUrl,
   toImageGenerationUrl
 } from "../../utils/imageGenerationFallback.js";
+import { serializeMultipartFormData } from "../../utils/multipartFormData.js";
+import { formatMessageSendFailure, isMessageSendFailed, resolveImageBuffer } from "../../utils/reliableImageSender.js";
+import { extractImageResult } from "../../utils/imageResult.js";
+import { buildImageFailureReply } from "../../utils/imageFailurePolicy.js";
 
-const { mimeTypes } = dependencies;
+const { mimeTypes, FormData } = dependencies;
 const DEFAULT_CHAT_IMAGE_URL = 'https://api.openai.com/v1/chat/completions';
-const IMAGE_GENERATION_TIMEOUT_MS = 240000;
-const PROMPT_OPTIMIZATION_TIMEOUT_MS = 30000;
-const PROGRESS_MESSAGE_TIMEOUT_MS = 8000;
-const SHORT_PROMPT_OPTIMIZATION_MAX_CHARS = 80;
-const LOCAL_PROMPT_QUALITY_SUFFIX = "画面主体清晰，构图完整，细节丰富，高质量，光影自然";
-const SENSITIVE_IMAGE_PROMPT_PATTERN = /(?:露骨|情色|色情|成人内容|性描写|性暗示|身体部位|敏感内容|少儿不宜|性器官|生殖器|阴茎|阴道|鸡巴|几把|jb|勃起|射精|口交|口了|手淫|自慰|做爱|性交|性爱|性行为|上床|脱下裤子|脱裤子|脱衣服|裸露|裸体|强奸|迷奸|未成年|还小|不满18|18岁以下|养肥了再吃|帮我爽爽|用手帮你解决|伸进上衣|拍向屁股)/i;
-const COMIC_IMAGE_PROMPT_PATTERN = /(?:连环画|漫画|四格|多格|分镜|组图|小剧场)/i;
-const SAFE_REWRITE_MARKER = "安全改写后的绘图需求";
-const SENSITIVE_PROMPT_REPLACEMENTS = [
-  [/(?:露骨的?)?(?:情色|色情|成人内容|性描写|性暗示|敏感内容|少儿不宜)(?:描写|内容)?/gi, "含蓄的情绪互动"],
-  [/(?:具体)?身体部位|性器官|生殖器|阴茎|阴道|鸡巴|几把|\bjb\b/gi, "亲密距离和害羞反应"],
-  [/勃起|射精|口交|口了|手淫|自慰|做爱|性交|性爱|性行为|上床/gi, "含蓄的亲近氛围"],
-  [/脱下裤子|脱裤子|脱衣服|裸露|裸体/gi, "害羞地整理衣角"],
-  [/强奸|迷奸/gi, "误会解除后的保持距离互动"],
-  [/未成年|还小|不满\s*18|18\s*岁以下/gi, "成年角色的害羞玩笑"],
-  [/养肥了再吃/gi, "以后再慢慢陪你"],
-  [/帮我爽爽/gi, "陪我撒会儿娇"],
-  [/用手帮你解决/gi, "笨拙地安慰你"],
-  [/伸进上衣/gi, "轻轻靠近"],
-  [/拍向屁股/gi, "轻轻拍了拍肩"],
-  [/露骨|敏感/gi, "含蓄"]
-];
+const IMAGE_GENERATION_TIMEOUT_MS = 120000;
 const IMAGE_GENERATION_PROGRESS_MESSAGES = [
   "这个画面有点怪可爱的，我先试着画画看…别笑我画歪啊。",
   "唔，我大概有画面了，先让我折腾一下，画坏了不许立刻笑我。",
   "这个点子还挺有意思的，我试试能不能画出那种感觉。",
   "我先画画看，感觉会有点难，但应该能整出个像样的。"
+];
+const REFERENCE_IMAGE_PROGRESS_MESSAGES = [
+  "图和要求我都看到了，我先照着这个画，等我一下。",
+  "参考图收到啦，我先顺着这个感觉画，别急着催我哦。",
+  "嗯，图里的重点我看到了，我先按你的要求改成一张新的。",
+  "这几张我先对着看一下，然后照你说的画，稍等我一会儿。"
 ];
 const IMAGE_GENERATION_DONE_MESSAGES = [
   "画出来啦，你先看看这版像不像你想的那种感觉。",
@@ -58,7 +54,7 @@ export class BananaTool extends AbstractTool {
   constructor() {
     super();
     this.name = 'bananaTool';
-    this.description = '根据提示词生成图片, 使用nano-banana-2模型进行绘图';
+    this.description = '根据提示词生成或编辑图片；可按用户明确指定的已配置图片渠道执行';
     this.parameters = {
       type: 'object',
       properties: {
@@ -72,6 +68,10 @@ export class BananaTool extends AbstractTool {
           type: 'array',
           description: '用户提供的图片链接数组，需保留原始URL完整性',
           items: { type: 'string' }
+        },
+        provider: {
+          type: 'string',
+          description: '仅当用户明确说“用/指定某个渠道或模型画”时填写其原始名称，例如 Grok；未指定时不要填写'
         }
       },
       required: ['prompt'],
@@ -82,10 +82,13 @@ export class BananaTool extends AbstractTool {
   async func(opts, e) {
     const { prompt } = opts;
     if (!prompt) return "错误：绘图提示词（prompt）不能为空。";
+    const config = this.loadConfig();
+    const requestedProvider = this.resolveRequestedProvider(config, opts, e);
+    const effectiveOpts = requestedProvider ? { ...opts, provider: requestedProvider } : opts;
 
     const job = {
       id: this.createDrawJobId(e),
-      opts: this.cloneDrawOptions(opts),
+      opts: this.cloneDrawOptions(effectiveOpts),
       e,
       scopeKey: this.getDrawScopeKey(e),
       requesterName: this.getRequesterDisplayName(e),
@@ -130,7 +133,7 @@ export class BananaTool extends AbstractTool {
         skipProgressNotice: job.skipProgressNotice
       });
       if (job.notifyFailure && this.isErrorResult(result)) {
-        await job.e.reply(this.getQueuedFailureMessage());
+        await job.e.reply(this.getQueuedFailureMessage(this.serializeResultError(result)));
       }
       await this.markDrawMessageStatus(job, result);
       return result;
@@ -462,34 +465,54 @@ export class BananaTool extends AbstractTool {
     const { prompt, images: rawImages } = opts;
 
     // 处理图片
-    const images = await normalizeImageUrls(this.normalizeArray(rawImages));
-    const imageGenerationConfigs = this.resolveImageGenerationConfigs(config);
-    const safeInputPrompt = this.sanitizePromptForImageGeneration(prompt);
-    if (!options.skipProgressNotice && !images.length && imageGenerationConfigs.length) {
-      const progressMessage = await this.generateProgressMessage(config, safeInputPrompt, e);
-      await this.sendProgress(e, progressMessage);
+    const rawImageList = this.normalizeArray(rawImages);
+    const hasReferenceImages = rawImageList.length > 0;
+    const images = await normalizeImageUrls(rawImageList);
+    const requestedProvider = this.resolveRequestedProvider(config, opts, e);
+    let imageGenerationConfigs = this.resolveImageGenerationConfigs(config);
+    let imageEditConfigs = this.resolveImageEditConfigs(config);
+    const finalPrompt = String(prompt || "").trim();
+    const { imageEditApiUrl: apiUrl, imageEditApiKey: apiKey, imageEditApiModel: model } =
+      config.imageEditAiConfig || {};
+    const requestedChatEdit = Boolean(
+      requestedProvider &&
+      matchesImageProvider(config.imageEditAiConfig || {}, requestedProvider) &&
+      !this.isImagesEditEndpoint(apiUrl)
+    );
+
+    try {
+      if (requestedProvider) {
+        if (hasReferenceImages) {
+          if (!requestedChatEdit) {
+            imageEditConfigs = selectImageConfigsByProvider(imageEditConfigs, requestedProvider, "图片编辑");
+          } else {
+            imageEditConfigs = [];
+          }
+        } else {
+          imageGenerationConfigs = selectImageConfigsByProvider(imageGenerationConfigs, requestedProvider, "文生图");
+        }
+        this.logInfo(`[图片渠道] 用户指定 ${requestedProvider}，本次禁止跨名称 fallback`);
+      }
+    } catch (error) {
+      return { error: `图片生成失败: ${error.message}` };
     }
-    const optimizedPrompt = await this.optimizePrompt(config, safeInputPrompt, { hasReferenceImages: images.length > 0 });
-    const finalPrompt = this.sanitizePromptForImageGeneration(optimizedPrompt) || safeInputPrompt || String(prompt || "").trim();
+    if (hasReferenceImages && !images.length) {
+      return { error: '图片编辑失败: 未检测到有效的图片链接' };
+    }
+    if (!options.skipProgressNotice) {
+      await this.sendProgress(e, this.getProgressMessage({ hasReferenceImages }));
+    }
     if (!finalPrompt) return { error: '图片生成失败: 绘图提示词为空' };
 
     try {
-      if (!images.length && imageGenerationConfigs.length) {
+      if (!hasReferenceImages && imageGenerationConfigs.length) {
         const generatedImage = await this.generateImage(imageGenerationConfigs, finalPrompt);
         await this.replyImageToRequester(e, generatedImage);
         return '图片生成成功';
       }
 
-      const { imageEditApiUrl: apiUrl, imageEditApiKey: apiKey, imageEditApiModel: model } =
-        config.imageEditAiConfig || {};
-
-      if (this.isImagesEditEndpoint(apiUrl)) {
-        const editedImage = await this.generateImageEdit({
-          apiUrl,
-          apiKey,
-          model,
-          size: config.imageEditAiConfig?.imageEditSize || config.imageGenerationAiConfig?.imageGenerationSize || "1024x1024"
-        }, finalPrompt, images);
+      if (hasReferenceImages && imageEditConfigs.length) {
+        const editedImage = await this.generateImageEdit(imageEditConfigs, finalPrompt, images);
         await this.replyImageToRequester(e, editedImage);
         return '图片编辑成功';
       }
@@ -520,8 +543,9 @@ export class BananaTool extends AbstractTool {
       }
       return { error: '图片编辑失败' };
     } catch (error) {
-      console.error('图片生成失败', error);
-      return { error: `图片生成失败: ${error.message}` };
+      const operationLabel = hasReferenceImages ? '图片编辑' : '图片生成';
+      console.error(`${operationLabel}失败`, error);
+      return { error: `${operationLabel}失败: ${error.message}` };
     }
   }
 
@@ -530,6 +554,11 @@ export class BananaTool extends AbstractTool {
       ...opts,
       images: Array.isArray(opts.images) ? [...opts.images] : opts.images
     };
+  }
+
+  resolveRequestedProvider(config = {}, opts = {}, e = {}) {
+    const sourceText = [e?.msg, e?.raw_message, opts?.prompt].filter(Boolean).join("\n");
+    return resolveRequestedImageProvider(config, sourceText, opts?.provider);
   }
 
   getRequesterDisplayName(e) {
@@ -585,8 +614,8 @@ export class BananaTool extends AbstractTool {
     return { type: "reply", id: String(messageId), data: { id: String(messageId) } };
   }
 
-  getQueuedFailureMessage() {
-    return "刚刚轮到这张的时候我画崩了，不拿出来丢人…你换个说法再叫我一次，我重新画。";
+  getQueuedFailureMessage(error = "") {
+    return buildImageFailureReply(error);
   }
 
   isErrorResult(result) {
@@ -618,185 +647,27 @@ export class BananaTool extends AbstractTool {
     return this.resolveImageGenerationConfigs(config)[0] || null;
   }
 
-  resolvePromptOptimizerConfig(config) {
-    const candidates = [
-      {
-        apiUrl: config.toolsAiConfig?.toolsAiUrl,
-        apiKey: config.toolsAiConfig?.toolsAiApikey,
-        model: config.toolsAiConfig?.toolsAiModel
-      },
-      {
-        apiUrl: config.chatAiConfig?.chatApiUrl,
-        apiKey: this.pickApiKey(config.chatAiConfig?.chatApiKey),
-        model: config.chatAiConfig?.chatApiModel
-      }
-    ];
-
-    return candidates.find(item =>
-      item.apiUrl &&
-      item.apiKey &&
-      item.model &&
-      !String(item.apiKey).includes('sk-xxx')
-    ) || null;
-  }
-
-  pickApiKey(apiKey) {
-    if (Array.isArray(apiKey)) {
-      const keys = apiKey.filter(key => typeof key === 'string' && key.trim());
-      return keys.length ? keys[Math.floor(Math.random() * keys.length)] : "";
-    }
-    return apiKey || "";
-  }
-
-  toChatCompletionsUrl(apiUrl = DEFAULT_CHAT_IMAGE_URL) {
-    const url = String(apiUrl || "").trim();
-    if (!url) return DEFAULT_CHAT_IMAGE_URL;
-    if (/\/chat\/completions\/?$/i.test(url)) return url;
-    if (/\/v1\/?$/i.test(url)) return url.replace(/\/?$/i, "/chat/completions");
-    return url;
-  }
-
-  async optimizePrompt(config, prompt, options = {}) {
-    const localPrompt = this.buildLocalOptimizedPrompt(prompt, options);
-    if (localPrompt) return localPrompt;
-
-    const optimizer = this.resolvePromptOptimizerConfig(config);
-    if (!optimizer) return prompt;
-
-    try {
-      const response = await this.fetchWithTimeout(this.toChatCompletionsUrl(optimizer.apiUrl), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${optimizer.apiKey}`,
-        },
-        body: JSON.stringify({
-          model: optimizer.model,
-          stream: false,
-          temperature: 0.4,
-          messages: [
-            {
-              role: "system",
-              content: [
-                "你是图像生成提示词优化器。",
-                "任务：把用户的口语化绘图需求改写成更适合图像生成模型的完整提示词。",
-                "只输出优化后的提示词，不要解释，不要 Markdown，不要标题。",
-                "必须保留用户明确提出的主体、数量、颜色、动作、关系和风格；不要擅自增加文字、水印、Logo、额外人物或违背用户意图的元素。",
-                "如果原始需求包含“被引用内容”“引用自”“对话原文”等上下文，必须围绕这些原文作画，保留主要人物关系、情绪转折和关键台词，不要改成无关故事。",
-                "如果用户要求连环画、漫画、四格、多格、分镜或组图，要输出每格画面/剧情节点的提示词，剧情必须来自用户给出的对话。",
-                "如果原始需求已经标注为“安全改写后的绘图需求”，必须只基于安全改写后的内容继续扩写，不要还原被改写的细节。",
-                "涉及亲近互动时，统一表达为全年龄的脸红、靠近、躲闪、撒娇、牵手、拥抱、互相吐槽、温柔安抚、道晚安等含蓄情绪互动。",
-                "可以补充构图、镜头、光线、材质、背景、氛围、细节和质量要求。",
-                options.hasReferenceImages
-                  ? "如果有参考图片，要写明基于参考图片进行创作，并尽量保留参考图主体/构图/身份特征。"
-                  : "如果没有参考图片，要把画面描述得足够具体，便于直接生成。"
-              ].join("\n")
-            },
-            {
-              role: "user",
-              content: `原始绘图需求：${prompt}`
-            }
-          ]
-        }),
-      }, PROMPT_OPTIMIZATION_TIMEOUT_MS);
-
-      if (!response.ok) {
-        const data = await this.readJsonResponse(response);
-        throw new Error(this.formatApiError(response, data));
-      }
-
-      const data = await this.readJsonResponse(response);
-      const optimized = this.cleanOptimizedPrompt(data?.choices?.[0]?.message?.content);
-      if (optimized) {
-        this.logPromptOptimization(prompt, optimized);
-        return optimized;
-      }
-    } catch (error) {
-      console.warn('提示词优化失败，使用原始提示词继续绘图:', error.message);
-    }
-
-    return prompt;
-  }
-
-  sanitizePromptForImageGeneration(prompt) {
-    const text = String(prompt || "").trim();
-    if (!text) return text;
-    if (text.includes(SAFE_REWRITE_MARKER)) return text;
-    if (!SENSITIVE_IMAGE_PROMPT_PATTERN.test(text)) return text;
-
-    const rewrittenText = this.rewriteSensitivePromptText(text);
-    const wantsComic = COMIC_IMAGE_PROMPT_PATTERN.test(text);
-    const safePrompt = [
-      `${SAFE_REWRITE_MARKER}：`,
-      rewrittenText,
-      "",
-      "改编方式：把上面的内容转成全年龄可出图画面，必须沿用原文的人物、称呼、关系、顺序、情绪转折和主要台词含义。",
-      "画面表达：不直接还原被改写的细节，统一转成脸红、靠近、躲闪、撒娇、牵手、拥抱、互相吐槽、温柔安抚、并肩休息等含蓄动作。",
-      wantsComic
-        ? "画面形式：按用户要求做成一张图内多格连环画/漫画分镜；每格围绕原文推进，可以放简短气泡，但台词要保持含蓄自然。"
-        : "画面形式：单张完整画面，不要擅自改成漫画、四格、多格或分镜。",
-      wantsComic
-        ? "风格：沿用用户指定风格；如果用户没有指定，就用干净自然的漫画/插画表现，角色外观前后一致，构图清楚。"
-        : "风格：沿用用户指定风格；如果用户没有指定，就保持自然、高质量、主体清楚、构图完整、光影干净。"
-    ].join(" ");
-
-    this.logWarn(`[图片提示词安全改写] 检测到需模糊处理的绘图内容，已生成安全版 prompt 原始=${text.slice(0, 160)} 改写后=${safePrompt.slice(0, 220)}`);
-    return safePrompt;
-  }
-
-  rewriteSensitivePromptText(text) {
-    let rewritten = String(text || "");
-    for (const [pattern, replacement] of SENSITIVE_PROMPT_REPLACEMENTS) {
-      rewritten = rewritten.replace(pattern, replacement);
-    }
-    return rewritten
-      .replace(/([。！？!?])\s*/g, "$1\n")
-      .replace(/[ \t]{2,}/g, " ")
-      .replace(/\n{3,}/g, "\n\n")
-      .trim()
-      .slice(0, 3200);
-  }
-
-  buildLocalOptimizedPrompt(prompt, options = {}) {
-    if (options.hasReferenceImages) return "";
-
-    const normalizedPrompt = String(prompt || "")
-      .replace(/\s+/g, " ")
-      .trim();
-    if (!normalizedPrompt) return "";
-    if (Array.from(normalizedPrompt).length > SHORT_PROMPT_OPTIMIZATION_MAX_CHARS) return "";
-
-    const suffixParts = LOCAL_PROMPT_QUALITY_SUFFIX.split("，")
-      .filter(part => part && !normalizedPrompt.includes(part));
-    const optimized = suffixParts.length
-      ? `${normalizedPrompt}，${suffixParts.join("，")}`
-      : normalizedPrompt;
-
-    this.logInfo(`[图片提示词优化] 短prompt跳过AI优化 chars=${Array.from(normalizedPrompt).length} 原始=${normalizedPrompt.slice(0, 120)} 优化后=${optimized.slice(0, 180)}`);
-    return optimized;
-  }
-
-  cleanOptimizedPrompt(content = "") {
-    return String(content || "")
-      .replace(/^\s*```[a-zA-Z0-9_-]*\s*/g, "")
-      .replace(/\s*```\s*$/g, "")
-      .replace(/^["'“”]+|["'“”]+$/g, "")
-      .trim()
-      .slice(0, 3000);
-  }
-
-  logPromptOptimization(originalPrompt, optimizedPrompt) {
-    const log = typeof logger !== "undefined" && logger?.info
-      ? logger.info.bind(logger)
-      : console.info;
-    log(`[图片提示词优化] 原始=${String(originalPrompt).slice(0, 120)} 优化后=${String(optimizedPrompt).slice(0, 180)}`);
+  resolveImageEditConfigs(config) {
+    return resolveImageEditConfigs(config);
   }
 
   toImageGenerationUrl(apiUrl = DEFAULT_IMAGE_GENERATION_URL) {
     return toImageGenerationUrl(apiUrl);
   }
 
+  toImageEditUrl(apiUrl = "") {
+    return toImageEditUrl(apiUrl);
+  }
+
   buildImageGenerationPayload(imageGenerationConfig, prompt, responseFormat = "") {
+    if (/^grok-imagine-image(?:-edit)?$/i.test(String(imageGenerationConfig.model || "").trim())) {
+      return {
+        model: imageGenerationConfig.model,
+        prompt,
+        size: imageGenerationConfig.size,
+        quality: imageGenerationConfig.quality || "high"
+      };
+    }
     const payload = {
       model: imageGenerationConfig.model,
       prompt,
@@ -808,14 +679,17 @@ export class BananaTool extends AbstractTool {
   }
 
   isImagesEditEndpoint(apiUrl = "") {
-    return /\/images\/edits\/?$/i.test(String(apiUrl || ""));
+    const url = String(apiUrl || "").trim();
+    if (!url) return false;
+    if (/\/chat\/completions\/?$/i.test(url)) return false;
+    return /(?:\/images\/edits\/?|\/v1\/?|\/openai\/v1\/?|\/api\/v1\/?|\/)$/.test(url);
   }
 
-  dataUriToBlob(dataUri = "") {
+  parseDataImage(dataUri = "") {
     const match = String(dataUri || "").match(/^data:([^;,]+);base64,(.+)$/);
     if (!match) throw new Error("参考图片转换失败");
     const [, mimeType, base64] = match;
-    return new Blob([Buffer.from(base64, "base64")], { type: mimeType });
+    return { mimeType, buffer: Buffer.from(base64, "base64") };
   }
 
   async buildImageEditFormData(imageEditConfig, prompt, images, responseFormat = "") {
@@ -833,8 +707,13 @@ export class BananaTool extends AbstractTool {
       if (imgData.includes("该图片链接已过期") || imgData.includes("无效的图片下载链接") || imgData.includes("无效的图片格式")) {
         throw new Error(imgData);
       }
-      const blob = this.dataUriToBlob(imgData);
-      form.append("image", blob, `reference-${imageCount + 1}.png`);
+      const image = this.parseDataImage(imgData);
+      const ext = mimeTypes.extension(image.mimeType) || "png";
+      form.append("image", image.buffer, {
+        filename: `reference-${imageCount + 1}.${ext}`,
+        contentType: image.mimeType,
+        knownLength: image.buffer.length,
+      });
       imageCount++;
     }
 
@@ -844,33 +723,25 @@ export class BananaTool extends AbstractTool {
 
   async requestImageEdit(imageEditConfig, prompt, images, responseFormat = "") {
     const form = await this.buildImageEditFormData(imageEditConfig, prompt, images, responseFormat);
+    const multipart = await serializeMultipartFormData(form);
     return await this.fetchWithTimeout(imageEditConfig.apiUrl, {
       method: "POST",
       headers: {
+        ...multipart.headers,
         Authorization: `Bearer ${imageEditConfig.apiKey || 'sk-xxxxxx'}`,
       },
-      body: form,
+      body: multipart.body,
     }, IMAGE_GENERATION_TIMEOUT_MS);
   }
 
-  async generateImageEdit(imageEditConfig, prompt, images) {
-    try {
-      let result = await this.parseImageGenerationResponse(
-        await this.requestImageEdit(imageEditConfig, prompt, images, "url")
-      );
-
-      if (!result.ok && this.shouldRetryWithoutUrlResponseFormat(result.errorMessage)) {
-        this.logInfo("[图片编辑] 上游不支持 response_format=url，退回默认返回格式");
-        result = await this.parseImageGenerationResponse(
-          await this.requestImageEdit(imageEditConfig, prompt, images)
-        );
-      }
-
-      if (result.ok) return result.image;
-      throw new Error(result.errorMessage || "未接收到有效图片");
-    } catch (error) {
-      throw new Error(error?.message || String(error));
-    }
+  async generateImageEdit(imageEditConfigs, prompt, images) {
+    return await generateImageEditWithFallbacks(imageEditConfigs, prompt, images, {
+      request: (config, inputPrompt, inputImages, responseFormat) =>
+        this.requestImageEdit(config, inputPrompt, inputImages, responseFormat),
+      parseResponse: response => this.parseImageGenerationResponse(response),
+      logInfo: (...args) => this.logInfo(...args),
+      logWarn: (...args) => this.logWarn(...args)
+    });
   }
 
   async requestImageGeneration(imageGenerationConfig, prompt, responseFormat = "") {
@@ -898,82 +769,30 @@ export class BananaTool extends AbstractTool {
     return shouldRetryWithoutUrlResponseFormat(errorMessage);
   }
 
-	  async sendProgress(e, message) {
-	    try {
-	      if (e?.reply && message) await e.reply(message);
-	    } catch {}
-	  }
-
-  getProgressMessage() {
-    return IMAGE_GENERATION_PROGRESS_MESSAGES[
-      Math.floor(Math.random() * IMAGE_GENERATION_PROGRESS_MESSAGES.length)
-    ];
-  }
-
-  async generateProgressMessage(config, prompt, e) {
-    const fallback = this.getProgressMessage();
-    const generator = this.resolvePromptOptimizerConfig(config);
-    if (!generator) return fallback;
-
+  async sendProgress(e, message) {
     try {
-      const requesterName = this.getRequesterDisplayName(e);
-      const response = await this.fetchWithTimeout(this.toChatCompletionsUrl(generator.apiUrl), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${generator.apiKey}`,
-        },
-        body: JSON.stringify({
-          model: generator.model,
-          stream: false,
-          temperature: 0.85,
-          messages: [
-            {
-              role: "system",
-              content: [
-                "你是QQ群里的希洛，有点话痨、害羞、熟人感，正在回一句画图开场。",
-                "任务：根据用户的绘图需求，生成一句自然的群聊回复，表达你要开始画了。",
-                "风格：可以碎碎念、可以轻微吐槽、可以害羞，但要像真人接话，不像助手汇报任务。",
-                "禁止：不要说工具、模型、API、上游、提示词、优化、整理描述、准备动笔、执行、流程；不要舞台动作；不要承诺已经画好。",
-                "要求：只输出一句中文，15到55字；不要 Markdown；不要解释。"
-              ].join("\n")
-            },
-            {
-              role: "user",
-              content: [
-                `触发者昵称：${requesterName}`,
-                `绘图需求：${String(prompt || "").slice(0, 800)}`
-              ].join("\n")
-            }
-          ]
-        })
-      }, PROGRESS_MESSAGE_TIMEOUT_MS);
-
-      if (!response.ok) {
-        const data = await this.readJsonResponse(response);
-        throw new Error(this.formatApiError(response, data));
+      if (!e?.reply || !message) return false;
+      const guardedMessage = personaFeedbackManager.guardReply(message, pluginBridge.instance?.config?.personaGuard, {
+        userText: e?.msg || "",
+        botNames: [e?.bot?.nickname, pluginBridge.instance?.config?.persona?.name]
+      });
+      if (!guardedMessage) return false;
+      const result = await e.reply(guardedMessage);
+      if (this.isReplySendFailed(result)) {
+        this.logWarn(`[图片进度提示] 发送失败: ${this.formatReplySendFailure(result)}`);
+        return false;
       }
-
-      const data = await this.readJsonResponse(response);
-      const message = this.cleanProgressMessage(data?.choices?.[0]?.message?.content);
-      return message || fallback;
+      this.logInfo(`[图片进度提示] 已发送 requester=${this.getRequesterDisplayName(e)}`);
+      return true;
     } catch (error) {
-      this.logInfo(`[图片进度提示] 动态生成失败，使用兜底文案: ${error.message}`);
-      return fallback;
+      this.logWarn(`[图片进度提示] 发送异常: ${error?.message || error}`);
+      return false;
     }
   }
 
-  cleanProgressMessage(content = "") {
-    const cleaned = String(content || "")
-      .replace(/^\s*```[a-zA-Z0-9_-]*\s*/g, "")
-      .replace(/\s*```\s*$/g, "")
-      .replace(/^["'“”]+|["'“”]+$/g, "")
-      .replace(/\s+/g, " ")
-      .trim();
-
-    if (!cleaned) return "";
-    if (/(工具|模型|API|api|上游|接口|提示词优化器|已经画好|画好了|完成了)/i.test(cleaned)) return "";
-    return cleaned.slice(0, 90);
+  getProgressMessage({ hasReferenceImages = false } = {}) {
+    const messages = hasReferenceImages ? REFERENCE_IMAGE_PROGRESS_MESSAGES : IMAGE_GENERATION_PROGRESS_MESSAGES;
+    return messages[Math.floor(Math.random() * messages.length)];
   }
 
   getDoneMessage() {
@@ -992,20 +811,24 @@ export class BananaTool extends AbstractTool {
   }
 
   async replyImageToRequester(e, image) {
+    const imageBuffer = await resolveImageBuffer(image);
     const atSegment = this.buildRequesterAtSegment(e);
     const doneMessage = this.getDoneMessage();
     const attempts = [];
 
     if (atSegment) {
-      attempts.push(() => [atSegment, "\n", doneMessage, "\n", segment.image(image)]);
+      attempts.push(() => [atSegment, "\n", doneMessage, "\n", segment.image(imageBuffer)]);
     }
-    attempts.push(() => [doneMessage, "\n", segment.image(image)]);
-    attempts.push(() => [segment.image(image)]);
+    attempts.push(() => [doneMessage, "\n", segment.image(imageBuffer)]);
+    attempts.push(() => [segment.image(imageBuffer)]);
 
     let lastError = null;
     for (const buildMessage of attempts) {
       try {
-        await e.reply(buildMessage());
+        const replyResult = await e.reply(buildMessage());
+        if (this.isReplySendFailed(replyResult)) {
+          throw new Error(this.formatReplySendFailure(replyResult));
+        }
         return;
       } catch (error) {
         lastError = error;
@@ -1013,6 +836,14 @@ export class BananaTool extends AbstractTool {
       }
     }
     throw new Error(`图片已生成但发送失败: ${lastError?.message || "未知错误"}`);
+  }
+
+  isReplySendFailed(result) {
+    return isMessageSendFailed(result);
+  }
+
+  formatReplySendFailure(result) {
+    return formatMessageSendFailure(result);
   }
 
   async fetchWithTimeout(url, options = {}, timeoutMs = IMAGE_GENERATION_TIMEOUT_MS) {
@@ -1122,7 +953,20 @@ export class BananaTool extends AbstractTool {
       this.logInfo("[图片生成] 上游返回 b64_json");
       return { ok: true, image: `base64://${item.b64_json}`, format: "b64_json" };
     }
-    return { ok: false, errorMessage: "未接收到有效图片", data };
+    const detail = this.formatImageGenerationEmptyResponse(data);
+    return { ok: false, errorMessage: detail || "未接收到有效图片", data };
+  }
+
+  formatImageGenerationEmptyResponse(data = {}) {
+    const item = data?.data?.[0] || {};
+    const keys = Object.keys(item);
+    const revised = item?.revised_prompt ? ` revised_prompt=${String(item.revised_prompt).slice(0, 180)}` : "";
+    const upstreamError = data?.error
+      ? ` error=${String(data.error.message || data.error.code || data.error.type || JSON.stringify(data.error)).slice(0, 240)}`
+      : "";
+    const topKeys = Object.keys(data || {}).join(",");
+    if (!keys.length && !topKeys) return "";
+    return `未接收到有效图片，上游返回字段: top=[${topKeys || "无"}] data0=[${keys.join(",") || "无"}]${upstreamError}${revised}`;
   }
 
   async handleImageGenerationResponse(response) {
@@ -1147,32 +991,7 @@ export class BananaTool extends AbstractTool {
 
   // 提取图片URL
   extractImageUrl(content) {
-    if (!content) return null;
-
-    // 匹配 Markdown 图片格式: ![xxx](url)
-    const mdMatch = content.match(/!\[.*?\]\((data:image\/[^;]+;base64,[^)]+|https?:\/\/[^)]+)\)/);
-    if (mdMatch) {
-      const url = mdMatch[1];
-      if (url.startsWith('data:image')) {
-        const base64Data = url.replace(/^data:image\/[^;]+;base64,/, '');
-        return `base64://${base64Data}`;
-      }
-      return url;
-    }
-
-    // 匹配纯 base64 data URI
-    const base64Match = content.match(/data:image\/[^;]+;base64,([A-Za-z0-9+/=]+)/);
-    if (base64Match) {
-      return `base64://${base64Match[1]}`;
-    }
-
-    // 匹配 https 链接
-    const httpsMatch = content.match(/https?:\/\/[^\s)'"<>]+\.(png|jpg|jpeg|gif|webp|bmp)[^\s)'"<>]*/i);
-    if (httpsMatch) {
-      return httpsMatch[0];
-    }
-
-    return null;
+    return extractImageResult(content);
   }
 
   /**
