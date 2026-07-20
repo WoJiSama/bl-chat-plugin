@@ -246,6 +246,43 @@ export default [
     componentProps: { min: 1, max: 10, step: 1, placeholder: "4" },
     bottomHelpMessage: "仅 .希洛反馈 的明确纠正会使用该权重"
   },
+  { component: "Divider", label: "自主风格进化" },
+  {
+    field: "globalStyleLearning.autoEvolutionEnabled",
+    label: "启用多轮自主采纳",
+    component: "Switch",
+    bottomHelpMessage: "仅依据后续明确认可或纠正形成匿名候选，不会把普通聊天自动当反馈"
+  },
+  {
+    field: "globalStyleLearning.autoEvolutionOutcomeWindowMinutes",
+    label: "结果观察窗口分钟",
+    component: "InputNumber",
+    componentProps: { min: 1, max: 60, step: 1, placeholder: "12" }
+  },
+  {
+    field: "globalStyleLearning.autoEvolutionMinEvidence",
+    label: "自动晋升最少证据数",
+    component: "InputNumber",
+    componentProps: { min: 3, max: 50, step: 1, placeholder: "6" }
+  },
+  {
+    field: "globalStyleLearning.autoEvolutionMinUniqueUsers",
+    label: "自动晋升最少不同用户",
+    component: "InputNumber",
+    componentProps: { min: 1, max: 20, step: 1, placeholder: "2" }
+  },
+  {
+    field: "globalStyleLearning.autoEvolutionMinPositiveRatio",
+    label: "自动晋升正反馈比例",
+    component: "InputNumber",
+    componentProps: { min: 0.5, max: 1, step: 0.05, placeholder: "0.75" }
+  },
+  {
+    field: "globalStyleLearning.autoEvolutionDemoteRatio",
+    label: "活跃策略撤销比例",
+    component: "InputNumber",
+    componentProps: { min: 0, max: 0.8, step: 0.05, placeholder: "0.5" }
+  },
 
   { component: "Divider", label: "用户画像" },
   {

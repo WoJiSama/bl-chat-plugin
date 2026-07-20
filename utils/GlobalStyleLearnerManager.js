@@ -31,7 +31,15 @@ const DEFAULT_CONFIG = {
   semanticQueryCacheMinutes: 10,
   semanticSchemaVersion: 2,
   semanticBackfillRetrySeconds: 75,
-  semanticFeedbackWeight: 4
+  semanticFeedbackWeight: 4,
+  autoEvolutionEnabled: true,
+  autoEvolutionOutcomeWindowMinutes: 12,
+  autoEvolutionMinEvidence: 6,
+  autoEvolutionMinUniqueUsers: 2,
+  autoEvolutionMinPositiveRatio: 0.75,
+  autoEvolutionDemoteRatio: 0.5,
+  autoEvolutionActiveWeight: 3,
+  autoEvolutionMaxCandidates: 60
 }
 
 const TONE_WORDS = ["草", "笑死", "绷", "啊？", "诶", "确实", "离谱", "好吧", "不是", "哈哈", "呃", "唔"]
@@ -165,6 +173,14 @@ function normalizeConfig(config = {}) {
     semanticSchemaVersion: safeNumber(config.semanticSchemaVersion, DEFAULT_CONFIG.semanticSchemaVersion, 1, 20),
     semanticBackfillRetrySeconds: safeNumber(config.semanticBackfillRetrySeconds, DEFAULT_CONFIG.semanticBackfillRetrySeconds, 15, 600),
     semanticFeedbackWeight: safeNumber(config.semanticFeedbackWeight, DEFAULT_CONFIG.semanticFeedbackWeight, 1, 10),
+    autoEvolutionEnabled: config.autoEvolutionEnabled !== false,
+    autoEvolutionOutcomeWindowMinutes: safeNumber(config.autoEvolutionOutcomeWindowMinutes, DEFAULT_CONFIG.autoEvolutionOutcomeWindowMinutes, 1, 60),
+    autoEvolutionMinEvidence: safeNumber(config.autoEvolutionMinEvidence, DEFAULT_CONFIG.autoEvolutionMinEvidence, 3, 50),
+    autoEvolutionMinUniqueUsers: safeNumber(config.autoEvolutionMinUniqueUsers, DEFAULT_CONFIG.autoEvolutionMinUniqueUsers, 1, 20),
+    autoEvolutionMinPositiveRatio: safeNumber(config.autoEvolutionMinPositiveRatio, DEFAULT_CONFIG.autoEvolutionMinPositiveRatio, 0.5, 1),
+    autoEvolutionDemoteRatio: safeNumber(config.autoEvolutionDemoteRatio, DEFAULT_CONFIG.autoEvolutionDemoteRatio, 0, 0.8),
+    autoEvolutionActiveWeight: safeNumber(config.autoEvolutionActiveWeight, DEFAULT_CONFIG.autoEvolutionActiveWeight, 1, 10),
+    autoEvolutionMaxCandidates: safeNumber(config.autoEvolutionMaxCandidates, DEFAULT_CONFIG.autoEvolutionMaxCandidates, 10, 200),
     baseDir: config.baseDir || DEFAULT_CONFIG.baseDir
   }
   normalized.semanticMinSamples = Math.min(normalized.semanticSampleLimit, normalized.semanticMinSamples)
@@ -217,6 +233,30 @@ const FEEDBACK_STYLE_RULES = {
   too_customer: "保持熟人聊天感，避免客服腔、汇报腔和说明书腔。",
   good_tone: "保持自然、松弛、像熟人说话的语气，不刻意卖萌或装腔。",
   bad_tone: "语气先收住再回应，避免阴阳怪气、顶嘴和强行接梗。"
+}
+
+const AUTO_REPLY_STYLE_RULES = [
+  { key: "emotion_first", rule: "这一类场景近期更容易被接受的节奏是先自然接住情绪，再进入实际回应。" },
+  { key: "short_direct", rule: "这一类场景近期更容易被接受短而直接的回应，先说结论，再按需要补充。" },
+  { key: "structured_explain", rule: "这一类场景近期更容易被接受按结论、原因、下一步收束的解释。" },
+  { key: "natural_plain", rule: "这一类场景近期更容易被接受自然口语的一条完整回复，不要套模板。" }
+]
+
+function deriveReplyStyle(text = "") {
+  const output = cleanText(text)
+  if (!output) return null
+  if (/^(哈哈|笑死|草|绷|唉|哎|嗯|唔|诶|确实|你说得对)/.test(output)) return AUTO_REPLY_STYLE_RULES[0]
+  if ([...output].length <= 90) return AUTO_REPLY_STYLE_RULES[1]
+  if (/因为|所以|原因|结论|先说|下一步|\n/.test(output)) return AUTO_REPLY_STYLE_RULES[2]
+  return AUTO_REPLY_STYLE_RULES[3]
+}
+
+function classifyReplyOutcome(text = "") {
+  const content = cleanText(text)
+  if (!content) return ""
+  if (/语气.*(不对|怪|不舒服)|阴阳怪气|别这样说|你没看懂|还是不行|没解决|没用|不对啊|不太对/.test(content)) return "negative"
+  if (/^(谢谢|谢了|懂了|明白了|知道了|这样就好|这次好|对[，,。！! ]|可以[，,。！! ]|好[，,。！! ]|行[，,。！! ])/.test(content)) return "positive"
+  return ""
 }
 
 function deriveStyleScene(text = "", { sequence = false, allowDross = false } = {}) {
@@ -324,6 +364,7 @@ function createEmptyMemory() {
       last: null
     },
     semanticBackfill: { cursor: 0, completed: false, retries: 0, lastErrorAt: "" },
+    autoEvolution: { recentReplies: [], candidates: [], promoted: 0, demoted: 0, observedOutcomes: 0 },
     aiRules: {
       absorb: [],
       avoid: []
@@ -355,6 +396,12 @@ function ensureMemoryShape(memory = {}) {
     semanticSchemaVersion: Number(memory.semanticSchemaVersion) || 0,
     semanticStats: { ...base.semanticStats, ...(memory.semanticStats || {}) },
     semanticBackfill: { ...base.semanticBackfill, ...(memory.semanticBackfill || {}) },
+    autoEvolution: {
+      ...base.autoEvolution,
+      ...(memory.autoEvolution || {}),
+      recentReplies: Array.isArray(memory.autoEvolution?.recentReplies) ? memory.autoEvolution.recentReplies : [],
+      candidates: Array.isArray(memory.autoEvolution?.candidates) ? memory.autoEvolution.candidates : []
+    },
     aiRules: {
       absorb: Array.isArray(memory.aiRules?.absorb) ? memory.aiRules.absorb : [],
       avoid: Array.isArray(memory.aiRules?.avoid) ? memory.aiRules.avoid : []
@@ -591,6 +638,7 @@ export class GlobalStyleLearnerManager {
 
     const memory = this.readMemory(cfg)
     this.prepareSemanticMemory(memory, cfg)
+    this.observeReplyOutcome(e, text, cfg, embeddingConfig)
     this.scheduleSemanticBackfill(memory, cfg, embeddingConfig)
     const groupId = String(e?.group_id || "private")
     const sequenceRecorded = this.observeSpeakerSequence(e, sequenceText, cfg, memory, embeddingConfig)
@@ -958,6 +1006,107 @@ export class GlobalStyleLearnerManager {
       weight: cfg.semanticFeedbackWeight,
       feedbackTags: tags
     }, cfg, embeddingConfig)
+  }
+
+  rememberBotReply(e, output = "", config = {}) {
+    const cfg = normalizeConfig(config)
+    if (!cfg.autoEvolutionEnabled) return false
+    const scene = deriveStyleScene(e?.msg || "")
+    const replyStyle = deriveReplyStyle(output)
+    const userId = String(e?.user_id || "")
+    const groupId = String(e?.group_id || "private")
+    if (!scene || !replyStyle || !userId) return false
+    const memory = this.readMemory(cfg)
+    const state = memory.autoEvolution
+    const now = Date.now()
+    const speakerHash = this.hashText(`${groupId}:${userId}`)
+    state.recentReplies = [
+      {
+        at: now,
+        groupHash: this.hashText(groupId),
+        speakerHash,
+        sceneKey: scene.key,
+        scene: scene.descriptor,
+        replyStyle: replyStyle.key
+      },
+      ...state.recentReplies.filter(item => now - Number(item?.at || 0) <= cfg.autoEvolutionOutcomeWindowMinutes * 60 * 1000)
+    ].slice(0, 160)
+    memory.updatedAt = nowIso()
+    this.scheduleFlush(cfg)
+    return true
+  }
+
+  observeReplyOutcome(e, text = "", cfg = normalizeConfig(), embeddingConfig = {}) {
+    if (!cfg.autoEvolutionEnabled) return false
+    const outcome = classifyReplyOutcome(text)
+    if (!outcome) return false
+    const memory = this.readMemory(cfg)
+    const state = memory.autoEvolution
+    const now = Date.now()
+    const groupHash = this.hashText(String(e?.group_id || "private"))
+    const speakerHash = this.hashText(`${String(e?.group_id || "private")}:${String(e?.user_id || "")}`)
+    const cutoff = now - cfg.autoEvolutionOutcomeWindowMinutes * 60 * 1000
+    const index = state.recentReplies.findIndex(item => item.groupHash === groupHash && item.speakerHash === speakerHash && Number(item.at || 0) >= cutoff)
+    if (index < 0) return false
+    const [reply] = state.recentReplies.splice(index, 1)
+    state.recentReplies = state.recentReplies.filter(item => Number(item?.at || 0) >= cutoff)
+    state.observedOutcomes = (Number(state.observedOutcomes) || 0) + 1
+    this.updateAutoEvolutionCandidate(memory, reply, outcome, speakerHash, cfg, embeddingConfig)
+    memory.updatedAt = nowIso()
+    this.scheduleFlush(cfg)
+    return true
+  }
+
+  updateAutoEvolutionCandidate(memory, reply, outcome, speakerHash, cfg, embeddingConfig = {}) {
+    const style = AUTO_REPLY_STYLE_RULES.find(item => item.key === reply.replyStyle)
+    if (!style || !reply.sceneKey || !reply.scene) return
+    const state = memory.autoEvolution
+    const key = `${reply.sceneKey}|${style.key}`
+    let candidate = state.candidates.find(item => item.key === key)
+    if (!candidate) {
+      candidate = {
+        key,
+        sceneKey: reply.sceneKey,
+        scene: reply.scene,
+        replyStyle: style.key,
+        strategy: style.rule,
+        positive: 0,
+        negative: 0,
+        speakers: [],
+        status: "candidate",
+        createdAt: nowIso(),
+        lastSeenAt: nowIso()
+      }
+      state.candidates.push(candidate)
+    }
+    candidate[outcome] = (Number(candidate[outcome]) || 0) + 1
+    candidate.lastSeenAt = nowIso()
+    candidate.speakers = [...new Set([...(candidate.speakers || []), speakerHash])].slice(-16)
+    const evidence = (Number(candidate.positive) || 0) + (Number(candidate.negative) || 0)
+    const ratio = evidence ? (Number(candidate.positive) || 0) / evidence : 0
+    const autoHash = this.hashText(`auto:${key}`)
+    if (candidate.status !== "active" && evidence >= cfg.autoEvolutionMinEvidence && candidate.speakers.length >= cfg.autoEvolutionMinUniqueUsers && ratio >= cfg.autoEvolutionMinPositiveRatio) {
+      candidate.status = "active"
+      candidate.promotedAt = nowIso()
+      state.promoted = (Number(state.promoted) || 0) + 1
+      this.enqueueSemanticSample({
+        hash: autoHash,
+        scene: { key: reply.sceneKey, descriptor: reply.scene, patterns: [style.rule] },
+        patterns: [style.rule],
+        source: "auto_evolution",
+        weight: cfg.autoEvolutionActiveWeight
+      }, cfg, embeddingConfig)
+      this.logger?.info?.(`[全局表达学习] 自主策略晋升 scene=${reply.sceneKey} style=${style.key} evidence=${evidence} ratio=${ratio.toFixed(2)}`)
+    } else if (candidate.status === "active" && evidence >= cfg.autoEvolutionMinEvidence && ratio < cfg.autoEvolutionDemoteRatio) {
+      candidate.status = "demoted"
+      candidate.demotedAt = nowIso()
+      state.demoted = (Number(state.demoted) || 0) + 1
+      memory.semanticSamples = memory.semanticSamples.filter(item => item.hash !== autoHash)
+      this.logger?.info?.(`[全局表达学习] 自主策略撤销 scene=${reply.sceneKey} style=${style.key} evidence=${evidence} ratio=${ratio.toFixed(2)}`)
+    }
+    state.candidates = state.candidates
+      .sort((left, right) => String(right.lastSeenAt || "").localeCompare(String(left.lastSeenAt || "")))
+      .slice(0, cfg.autoEvolutionMaxCandidates)
   }
 
   recordSemanticRecall(memory, cfg, result = {}) {
@@ -1353,6 +1502,7 @@ export class GlobalStyleLearnerManager {
       `语义召回：${cfg.semanticRecallEnabled ? `开启；样本 ${memory.semanticSamples.length}/${cfg.semanticMinSamples}` : "关闭"}`,
       `语义指标：查询 ${memory.semanticStats?.queries || 0}；命中 ${memory.semanticStats?.hits || 0}；缓存 ${memory.semanticStats?.cacheHits || 0}；失败 ${memory.semanticStats?.failures || 0}；平均 ${memory.semanticStats?.queries ? Math.round((memory.semanticStats.totalElapsedMs || 0) / memory.semanticStats.queries) : 0}ms`,
       `场景回填：${memory.semanticBackfill?.completed ? "完成" : "进行中"}；游标 ${memory.semanticBackfill?.cursor || 0}；重试 ${memory.semanticBackfill?.retries || 0}`,
+      `自主进化：${cfg.autoEvolutionEnabled ? `开启；候选 ${(memory.autoEvolution?.candidates || []).length}；已采纳 ${(memory.autoEvolution?.promoted || 0)}；已撤销 ${(memory.autoEvolution?.demoted || 0)}；有效互动 ${(memory.autoEvolution?.observedOutcomes || 0)}` : "关闭"}`,
       `规则侧策略：${essenceCount} 条；规则侧避坑：${drossCount} 条`,
       `模型侧策略：${aiRules.absorb.length} 条；模型侧避坑：${aiRules.avoid.length} 条`,
       enough
@@ -1429,6 +1579,7 @@ export class GlobalStyleLearnerManager {
       `脱敏样本池：${Array.isArray(memory.samplePool) ? memory.samplePool.length : 0} 条；模型总结：${memory.aiSummary?.count || 0} 次，自动 ${memory.aiSummary?.autoCount || 0} 次`,
       `语义样本：${Array.isArray(memory.semanticSamples) ? memory.semanticSamples.length : 0}/${cfg.semanticMinSamples}；语义召回：${cfg.semanticRecallEnabled ? "开启" : "关闭"}`,
       `语义指标：查询 ${memory.semanticStats?.queries || 0}，命中 ${memory.semanticStats?.hits || 0}，缓存 ${memory.semanticStats?.cacheHits || 0}，失败 ${memory.semanticStats?.failures || 0}，超时 ${memory.semanticStats?.timeouts || 0}`,
+      `自主进化：候选 ${(memory.autoEvolution?.candidates || []).length}，采纳 ${memory.autoEvolution?.promoted || 0}，撤销 ${memory.autoEvolution?.demoted || 0}，有效互动 ${memory.autoEvolution?.observedOutcomes || 0}`,
       `自动总结：${autoState.enabled ? "开启" : "关闭"}；总样本门槛 ${autoState.totalSamples}/${cfg.autoSummaryMinTotalSamples}；新增样本 ${autoState.newSamples}/${cfg.autoSummaryMinNewSamples}；冷却 ${autoState.cooldownReady ? "已满足" : "未满足"}`,
       `主要来源：${groupSummary}`,
       features.length ? `离散特征：${features.map(([k, v]) => `${featureLabel(k)} ${v}`).join("、")}` : "离散特征：暂无",

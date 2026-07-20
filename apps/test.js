@@ -7167,8 +7167,9 @@ ${mcpPrompts}
 
     try {
       personaFeedbackManager.rememberBotReply({ ...e, message_id: botMessageId }, output)
+      globalStyleLearnerManager.rememberBotReply(e, output, this.config.globalStyleLearning)
     } catch (error) {
-      logger.warn(`[希洛反馈] 记录最近回复失败: ${error.message}`)
+      logger.warn(`[希洛反馈] 记录最近回复或自主风格轮次失败: ${error.message}`)
     }
 
     // 保存到 messages 数组

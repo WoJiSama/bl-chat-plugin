@@ -206,3 +206,42 @@ test('failed legacy backfill records retry state without blocking message handli
     fs.rmSync(cwd, { recursive: true, force: true })
   }
 })
+
+test('anonymous multi-user outcomes promote and later demote an autonomous style strategy', async () => {
+  const { cwd, manager, config } = createManager(async () => response([1, 0]))
+  Object.assign(config, {
+    autoEvolutionMinEvidence: 3,
+    autoEvolutionMinUniqueUsers: 2,
+    autoEvolutionMinPositiveRatio: 0.75,
+    autoEvolutionDemoteRatio: 0.5
+  })
+  const request = '这个接口报错了怎么办？'
+  const reply = '先说结论：这个问题能排查，下一步看报错内容。'
+  try {
+    for (const userId of [11, 12, 11]) {
+      manager.rememberBotReply({ group_id: 1, user_id: userId, msg: request }, reply, config)
+      manager.observeMessage({ group_id: 1, user_id: userId, message_id: userId, msg: '懂了' }, config, embeddingConfig)
+    }
+    await waitForSemanticIdle(manager)
+    let state = manager.readMemory(config).autoEvolution
+    const candidate = state.candidates.find(item => item.sceneKey === '排障求助')
+    assert.equal(candidate?.status, 'active')
+    assert.equal(candidate?.positive, 3)
+    assert.equal(candidate?.speakers.length, 2)
+    assert.equal(state.promoted, 1)
+    assert.ok(manager.readMemory(config).semanticSamples.some(item => item.source === 'auto_evolution'))
+    assert.doesNotMatch(JSON.stringify(state), /这个接口报错了怎么办|懂了/)
+
+    for (const userId of [11, 12, 11, 12]) {
+      manager.rememberBotReply({ group_id: 1, user_id: userId, msg: request }, reply, config)
+      manager.observeMessage({ group_id: 1, user_id: userId, message_id: userId + 100, msg: '还是不行' }, config, embeddingConfig)
+    }
+    state = manager.readMemory(config).autoEvolution
+    assert.equal(candidate?.status, 'demoted')
+    assert.equal(state.demoted, 1)
+    assert.ok(!manager.readMemory(config).semanticSamples.some(item => item.source === 'auto_evolution'))
+  } finally {
+    manager.flushTimer && clearTimeout(manager.flushTimer)
+    fs.rmSync(cwd, { recursive: true, force: true })
+  }
+})

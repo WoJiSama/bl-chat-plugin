@@ -251,6 +251,14 @@ pluginSettings:
     semanticSchemaVersion: 2
     semanticBackfillRetrySeconds: 75
     semanticFeedbackWeight: 4
+    autoEvolutionEnabled: true
+    autoEvolutionOutcomeWindowMinutes: 12
+    autoEvolutionMinEvidence: 6
+    autoEvolutionMinUniqueUsers: 2
+    autoEvolutionMinPositiveRatio: 0.75
+    autoEvolutionDemoteRatio: 0.5
+    autoEvolutionActiveWeight: 3
+    autoEvolutionMaxCandidates: 60
   # 固定身份绑定：把 QQ 号和人设关系绑定，优先级高于群名片/昵称/历史。
   # 示例：
   # identityBindings:
