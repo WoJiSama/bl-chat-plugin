@@ -23,11 +23,15 @@ const DEFAULT_CONFIG = {
   maxSequenceTurns: 3,
   semanticRecallEnabled: true,
   semanticSampleLimit: 240,
-  semanticMinSamples: 24,
-  semanticPromptExamples: 2,
+  semanticMinSamples: 6,
+  semanticPromptExamples: 1,
   semanticSimilarityThreshold: 0.68,
+  semanticMinMargin: 0.08,
   semanticEmbedTimeoutMs: 1200,
-  semanticQueryCacheMinutes: 10
+  semanticQueryCacheMinutes: 10,
+  semanticSchemaVersion: 2,
+  semanticBackfillRetrySeconds: 75,
+  semanticFeedbackWeight: 4
 }
 
 const TONE_WORDS = ["草", "笑死", "绷", "啊？", "诶", "确实", "离谱", "好吧", "不是", "哈哈", "呃", "唔"]
@@ -155,8 +159,12 @@ function normalizeConfig(config = {}) {
     semanticMinSamples: safeNumber(config.semanticMinSamples, DEFAULT_CONFIG.semanticMinSamples, 2, 500),
     semanticPromptExamples: safeNumber(config.semanticPromptExamples, DEFAULT_CONFIG.semanticPromptExamples, 1, 4),
     semanticSimilarityThreshold: safeNumber(config.semanticSimilarityThreshold, DEFAULT_CONFIG.semanticSimilarityThreshold, 0.4, 0.95),
+    semanticMinMargin: safeNumber(config.semanticMinMargin, DEFAULT_CONFIG.semanticMinMargin, 0, 0.3),
     semanticEmbedTimeoutMs: safeNumber(config.semanticEmbedTimeoutMs, DEFAULT_CONFIG.semanticEmbedTimeoutMs, 200, 5000),
     semanticQueryCacheMinutes: safeNumber(config.semanticQueryCacheMinutes, DEFAULT_CONFIG.semanticQueryCacheMinutes, 1, 60),
+    semanticSchemaVersion: safeNumber(config.semanticSchemaVersion, DEFAULT_CONFIG.semanticSchemaVersion, 1, 20),
+    semanticBackfillRetrySeconds: safeNumber(config.semanticBackfillRetrySeconds, DEFAULT_CONFIG.semanticBackfillRetrySeconds, 15, 600),
+    semanticFeedbackWeight: safeNumber(config.semanticFeedbackWeight, DEFAULT_CONFIG.semanticFeedbackWeight, 1, 10),
     baseDir: config.baseDir || DEFAULT_CONFIG.baseDir
   }
   normalized.semanticMinSamples = Math.min(normalized.semanticSampleLimit, normalized.semanticMinSamples)
@@ -203,29 +211,59 @@ function cosineSimilarity(a, b) {
   return normA && normB ? dot / (Math.sqrt(normA) * Math.sqrt(normB)) : 0
 }
 
-function deriveSemanticPatterns(text = "", { sequence = false } = {}) {
+const FEEDBACK_STYLE_RULES = {
+  too_hard: "需要设边界时先承认意图，再给可执行替代，不要冷硬地甩拒绝。",
+  too_verbose: "优先给短而完整的回答，少铺垫，不在结尾评价自己说得多。",
+  too_customer: "保持熟人聊天感，避免客服腔、汇报腔和说明书腔。",
+  good_tone: "保持自然、松弛、像熟人说话的语气，不刻意卖萌或装腔。",
+  bad_tone: "语气先收住再回应，避免阴阳怪气、顶嘴和强行接梗。"
+}
+
+function deriveStyleScene(text = "", { sequence = false, allowDross = false } = {}) {
   const sample = cleanText(text)
-  if (!sample || DROSS_RULES.some(item => item.pattern.test(sample))) return []
-  const patterns = []
+  if (!sample || (!allowDross && DROSS_RULES.some(item => item.pattern.test(sample)))) return null
+  const labels = []
+  const plans = []
+  const isCorrection = /语气|阴阳怪气|不舒服|别这样|不对劲|太怪|顶嘴|收一下/.test(sample)
+  const isTroubleshooting = /报错|失败|卡住|卡了|装不上|不行|怎么办|为什么.*(没|不)/.test(sample)
+  const isComfort = /难受|烦|累|崩溃|委屈|焦虑|好难|受不了/.test(sample)
+  const isEmotion = /草|笑死|绷|离谱|啊？|真的假的|无语|麻了|哈哈|乐/.test(sample)
+  const isQuestion = /[?？]|怎么|为什么|咋|如何|能不能|可以吗|是不是/.test(sample)
+  const isRequest = /帮我|麻烦|请|查一下|看一下|告诉我|能否|可不可以/.test(sample)
+
+  if (isCorrection) {
+    labels.push("语气纠正")
+    plans.push("用户在纠正语气时，先简短承认并收住，再处理正事；不反击、不调情、不继续玩梗。")
+  } else if (isTroubleshooting) {
+    labels.push("排障求助")
+    plans.push("排查问题时先说已确认的现象，再说明原因或下一步；没有证据时明确说还没查到。")
+  } else if (isComfort) {
+    labels.push("情绪低落")
+    plans.push("对方明显疲惫或难受时，先接住情绪，再给一小步实际帮助，不说空泛大道理。")
+  } else if (isEmotion) {
+    labels.push("轻松接梗")
+    plans.push("先用一句自然短反应接住情绪，再进入实际回应；保持友好，不阴阳怪气。")
+  } else if (isQuestion) {
+    labels.push("明确提问")
+    plans.push("遇到明确问题先给直接答案或判断，再补必要的原因和下一步。")
+  } else if (isRequest) {
+    labels.push("明确请求")
+    plans.push("对方有明确请求时，直接回应要做的事或结果，不用客服式开场白。")
+  } else {
+    labels.push("普通闲聊")
+    plans.push("简短聊天优先用自然口语短句，不为凑完整格式而铺背景。")
+  }
   if (sequence || /\[下一条\]|\[表情包\]/.test(sample)) {
-    patterns.push("短反应和补充内容都独立时才分两条；表情包只放在确实承担情绪作用的位置。")
+    labels.push("多消息节奏")
+    plans.push("短反应和补充内容都独立时才分两条；表情包只放在确实承担情绪作用的位置。")
   }
-  if (/草|笑死|绷|离谱|啊？|真的假的|无语|麻了|哈哈|乐/.test(sample)) {
-    patterns.push("先用一句自然短反应接住情绪，再进入实际回应；保持友好，不阴阳怪气。")
+  const key = labels.join("+")
+  return {
+    key,
+    // 只包含有限类别，作为 Embedding 输入和落盘字段均不含聊天原文。
+    descriptor: `对话场景：${labels.join("、")}。表达目标：${plans.join(" ")}`,
+    patterns: plans.slice(0, 1)
   }
-  if (/[?？]|怎么|为什么|咋|如何|能不能|可以吗|是不是/.test(sample)) {
-    patterns.push("遇到明确问题先给直接答案或判断，再补必要的原因和下一步。")
-  }
-  if (/报错|失败|卡住|卡了|装不上|不行|怎么办|为什么.*(没|不)/.test(sample)) {
-    patterns.push("排查问题时先说已确认的现象，再说明原因或下一步；没有证据时明确说还没查到。")
-  }
-  if ([...sample].length <= 28) {
-    patterns.push("简短聊天优先用自然口语短句，不为凑完整格式而铺背景。")
-  }
-  if (/因为|所以|结论|原因|简单说|换句话/.test(sample)) {
-    patterns.push("解释复杂事情时按结论、原因、下一步收束，避免客服式铺陈。")
-  }
-  return [...new Set(patterns)].slice(0, 3)
 }
 
 function inc(map, key, amount = 1) {
@@ -274,6 +312,18 @@ function createEmptyMemory() {
     recentSignals: [],
     samplePool: [],
     semanticSamples: [],
+    semanticSchemaVersion: 0,
+    semanticStats: {
+      queries: 0,
+      cacheHits: 0,
+      hits: 0,
+      misses: 0,
+      failures: 0,
+      timeouts: 0,
+      totalElapsedMs: 0,
+      last: null
+    },
+    semanticBackfill: { cursor: 0, completed: false, retries: 0, lastErrorAt: "" },
     aiRules: {
       absorb: [],
       avoid: []
@@ -302,6 +352,9 @@ function ensureMemoryShape(memory = {}) {
     recentSignals: Array.isArray(memory.recentSignals) ? memory.recentSignals : [],
     samplePool: Array.isArray(memory.samplePool) ? memory.samplePool : [],
     semanticSamples: Array.isArray(memory.semanticSamples) ? memory.semanticSamples : [],
+    semanticSchemaVersion: Number(memory.semanticSchemaVersion) || 0,
+    semanticStats: { ...base.semanticStats, ...(memory.semanticStats || {}) },
+    semanticBackfill: { ...base.semanticBackfill, ...(memory.semanticBackfill || {}) },
     aiRules: {
       absorb: Array.isArray(memory.aiRules?.absorb) ? memory.aiRules.absorb : [],
       avoid: Array.isArray(memory.aiRules?.avoid) ? memory.aiRules.avoid : []
@@ -469,8 +522,9 @@ export class GlobalStyleLearnerManager {
     this.semanticPendingHashes = new Set()
     this.semanticQueryCache = new Map()
     this.semanticQueryInFlight = new Map()
-    this.semanticFailureUntil = 0
+    this.semanticFailureUntil = new Map()
     this.semanticBackfillScheduled = false
+    this.semanticBackfillTimer = null
   }
 
   getDataDir(config = {}) {
@@ -536,6 +590,7 @@ export class GlobalStyleLearnerManager {
     if (String(e?.user_id || "") === String(globalThis.Bot?.uin || "")) return
 
     const memory = this.readMemory(cfg)
+    this.prepareSemanticMemory(memory, cfg)
     this.scheduleSemanticBackfill(memory, cfg, embeddingConfig)
     const groupId = String(e?.group_id || "private")
     const sequenceRecorded = this.observeSpeakerSequence(e, sequenceText, cfg, memory, embeddingConfig)
@@ -599,13 +654,14 @@ export class GlobalStyleLearnerManager {
         ].slice(0, cfg.summarySampleLimit * 3)
       }
     }
-    const semanticSample = sanitizeSample(text)
-    const semanticPatterns = deriveSemanticPatterns(semanticSample)
-    if (semanticSample && semanticPatterns.length) {
+    const semanticScene = deriveStyleScene(text)
+    if (semanticScene) {
       this.enqueueSemanticSample({
-        hash: this.hashText(semanticSample),
-        text: semanticSample,
-        patterns: semanticPatterns,
+        hash: this.hashText(`scene:${semanticScene.key}`),
+        scene: semanticScene,
+        patterns: semanticScene.patterns,
+        source: "observation",
+        weight: 1,
         sequence: false
       }, cfg, embeddingConfig)
     }
@@ -670,12 +726,14 @@ export class GlobalStyleLearnerManager {
       },
       ...(memory.samplePool || [])
     ].slice(0, cfg.summarySampleLimit * 3)
-    const semanticPatterns = deriveSemanticPatterns(sample, { sequence: true })
-    if (semanticPatterns.length) {
+    const semanticScene = deriveStyleScene(sample, { sequence: true })
+    if (semanticScene) {
       this.enqueueSemanticSample({
-        hash: this.hashText(sample),
-        text: sample,
-        patterns: semanticPatterns,
+        hash: this.hashText(`scene:${semanticScene.key}`),
+        scene: semanticScene,
+        patterns: semanticScene.patterns,
+        source: "observation",
+        weight: 1,
         sequence: true
       }, cfg, embeddingConfig)
     }
@@ -691,15 +749,36 @@ export class GlobalStyleLearnerManager {
     return (hash >>> 0).toString(16)
   }
 
+  prepareSemanticMemory(memory, cfg) {
+    if (Number(memory.semanticSchemaVersion) === cfg.semanticSchemaVersion) return false
+    // 旧索引的向量由消息内容生成，缺少可安全迁移的场景字段，必须从已有脱敏池重建。
+    memory.semanticSamples = []
+    memory.semanticSchemaVersion = cfg.semanticSchemaVersion
+    memory.semanticBackfill = { cursor: 0, completed: false, retries: 0, lastErrorAt: "" }
+    memory.updatedAt = nowIso()
+    this.semanticBackfillScheduled = false
+    this.scheduleFlush(cfg)
+    return true
+  }
+
+  getSemanticProviderKey(embeddingConfig = {}) {
+    return `${embeddingConfig?.embeddingApiUrl || ""}|${embeddingConfig?.embeddingApiModel || "text-embedding-3-small"}`
+  }
+
   canUseSemanticRecall(cfg, embeddingConfig = {}) {
+    const unavailableUntil = this.semanticFailureUntil.get(this.getSemanticProviderKey(embeddingConfig)) || 0
     return Boolean(
       cfg.semanticRecallEnabled &&
       embeddingConfig?.embeddingApiUrl &&
       embeddingConfig?.embeddingApiKey &&
       !String(embeddingConfig.embeddingApiKey).includes("sk-xxx") &&
-      Date.now() >= this.semanticFailureUntil &&
+      Date.now() >= unavailableUntil &&
       typeof this.fetchFn === "function"
     )
+  }
+
+  markSemanticProviderFailure(embeddingConfig = {}) {
+    this.semanticFailureUntil.set(this.getSemanticProviderKey(embeddingConfig), Date.now() + 60000)
   }
 
   async embedSemanticText(text, cfg, embeddingConfig = {}) {
@@ -728,34 +807,84 @@ export class GlobalStyleLearnerManager {
       : null
   }
 
-  enqueueSemanticSample(sample, cfg, embeddingConfig = {}) {
+  normalizeSemanticSample(sample = {}) {
+    const scene = sample.scene || deriveStyleScene(sample.text || "", { sequence: Boolean(sample.sequence) })
+    if (!scene?.key || !scene?.descriptor) return null
+    const patterns = Array.isArray(sample.patterns) && sample.patterns.length ? sample.patterns : scene.patterns
+    if (!patterns?.length) return null
+    return {
+      hash: sample.hash || this.hashText(`scene:${scene.key}|${patterns.join("|")}|${sample.source || "observation"}`),
+      scene,
+      patterns: [...new Set(patterns.map(item => cleanText(item)).filter(Boolean))].slice(0, 4),
+      source: sample.source || "observation",
+      weight: Math.max(1, Number(sample.weight) || 1),
+      feedbackTags: Array.isArray(sample.feedbackTags) ? sample.feedbackTags.slice(0, 6) : [],
+      sequence: Boolean(sample.sequence),
+      backfill: Boolean(sample.backfill)
+    }
+  }
+
+  enqueueSemanticSample(rawSample, cfg, embeddingConfig = {}) {
     const normalizedCfg = normalizeConfig(cfg)
-    if (!this.canUseSemanticRecall(normalizedCfg, embeddingConfig) || !sample?.hash || !sample?.text || !sample?.patterns?.length) return
+    const sample = this.normalizeSemanticSample(rawSample)
+    if (!this.canUseSemanticRecall(normalizedCfg, embeddingConfig) || !sample) return false
     const memory = this.readMemory(normalizedCfg)
+    this.prepareSemanticMemory(memory, normalizedCfg)
     if (memory.semanticSamples?.some(item => item.hash === sample.hash) || this.semanticPendingHashes.has(sample.hash)) return
-    if (this.semanticQueue.length >= 64) return
+    if (this.semanticQueue.length >= 64) return false
     this.semanticPendingHashes.add(sample.hash)
     this.semanticQueue.push({ sample, cfg: normalizedCfg, embeddingConfig })
     this.drainSemanticQueue()
+    return true
   }
 
   scheduleSemanticBackfill(memory, cfg, embeddingConfig = {}) {
     if (this.semanticBackfillScheduled || !this.canUseSemanticRecall(cfg, embeddingConfig)) return
     const existing = Array.isArray(memory?.semanticSamples) ? memory.semanticSamples.length : 0
     const legacySamples = Array.isArray(memory?.samplePool) ? memory.samplePool : []
-    if (existing >= cfg.semanticMinSamples || !legacySamples.length) return
+    if (existing >= cfg.semanticMinSamples || !legacySamples.length) {
+      if (memory.semanticBackfill) memory.semanticBackfill.completed = existing >= cfg.semanticMinSamples
+      return
+    }
     this.semanticBackfillScheduled = true
-    for (const legacy of legacySamples.slice(0, cfg.semanticSampleLimit)) {
+    const state = memory.semanticBackfill || { cursor: 0, completed: false, retries: 0, lastErrorAt: "" }
+    let cursor = Math.max(0, Number(state.cursor) || 0)
+    if (cursor >= legacySamples.length && existing < cfg.semanticMinSamples) cursor = 0
+    while (cursor < legacySamples.length && this.semanticQueue.length < 64) {
+      const legacy = legacySamples[cursor]
+      cursor += 1
       const text = legacy?.text || ""
-      const patterns = deriveSemanticPatterns(text, { sequence: Boolean(legacy?.sequence) })
-      if (!patterns.length) continue
+      const scene = deriveStyleScene(text, { sequence: Boolean(legacy?.sequence) })
+      if (!scene) continue
       this.enqueueSemanticSample({
-        hash: this.hashText(text),
-        text,
-        patterns,
-        sequence: Boolean(legacy?.sequence)
+        hash: this.hashText(`scene:${scene.key}`),
+        scene,
+        patterns: scene.patterns,
+        source: "backfill",
+        weight: 1,
+        sequence: Boolean(legacy?.sequence),
+        backfill: true
       }, cfg, embeddingConfig)
     }
+    memory.semanticBackfill = {
+      ...state,
+      cursor,
+      completed: cursor >= legacySamples.length,
+      retries: 0
+    }
+    memory.updatedAt = nowIso()
+    this.scheduleFlush(cfg)
+  }
+
+  scheduleSemanticBackfillRetry(cfg, embeddingConfig = {}) {
+    if (this.semanticBackfillTimer) return
+    this.semanticBackfillScheduled = false
+    this.semanticBackfillTimer = setTimeout(() => {
+      this.semanticBackfillTimer = null
+      const memory = this.readMemory(cfg)
+      this.scheduleSemanticBackfill(memory, cfg, embeddingConfig)
+    }, cfg.semanticBackfillRetrySeconds * 1000)
+    this.semanticBackfillTimer.unref?.()
   }
 
   drainSemanticQueue() {
@@ -763,7 +892,19 @@ export class GlobalStyleLearnerManager {
       const task = this.semanticQueue.shift()
       this.semanticQueueRunning += 1
       this.storeSemanticSample(task).catch(error => {
-        this.semanticFailureUntil = Date.now() + 60000
+        this.markSemanticProviderFailure(task.embeddingConfig)
+        if (task.sample.backfill) {
+          const memory = this.readMemory(task.cfg)
+          memory.semanticBackfill = {
+            ...(memory.semanticBackfill || {}),
+            cursor: 0,
+            completed: false,
+            retries: (Number(memory.semanticBackfill?.retries) || 0) + 1,
+            lastErrorAt: nowIso()
+          }
+          this.scheduleFlush(task.cfg)
+          this.scheduleSemanticBackfillRetry(task.cfg, task.embeddingConfig)
+        }
         this.logger?.warn?.(`[全局表达学习] 语义样本向量化失败: ${error.message}`)
       }).finally(() => {
         this.semanticPendingHashes.delete(task.sample.hash)
@@ -774,7 +915,7 @@ export class GlobalStyleLearnerManager {
   }
 
   async storeSemanticSample({ sample, cfg, embeddingConfig }) {
-    const embedding = await this.embedSemanticText(sample.text, cfg, embeddingConfig)
+    const embedding = await this.embedSemanticText(sample.scene.descriptor, cfg, embeddingConfig)
     if (!embedding) return
     const memory = this.readMemory(cfg)
     if (memory.semanticSamples.some(item => item.hash === sample.hash)) return
@@ -784,6 +925,11 @@ export class GlobalStyleLearnerManager {
         hash: sample.hash,
         embedding,
         patterns: sample.patterns,
+        sceneKey: sample.scene.key,
+        scene: sample.scene.descriptor,
+        source: sample.source,
+        weight: sample.weight,
+        feedbackTags: sample.feedbackTags,
         sequence: Boolean(sample.sequence),
         at: nowIso()
       },
@@ -793,38 +939,111 @@ export class GlobalStyleLearnerManager {
     this.scheduleFlush(cfg)
   }
 
+  observePersonaFeedback(record = {}, config = {}, embeddingConfig = {}) {
+    const cfg = normalizeConfig(config)
+    const tags = [...new Set((record.tags || []).filter(tag => FEEDBACK_STYLE_RULES[tag]))]
+    if (!tags.length || !record.botReply) return false
+    const scene = deriveStyleScene(record.botReply, { allowDross: true })
+    if (!scene) return false
+    const patterns = tags.map(tag => FEEDBACK_STYLE_RULES[tag])
+    return this.enqueueSemanticSample({
+      hash: this.hashText(`feedback:${scene.key}:${tags.sort().join(",")}`),
+      scene: {
+        key: `${scene.key}+主人反馈`,
+        descriptor: `对话场景：${scene.key}。主人明确风格反馈：${tags.join("、")}。表达目标：${patterns.join(" ")}`,
+        patterns
+      },
+      patterns,
+      source: "master_feedback",
+      weight: cfg.semanticFeedbackWeight,
+      feedbackTags: tags
+    }, cfg, embeddingConfig)
+  }
+
+  recordSemanticRecall(memory, cfg, result = {}) {
+    const stats = memory.semanticStats || createEmptyMemory().semanticStats
+    stats.queries = (Number(stats.queries) || 0) + 1
+    stats.totalElapsedMs = (Number(stats.totalElapsedMs) || 0) + Math.max(0, Number(result.elapsedMs) || 0)
+    if (result.cacheHit) stats.cacheHits = (Number(stats.cacheHits) || 0) + 1
+    if (result.outcome === "hit") stats.hits = (Number(stats.hits) || 0) + 1
+    else stats.misses = (Number(stats.misses) || 0) + 1
+    if (result.failure) stats.failures = (Number(stats.failures) || 0) + 1
+    if (result.timeout) stats.timeouts = (Number(stats.timeouts) || 0) + 1
+    stats.last = {
+      at: nowIso(),
+      outcome: result.outcome || "miss",
+      cacheHit: Boolean(result.cacheHit),
+      elapsedMs: Math.round(Number(result.elapsedMs) || 0),
+      score: Number.isFinite(result.score) ? Number(result.score.toFixed(3)) : null,
+      margin: Number.isFinite(result.margin) ? Number(result.margin.toFixed(3)) : null,
+      scene: String(result.scene || "").slice(0, 80)
+    }
+    memory.semanticStats = stats
+    memory.updatedAt = nowIso()
+    this.scheduleFlush(cfg)
+    if (result.outcome === "hit" || result.failure || (Number(result.elapsedMs) || 0) >= 400) {
+      this.logger?.info?.(`[语义表达] outcome=${result.outcome || "miss"} cache=${result.cacheHit ? "hit" : "miss"} elapsed=${Math.round(Number(result.elapsedMs) || 0)}ms score=${Number.isFinite(result.score) ? result.score.toFixed(3) : ""} margin=${Number.isFinite(result.margin) ? result.margin.toFixed(3) : ""} scene=${String(result.scene || "").slice(0, 80)}`)
+    }
+  }
+
   async buildRelevantPrompt(config = {}, { query = "", embeddingConfig = {} } = {}) {
     const cfg = normalizeConfig(config)
-    if (!cfg.enabled || !cfg.promptInjectionEnabled || !this.canUseSemanticRecall(cfg, embeddingConfig)) return ""
     const memory = this.readMemory(cfg)
-    const candidates = (memory.semanticSamples || []).filter(item => Array.isArray(item.embedding) && Array.isArray(item.patterns) && item.patterns.length)
-    if (candidates.length < cfg.semanticMinSamples) return ""
-    const normalizedQuery = sanitizeSample(query)
-    if (!normalizedQuery) return ""
-    const cacheKey = `${embeddingConfig.embeddingApiModel || "text-embedding-3-small"}:${this.hashText(normalizedQuery)}`
+    const startedAt = Date.now()
+    if (!cfg.enabled || !cfg.promptInjectionEnabled || !this.canUseSemanticRecall(cfg, embeddingConfig)) return ""
+    this.prepareSemanticMemory(memory, cfg)
+    const candidates = (memory.semanticSamples || []).filter(item => Array.isArray(item.embedding) && Array.isArray(item.patterns) && item.patterns.length && item.sceneKey)
+    if (candidates.length < cfg.semanticMinSamples) {
+      this.recordSemanticRecall(memory, cfg, { outcome: "warming", elapsedMs: Date.now() - startedAt })
+      return ""
+    }
+    const queryScene = deriveStyleScene(query)
+    if (!queryScene) return ""
+    const cacheKey = `${embeddingConfig.embeddingApiModel || "text-embedding-3-small"}:${queryScene.key}`
     const cached = this.semanticQueryCache.get(cacheKey)
-    if (cached && cached.expiresAt > Date.now()) return cached.prompt
+    if (cached && cached.expiresAt > Date.now()) {
+      this.recordSemanticRecall(memory, cfg, { ...cached.metrics, outcome: cached.prompt ? "hit" : "miss", cacheHit: true, elapsedMs: Date.now() - startedAt, scene: queryScene.key })
+      return cached.prompt
+    }
     if (this.semanticQueryInFlight.has(cacheKey)) return this.semanticQueryInFlight.get(cacheKey)
 
     const task = (async () => {
       try {
-        const queryEmbedding = await this.embedSemanticText(normalizedQuery, cfg, embeddingConfig)
-        if (!queryEmbedding) return ""
-        const matched = candidates
-          .map(item => ({ item, score: cosineSimilarity(queryEmbedding, item.embedding) }))
+        const queryEmbedding = await this.embedSemanticText(queryScene.descriptor, cfg, embeddingConfig)
+        if (!queryEmbedding) {
+          this.recordSemanticRecall(memory, cfg, { outcome: "empty_embedding", elapsedMs: Date.now() - startedAt, scene: queryScene.key })
+          return ""
+        }
+        const grouped = new Map()
+        for (const item of candidates) {
+          const score = cosineSimilarity(queryEmbedding, item.embedding) + Math.min(0.04, Math.max(0, (Number(item.weight) || 1) - 1) * 0.01)
+          const existing = grouped.get(item.sceneKey)
+          if (!existing || score > existing.score) grouped.set(item.sceneKey, { item, score })
+        }
+        const matched = [...grouped.values()]
           .filter(item => item.score >= cfg.semanticSimilarityThreshold)
           .sort((left, right) => right.score - left.score)
-          .slice(0, cfg.semanticPromptExamples)
-        const patterns = [...new Set(matched.flatMap(item => item.item.patterns || []))].slice(0, cfg.semanticPromptExamples)
+        const best = matched[0]
+        const second = matched[1]
+        const margin = best ? best.score - (second?.score || 0) : 0
+        if (!best || (second && margin < cfg.semanticMinMargin)) {
+          this.recordSemanticRecall(memory, cfg, { outcome: "ambiguous", elapsedMs: Date.now() - startedAt, score: best?.score, margin, scene: queryScene.key })
+          return ""
+        }
+        const patterns = [...new Set(best.item.patterns || [])].slice(0, cfg.semanticPromptExamples)
         if (!patterns.length) return ""
         const prompt = [
           "【希洛当前话题的表达提示】",
           "这是由语义相近样本提炼出的匿名句式和节奏，不含任何群友原话；只在自然契合时采用，不要解释来源。",
           ...patterns.map(pattern => `- ${pattern}`)
         ].join("\n")
+        best.item.usedCount = (Number(best.item.usedCount) || 0) + 1
+        best.item.lastUsedAt = nowIso()
+        this.recordSemanticRecall(memory, cfg, { outcome: "hit", elapsedMs: Date.now() - startedAt, score: best.score, margin, scene: queryScene.key })
         this.semanticQueryCache.set(cacheKey, {
           expiresAt: Date.now() + cfg.semanticQueryCacheMinutes * 60 * 1000,
-          prompt
+          prompt,
+          metrics: { score: best.score, margin }
         })
         if (this.semanticQueryCache.size > 128) {
           const oldest = this.semanticQueryCache.keys().next().value
@@ -832,7 +1051,14 @@ export class GlobalStyleLearnerManager {
         }
         return prompt
       } catch (error) {
-        this.semanticFailureUntil = Date.now() + 60000
+        this.markSemanticProviderFailure(embeddingConfig)
+        this.recordSemanticRecall(memory, cfg, {
+          outcome: "failure",
+          elapsedMs: Date.now() - startedAt,
+          failure: true,
+          timeout: error?.name === "TimeoutError" || error?.name === "AbortError",
+          scene: queryScene.key
+        })
         this.logger?.warn?.(`[全局表达学习] 语义召回失败: ${error.message}`)
         return ""
       } finally {
@@ -1125,6 +1351,8 @@ export class GlobalStyleLearnerManager {
       `自动总结：${autoState.enabled ? "开启" : "关闭"}；新增样本 ${autoState.newSamples}/${cfg.autoSummaryMinNewSamples}；冷却 ${autoState.cooldownReady ? "已满足" : "未满足"}`,
       `样本：${samples}/${cfg.minSamplesForPrompt}`,
       `语义召回：${cfg.semanticRecallEnabled ? `开启；样本 ${memory.semanticSamples.length}/${cfg.semanticMinSamples}` : "关闭"}`,
+      `语义指标：查询 ${memory.semanticStats?.queries || 0}；命中 ${memory.semanticStats?.hits || 0}；缓存 ${memory.semanticStats?.cacheHits || 0}；失败 ${memory.semanticStats?.failures || 0}；平均 ${memory.semanticStats?.queries ? Math.round((memory.semanticStats.totalElapsedMs || 0) / memory.semanticStats.queries) : 0}ms`,
+      `场景回填：${memory.semanticBackfill?.completed ? "完成" : "进行中"}；游标 ${memory.semanticBackfill?.cursor || 0}；重试 ${memory.semanticBackfill?.retries || 0}`,
       `规则侧策略：${essenceCount} 条；规则侧避坑：${drossCount} 条`,
       `模型侧策略：${aiRules.absorb.length} 条；模型侧避坑：${aiRules.avoid.length} 条`,
       enough
@@ -1200,6 +1428,7 @@ export class GlobalStyleLearnerManager {
       `样本：${samples} 条；覆盖：${Object.keys(memory.groupCount || {}).length} 个群；注入：${cfg.promptInjectionEnabled ? "开启" : "关闭"}`,
       `脱敏样本池：${Array.isArray(memory.samplePool) ? memory.samplePool.length : 0} 条；模型总结：${memory.aiSummary?.count || 0} 次，自动 ${memory.aiSummary?.autoCount || 0} 次`,
       `语义样本：${Array.isArray(memory.semanticSamples) ? memory.semanticSamples.length : 0}/${cfg.semanticMinSamples}；语义召回：${cfg.semanticRecallEnabled ? "开启" : "关闭"}`,
+      `语义指标：查询 ${memory.semanticStats?.queries || 0}，命中 ${memory.semanticStats?.hits || 0}，缓存 ${memory.semanticStats?.cacheHits || 0}，失败 ${memory.semanticStats?.failures || 0}，超时 ${memory.semanticStats?.timeouts || 0}`,
       `自动总结：${autoState.enabled ? "开启" : "关闭"}；总样本门槛 ${autoState.totalSamples}/${cfg.autoSummaryMinTotalSamples}；新增样本 ${autoState.newSamples}/${cfg.autoSummaryMinNewSamples}；冷却 ${autoState.cooldownReady ? "已满足" : "未满足"}`,
       `主要来源：${groupSummary}`,
       features.length ? `离散特征：${features.map(([k, v]) => `${featureLabel(k)} ${v}`).join("、")}` : "离散特征：暂无",

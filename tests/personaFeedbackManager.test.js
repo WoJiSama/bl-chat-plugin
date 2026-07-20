@@ -1,6 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { PersonaFeedbackManager } from '../utils/PersonaFeedbackManager.js'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 
 test('softens hard robot or human identity denial', () => {
   const manager = new PersonaFeedbackManager({ logger: null })
@@ -69,4 +72,22 @@ test('keeps playful banter outside explicit tone criticism', () => {
   const reply = '你少来，我就开个玩笑😋'
 
   assert.equal(manager.guardReply(reply, { enabled: true }, { userText: '哈哈你又开始了' }), reply)
+})
+
+test('only explicit master feedback is exposed for semantic style learning', async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'persona-feedback-'))
+  const manager = new PersonaFeedbackManager({ cwd, logger: null })
+  const event = { group_id: 1, user_id: 2, message_id: 3, isMaster: true }
+  try {
+    manager.rememberBotReply({ ...event, message_id: 2 }, '很抱歉，我不能帮你。')
+    const result = await manager.recordFeedback(event, '.希洛反馈 太客服了')
+    assert.match(result, /客服腔/)
+    assert.deepEqual(manager.getLatestFeedback(event)?.tags, ['too_customer'])
+    assert.equal(manager.getLatestFeedback({ ...event, isMaster: false }), manager.getLatestFeedback(event))
+    const denied = await manager.recordFeedback({ ...event, user_id: 3, isMaster: false }, '.希洛反馈 太硬了')
+    assert.match(denied, /只有主人/)
+    assert.equal(manager.getLatestFeedback({ ...event, user_id: 3, isMaster: false }), null)
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true })
+  }
 })

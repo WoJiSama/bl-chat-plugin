@@ -120,6 +120,7 @@ export class PersonaFeedbackManager {
     this.cwd = cwd
     this.logger = logger
     this.lastReplies = new Map()
+    this.lastFeedback = new Map()
   }
 
   getDataDir() {
@@ -195,7 +196,12 @@ export class PersonaFeedbackManager {
     ensureDir(this.getDataDir())
     fs.appendFileSync(this.getFeedbackPath(), `${JSON.stringify(record)}\n`, "utf8")
     this.updateSummary(tags, feedback)
+    this.lastFeedback.set(this.getConversationKey(e), record)
     return `记下来了：${tags.map(tag => tag.label).join("、")}`
+  }
+
+  getLatestFeedback(e) {
+    return this.lastFeedback.get(this.getConversationKey(e)) || null
   }
 
   readSummary() {

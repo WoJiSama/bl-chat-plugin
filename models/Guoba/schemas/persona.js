@@ -189,19 +189,28 @@ export default [
     field: "globalStyleLearning.semanticMinSamples",
     label: "召回前最小样本数",
     component: "InputNumber",
-    componentProps: { min: 12, max: 500, step: 4, placeholder: "24" }
+    componentProps: { min: 2, max: 500, step: 1, placeholder: "6" },
+    bottomHelpMessage: "场景原型会去重，达到少量不同场景即可开始召回"
   },
   {
     field: "globalStyleLearning.semanticPromptExamples",
     label: "最多召回句式数",
     component: "InputNumber",
-    componentProps: { min: 1, max: 4, step: 1, placeholder: "2" }
+    componentProps: { min: 1, max: 4, step: 1, placeholder: "1" },
+    bottomHelpMessage: "默认只注入一条，避免多种语气互相拉扯"
   },
   {
     field: "globalStyleLearning.semanticSimilarityThreshold",
     label: "语义相似度阈值",
     component: "InputNumber",
     componentProps: { min: 0.4, max: 0.95, step: 0.01, placeholder: "0.68" }
+  },
+  {
+    field: "globalStyleLearning.semanticMinMargin",
+    label: "首二场景最小分差",
+    component: "InputNumber",
+    componentProps: { min: 0, max: 0.3, step: 0.01, placeholder: "0.08" },
+    bottomHelpMessage: "分差不足时不注入，避免不确定的语气干扰回复"
   },
   {
     field: "globalStyleLearning.semanticEmbedTimeoutMs",
@@ -211,10 +220,31 @@ export default [
     bottomHelpMessage: "超时只跳过本次语义提示，不影响正常回复"
   },
   {
+    field: "globalStyleLearning.semanticPromptWaitMs",
+    label: "主回复最多等待语义毫秒",
+    component: "InputNumber",
+    componentProps: { min: 0, max: 1200, step: 50, placeholder: "350" },
+    bottomHelpMessage: "超过此时间主回复直接继续，后台请求仍可填充缓存"
+  },
+  {
     field: "globalStyleLearning.semanticQueryCacheMinutes",
     label: "语义查询缓存分钟",
     component: "InputNumber",
     componentProps: { min: 1, max: 60, step: 1, placeholder: "10" }
+  },
+  {
+    field: "globalStyleLearning.semanticBackfillRetrySeconds",
+    label: "历史场景回填重试秒数",
+    component: "InputNumber",
+    componentProps: { min: 15, max: 600, step: 15, placeholder: "75" },
+    bottomHelpMessage: "Embedding 暂时失败时后台自动续跑，不影响聊天"
+  },
+  {
+    field: "globalStyleLearning.semanticFeedbackWeight",
+    label: "主人反馈权重",
+    component: "InputNumber",
+    componentProps: { min: 1, max: 10, step: 1, placeholder: "4" },
+    bottomHelpMessage: "仅 .希洛反馈 的明确纠正会使用该权重"
   },
 
   { component: "Divider", label: "用户画像" },

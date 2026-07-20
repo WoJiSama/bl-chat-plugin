@@ -241,11 +241,16 @@ pluginSettings:
     # 语义召回只注入匿名句式/节奏，不会把群友原话放进提示词。
     semanticRecallEnabled: true
     semanticSampleLimit: 240
-    semanticMinSamples: 24
-    semanticPromptExamples: 2
+    semanticMinSamples: 6
+    semanticPromptExamples: 1
     semanticSimilarityThreshold: 0.68
+    semanticMinMargin: 0.08
     semanticEmbedTimeoutMs: 1200
+    semanticPromptWaitMs: 350
     semanticQueryCacheMinutes: 10
+    semanticSchemaVersion: 2
+    semanticBackfillRetrySeconds: 75
+    semanticFeedbackWeight: 4
   # 固定身份绑定：把 QQ 号和人设关系绑定，优先级高于群名片/昵称/历史。
   # 示例：
   # identityBindings:

@@ -1026,6 +1026,21 @@ async function withContextualMemoryTimeout(promise) {
   }
 }
 
+async function withOptionalPromptTimeout(promise, timeoutMs) {
+  const budget = Math.max(0, Number(timeoutMs) || 0)
+  if (!budget) return ''
+  let timer = null
+  const timeout = new Promise(resolve => {
+    timer = setTimeout(() => resolve(''), budget)
+  })
+  try {
+    const result = await Promise.race([promise, timeout])
+    return typeof result === 'string' ? result : ''
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 function getOrCreateGroupLimiter(limitersMap, groupId, concurrency) {
   const entry = limitersMap.get(groupId)
   if (entry && entry.concurrency === concurrency) {
@@ -5148,7 +5163,10 @@ ${recentHistory || '(无)'}
           : ''
         const personaFeedbackPrompt = personaFeedbackManager.buildFeedbackPrompt(this.config.personaGuard)
         const globalStylePrompt = globalStyleLearnerManager.buildPrompt(this.config.globalStyleLearning)
-        const semanticStylePrompt = await semanticStylePromptPromise
+        const semanticStylePrompt = await withOptionalPromptTimeout(
+          semanticStylePromptPromise,
+          this.config.globalStyleLearning?.semanticPromptWaitMs ?? 350
+        )
 
         // 知识库检索
         let knowledgePrompt = ''
@@ -7187,7 +7205,20 @@ ${mcpPrompts}
   }
 
   async recordPersonaFeedback(e) {
-    await e.reply(await personaFeedbackManager.recordFeedback(e, e.msg || ""))
+    const result = await personaFeedbackManager.recordFeedback(e, e.msg || "")
+    const feedback = personaFeedbackManager.getLatestFeedback(e)
+    if (feedback) {
+      try {
+        globalStyleLearnerManager.observePersonaFeedback(
+          feedback,
+          this.config.globalStyleLearning,
+          this.config.embeddingAiConfig
+        )
+      } catch (error) {
+        logger.warn(`[全局表达学习] 记录主人反馈失败: ${error.message}`)
+      }
+    }
+    await e.reply(result)
     return true
   }
 
