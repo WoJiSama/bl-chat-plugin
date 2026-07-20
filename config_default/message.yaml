@@ -93,6 +93,9 @@ pluginSettings:
     recentHistoryMessages: 10
     relevantHistoryMessages: 6
     maxSelectedHistoryMessages: 18
+    shortChatRecentHistoryMessages: 6
+    shortChatRelevantHistoryMessages: 2
+    shortChatMaxSelectedHistoryMessages: 8
     complexModelRouting: true
     complexUserChars: 180
     complexContextChars: 2600
@@ -417,7 +420,8 @@ pluginSettings:
   searchAiConfig: {
     searchApiUrl: https://api.openai.com/v1/chat/completions,
     searchApiModel: deepseek-r1-search,
-    searchApiKey: sk-xxxxx
+    searchApiKey: sk-xxxxx,
+    timeoutMs: 20000
   }
   memoryAiConfig: {
     memoryAiUrl: https://api.openai.com/v1/chat/completions,

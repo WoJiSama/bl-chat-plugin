@@ -24,7 +24,7 @@ import { diceManager } from "../utils/DiceManager.js"
 import { analyzeReplyText } from "../utils/SmartReply.js"
 import { buildMissingImageAnalysisReply, looksLikeImageAuthenticityRequest, looksLikeImageVerificationRequest, looksLikeVisualInspectionRequest, shouldAskForMissingImageForVisualRequest } from "../utils/imageRequestGuard.js"
 import { compileImagePrompt } from "../utils/promptCompiler.js"
-import { resolveDeterministicToolIntent, resolveToolRequestMergeMs } from "../utils/toolIntentManifests.js"
+import { resolveDeterministicToolIntent, resolveToolRequestMergeMs, selectToolIntentCandidates } from "../utils/toolIntentManifests.js"
 import { buildToolSkillCatalog, normalizeToolSkillParams } from "../utils/toolSkills.js"
 import { extractExplicitGroupWorkflowRules, formatGroupWorkflowTeachingPrompt } from "../utils/memory/groupWorkflow.js"
 import { extractExplicitGroupKnowledge, formatGroupKnowledgeTeachingPrompt } from "../utils/memory/groupKnowledge.js"
@@ -36,13 +36,14 @@ import { hasExplicitImageEditAction, shouldPreferImageGeneration, shouldRenderIm
 import { buildImageFailureReply, classifyImageFailure } from "../utils/imageFailurePolicy.js"
 import { formatGroupContextImagePrompt, resolveGroupContextAssets } from "../utils/groupContextResolver.js"
 import { buildGenericChatFailureReply } from "../utils/chatFailureReply.js"
+import { shouldRunSemanticToolPlanner } from "../utils/semanticToolPolicy.js"
 import { classifyChatRequestFailure, executeChatRequestWithRecovery } from "../utils/chatRequestRecovery.js"
 import { safeTruncateUnicode, splitUnicodeText } from "../utils/unicodeText.js"
 import { filterToolsForEmojiExposure, shouldExposeEmojiToolForMessage } from "../utils/emojiToolPolicy.js"
 import { buildExcelToolParams, hasExcelWorkbookContext, shouldBypassMergeForExcel, shouldUseExcelWorkbookTool } from "../utils/excelRequestPolicy.js"
 import { decideToolContinuation } from "../utils/toolContinuationPolicy.js"
 import { buildToolGroundingInstruction, buildUnavailableToolReply, hasUsableToolResult } from "../utils/toolResultGrounding.js"
-import { buildStructuredHistoryMessage, resolveToolRoundLimit, selectRelevantGroupHistory } from "../utils/agentIntelligence.js"
+import { buildStructuredHistoryMessage, resolveHistorySelectionBudget, resolveToolRoundLimit, selectRelevantGroupHistory } from "../utils/agentIntelligence.js"
 import {
   buildModrinthBilingualReplyInstruction,
   buildModrinthCardItemsFromData,
@@ -328,6 +329,13 @@ function isCasualBotGreeting(text = "") {
   const content = normalizeIntentText(text)
   if (!content) return false
   return CASUAL_BOT_GREETING_PATTERNS.some(pattern => pattern.test(content))
+}
+
+function shouldUseCompactHistory({ text = "", images = [], videos = [], quotedText = "" } = {}) {
+  const content = normalizeIntentText(text)
+  if (!content || content.length > 80 || images.length || videos.length || quotedText) return false
+  if (isRealtimeInfoRequest(content) || isExplicitSearchRequest(content) || isExplicitToolIntent(content)) return false
+  return !/(?:他|她|它|这个|那个|上面|下面|前面|刚才|刚刚|之前|前一条|这张|那张|这段|引用|转发|回复)/u.test(content)
 }
 
 function hasDirectBotName(text = "", botName = "") {
@@ -5296,6 +5304,14 @@ ${mcpPrompts}
               return statusText ? { ...msg, content: `${msg.content}\n${statusText}` } : msg
             }))
             const intelligence = this.config.agentIntelligence || {}
+            const historyBudget = resolveHistorySelectionBudget(intelligence, {
+              compact: shouldUseCompactHistory({
+                text: [args, msg].filter(Boolean).join("\n"),
+                images,
+                videos,
+                quotedText: e?._quotedPromptContext?.text || repliedMessage?.message || ""
+              })
+            })
             const originalHistoryCount = groupUserMessages.length
             if (intelligence.enabled !== false) {
               groupUserMessages = selectRelevantGroupHistory(groupUserMessages, {
@@ -5303,13 +5319,15 @@ ${mcpPrompts}
                 replyMessageId: e?._quotedPromptContext?.messageId,
                 currentUserId: userId,
                 botId: Bot.uin,
-                recentCount: intelligence.recentHistoryMessages,
-                relevantCount: intelligence.relevantHistoryMessages,
-                maxMessages: intelligence.maxSelectedHistoryMessages
+                recentCount: historyBudget.recentCount,
+                relevantCount: historyBudget.relevantCount,
+                maxMessages: historyBudget.maxMessages
               })
             }
+            session.historySelectionMode = historyBudget.mode
+            session.selectedGroupHistoryCount = groupUserMessages.length
             if (groupUserMessages.length < originalHistoryCount) {
-              logger.info(`[上下文选择] group=${groupId} selected=${groupUserMessages.length}/${originalHistoryCount} recent=${groupUserMessages.filter(item => item.contextSection === "recent").length} relevant=${groupUserMessages.filter(item => item.contextSection === "relevant").length}`)
+              logger.info(`[上下文选择] group=${groupId} mode=${historyBudget.mode} selected=${groupUserMessages.length}/${originalHistoryCount} recent=${groupUserMessages.filter(item => item.contextSection === "recent").length} relevant=${groupUserMessages.filter(item => item.contextSection === "relevant").length}`)
             }
           }
         }
@@ -5495,11 +5513,7 @@ ${mcpPrompts}
               groupUserMessages: session.groupUserMessages,
               avatarDrawReference: session.avatarDrawReference,
               groupWorkflowPrompt: workflowPrompt,
-              sessionTools: session.tools,
-              // Direct requests are planned against the whole registered
-              // capability set. Keyword manifests remain an optimization, not
-              // the boundary that decides whether a tool exists to 希洛.
-              forcePlanning: Boolean(e?._directTriggerMerged) && !isCasualBotGreeting(currentIntentText)
+              sessionTools: session.tools
             })
           : null
         const semanticToolCall = semanticDecision?.toolName
@@ -5595,7 +5609,9 @@ ${mcpPrompts}
         }
 
 	        const requestData = this.buildRequestData(session.groupUserMessages, session.tools, toolChoice)
+            const initialModelStartedAt = Date.now()
 	        let response = await this.retryRequest(requestData, session.toolContent)
+            logger.info(`[模型耗时] group=${groupId} stage=initial toolChoice=${typeof toolChoice === "string" ? toolChoice : toolChoice?.function?.name || "auto"} history=${session.selectedGroupHistoryCount || 0} mode=${session.historySelectionMode || "full"} elapsed=${Date.now() - initialModelStartedAt}ms`)
 
 	        if (!response?.choices?.[0]) {
 		          if (response?.error) {
@@ -6078,11 +6094,13 @@ ${mcpPrompts}
 
   shouldUseSemanticToolIntent(e = {}, text = "", images = [], videos = [], options = {}) {
     const content = normalizeIntentText(text || e?.msg || "")
-    if (!content && !images.length && !videos.length) return false
-    if (images.length || videos.length) return true
-    if (options.forcePlanning === true) return true
-    if (isExplicitToolIntent(content) || isRealtimeInfoRequest(content) || isExplicitSearchRequest(content)) return true
-    return SEMANTIC_TOOL_HINT_PATTERN.test(content)
+    return shouldRunSemanticToolPlanner({
+      hasMedia: images.length > 0 || videos.length > 0,
+      hasKnownToolCandidate: Array.isArray(options.knownToolCandidates) && options.knownToolCandidates.length > 0,
+      hasExplicitToolIntent: isExplicitToolIntent(content),
+      hasRealtimeRequest: isRealtimeInfoRequest(content),
+      hasExplicitSearchRequest: isExplicitSearchRequest(content)
+    })
   }
 
   normalizeToolDecision(decision = {}, context = {}) {
@@ -6197,10 +6215,6 @@ ${mcpPrompts}
   }
 
   async classifySemanticToolIntent(context = {}) {
-    if (!this.shouldUseSemanticToolIntent(context.e, context.currentIntentText, context.images, context.videos, {
-      forcePlanning: context.forcePlanning === true
-    })) return null
-
     const cfg = this.config.toolsAiConfig || {}
     const apiUrl = cfg.toolsAiUrl
     const apiKey = cfg.toolsAiApikey
@@ -6216,6 +6230,10 @@ ${mcpPrompts}
       .map(tool => tool?.function)
       .filter(tool => tool?.name)
     const availableToolNames = availableTools.map(tool => tool.name)
+    const knownToolCandidates = selectToolIntentCandidates(context.currentIntentText || "", availableToolNames)
+    if (!this.shouldUseSemanticToolIntent(context.e, context.currentIntentText, context.images, context.videos, {
+      knownToolCandidates
+    })) return null
     const toolCatalog = buildToolSkillCatalog(this.toolInstances, availableToolNames)
 
     const classifyStartedAt = Date.now()

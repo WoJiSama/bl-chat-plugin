@@ -8,7 +8,7 @@ import { safeTruncateUnicode } from "../../utils/unicodeText.js";
  * Search 工具类，用于自由搜索并控制返回结果的大小
  */
 export class SearchInformationTool extends AbstractTool {
-  constructor() {
+  constructor({ fetchImpl = globalThis.fetch, progressDelayMs = 2500 } = {}) {
     super();
     this.name = 'searchInformationTool';
     this.description = '请求外部 API 进行自由搜索，检索结果，对于需要进行搜索或需要实时数据信息的时候使用，总结群聊聊天记录时无需调用';
@@ -25,6 +25,8 @@ export class SearchInformationTool extends AbstractTool {
 
     // 固定最大 token 数量为 30000
     this.maxTokens = 30000;
+    this.fetchImpl = fetchImpl;
+    this.progressDelayMs = Math.max(500, Number(progressDelayMs) || 2500);
   }
 
   /**
@@ -114,6 +116,8 @@ export class SearchInformationTool extends AbstractTool {
       return '搜索失败：搜索关键词不能为空';
     }
 
+    let progressTimer = null;
+    let controller = null;
     try {
       // 配置路径
       const configPath = path.join(process.cwd(), 'plugins/bl-chat-plugin/config/message.yaml');
@@ -124,22 +128,37 @@ export class SearchInformationTool extends AbstractTool {
       const apiKey = config.searchAiConfig?.searchApiKey || 'sk-xxxxxx'
 
       const requestData = { "model": config.searchAiConfig?.searchApiModel || 'deepseek-r1-search', "messages": [{ "role": "user", "content": query }], "temperature": 1, "top_p": 0.1 }
+      const timeoutMs = Math.max(3000, Number(config.searchAiConfig?.timeoutMs) || 20000)
+      controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), timeoutMs)
+      progressTimer = setTimeout(() => {
+        e?.reply?.('我还在查，结果出来就发。').catch?.(() => {})
+      }, this.progressDelayMs)
 
-      const response = await fetch(apiUrl, {
+      const response = await this.fetchImpl(apiUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify(requestData),
+        signal: controller.signal
       })
+      clearTimeout(timeout)
 
       const analysis = await response.json()
-      return analysis.choices[0]?.message.content + '\n\n提示：如果用户想基于搜索结果制作文件，可以使用 aiMindMapTool 工具继续操作。'
+      if (!response.ok) throw new Error(`搜索服务返回 ${response.status}`)
+      const content = analysis?.choices?.[0]?.message?.content
+      if (!content) throw new Error('搜索服务没有返回可用结果')
+      return content + '\n\n提示：如果用户想基于搜索结果制作文件，可以使用 aiMindMapTool 工具继续操作。'
 
     } catch (error) {
       console.error('搜索过程发生错误:', error);
-      return `搜索失败：${error.message || '发生未知错误'}`;
+      const message = error?.name === 'AbortError' ? '搜索超过 20 秒仍未返回' : error.message || '发生未知错误'
+      return `搜索失败：${message}`;
+    } finally {
+      if (progressTimer) clearTimeout(progressTimer)
+      controller?.abort?.()
     }
   }
 }

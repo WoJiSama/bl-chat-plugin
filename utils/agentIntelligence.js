@@ -107,6 +107,23 @@ export function selectRelevantGroupHistory(messages = [], options = {}) {
   }))
 }
 
+export function resolveHistorySelectionBudget(config = {}, { compact = false } = {}) {
+  const readCount = (value, fallback, min, max) => {
+    const number = Number(value)
+    return Math.max(min, Math.min(max, Number.isFinite(number) ? Math.floor(number) : fallback))
+  }
+  if (compact) {
+    const recentCount = readCount(config.shortChatRecentHistoryMessages, 6, 4, 12)
+    const relevantCount = readCount(config.shortChatRelevantHistoryMessages, 2, 0, 6)
+    const maxMessages = readCount(config.shortChatMaxSelectedHistoryMessages, 8, recentCount, 16)
+    return { recentCount, relevantCount, maxMessages, mode: 'compact' }
+  }
+  const recentCount = readCount(config.recentHistoryMessages, 10, 4, 30)
+  const relevantCount = readCount(config.relevantHistoryMessages, 6, 0, 20)
+  const maxMessages = readCount(config.maxSelectedHistoryMessages, 18, recentCount, 50)
+  return { recentCount, relevantCount, maxMessages, mode: 'full' }
+}
+
 export function buildStructuredHistoryMessage(messages = []) {
   const history = (Array.isArray(messages) ? messages : []).filter(message => compactText(message?.content))
   if (!history.length) return null

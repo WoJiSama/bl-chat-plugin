@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   buildStructuredHistoryMessage,
   inspectAgentRequestComplexity,
+  resolveHistorySelectionBudget,
   resolveAgentBackend,
   resolveToolRoundLimit,
   selectRelevantGroupHistory,
@@ -63,6 +64,17 @@ test('builds structured history without a fake assistant acknowledgement', () =>
   assert.match(context.content, /较早但与当前问题相关/)
   assert.match(context.content, /\[希洛回复\] 你慢慢找/)
   assert.doesNotMatch(context.content, /收到，我会根据历史记录/)
+})
+
+test('uses a bounded history budget for independent short chat only', () => {
+  assert.deepEqual(
+    resolveHistorySelectionBudget({ shortChatRecentHistoryMessages: 7, shortChatRelevantHistoryMessages: 1, shortChatMaxSelectedHistoryMessages: 8 }, { compact: true }),
+    { recentCount: 7, relevantCount: 1, maxMessages: 8, mode: 'compact' }
+  )
+  assert.deepEqual(
+    resolveHistorySelectionBudget({ recentHistoryMessages: 10, relevantHistoryMessages: 6, maxSelectedHistoryMessages: 18 }),
+    { recentCount: 10, relevantCount: 6, maxMessages: 18, mode: 'full' }
+  )
 })
 
 test('routes reference-heavy reasoning to the stronger backend but keeps greetings fast', () => {

@@ -49,6 +49,25 @@ export default [
     componentProps: { min: 8, max: 50, placeholder: "18" }
   },
   {
+    field: "agentIntelligence.shortChatRecentHistoryMessages",
+    label: "短闲聊保留最近消息数",
+    component: "InputNumber",
+    componentProps: { min: 4, max: 12, placeholder: "6" }
+  },
+  {
+    field: "agentIntelligence.shortChatRelevantHistoryMessages",
+    label: "短闲聊补充相关消息数",
+    component: "InputNumber",
+    componentProps: { min: 0, max: 6, placeholder: "2" }
+  },
+  {
+    field: "agentIntelligence.shortChatMaxSelectedHistoryMessages",
+    label: "短闲聊上下文上限",
+    component: "InputNumber",
+    bottomHelpMessage: "仅用于无媒体、无工具、无引用指代的短消息；复杂请求仍使用完整历史预算",
+    componentProps: { min: 6, max: 16, placeholder: "8" }
+  },
+  {
     field: "agentIntelligence.complexModelRouting",
     label: "复杂请求自动使用工具模型",
     component: "Switch",
