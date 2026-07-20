@@ -415,7 +415,8 @@ pluginSettings:
   analysisAiConfig: {
     analysisApiUrl: https://api.openai.com/v1/chat/completions,
     analysisApiModel: gemini-3-pro-preview,
-    analysisApiKey: sk-xxxxx
+    analysisApiKey: sk-xxxxx,
+    timeoutMs: 25000
   }
   searchAiConfig: {
     searchApiUrl: https://api.openai.com/v1/chat/completions,

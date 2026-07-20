@@ -18,10 +18,24 @@ test("distinguishes errors, not-found results and grounded success", () => {
   assert.equal(classifyToolResult('{"analysis":"图片里写着测试"}').kind, "success")
 })
 
+test("preserves structured tool outcomes and gives image-specific unavailable replies", () => {
+  const timeout = [{
+    toolName: "googleImageAnalysisTool",
+    result: JSON.stringify({ kind: "tool_outcome", status: "error", tool: "googleImageAnalysisTool", error: { code: "vision_timeout" } })
+  }]
+  const expired = [{
+    toolName: "googleImageAnalysisTool",
+    result: JSON.stringify({ kind: "tool_outcome", status: "error", tool: "googleImageAnalysisTool", error: { code: "image_link_expired" } })
+  }]
+  assert.equal(classifyToolResult(timeout[0].result).kind, "error")
+  assert.match(buildUnavailableToolReply(timeout), /识图等了太久/)
+  assert.match(buildUnavailableToolReply(expired), /重新发一次原图/)
+})
+
 test("forbids filling empty results from chat history", () => {
   const empty = [{ toolName: "googleImageAnalysisTool", result: "{}" }]
   assert.equal(hasUsableToolResult(empty), false)
-  assert.match(buildUnavailableToolReply(empty), /不猜/)
+  assert.match(buildUnavailableToolReply(empty), /不会根据猜测/)
   assert.match(buildToolGroundingInstruction(empty), /聊天历史.*绝不能/)
   assert.match(buildToolGroundingInstruction(empty), /googleImageAnalysisTool=empty/)
 })

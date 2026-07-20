@@ -22,9 +22,16 @@ function hasMeaningfulValue(value) {
 export function classifyToolResult(result) {
   const text = typeof result === "string" ? result.trim() : JSON.stringify(result ?? "").trim()
   if (!text) return { kind: "empty", text: "" }
-  if (ERROR_PATTERN.test(text)) return { kind: "error", text }
-  if (NOT_FOUND_PATTERN.test(text)) return { kind: "not_found", text }
   const parsed = parseJson(text)
+  if (parsed?.kind === "tool_outcome") {
+    const status = String(parsed.status || "").toLowerCase()
+    if (["error", "failed", "timeout"].includes(status)) return { kind: "error", text, parsed }
+    if (["not_found", "missing"].includes(status)) return { kind: "not_found", text, parsed }
+    if (["empty", "unavailable"].includes(status)) return { kind: "empty", text, parsed }
+    if (status === "success") return { kind: "success", text, parsed }
+  }
+  if (ERROR_PATTERN.test(text)) return { kind: "error", text, parsed }
+  if (NOT_FOUND_PATTERN.test(text)) return { kind: "not_found", text }
   if (parsed !== undefined && !hasMeaningfulValue(parsed)) return { kind: "empty", text, parsed }
   return { kind: "success", text, parsed }
 }
@@ -43,7 +50,16 @@ export function buildToolGroundingInstruction(results = []) {
 }
 
 export function buildUnavailableToolReply(results = []) {
-  const kinds = results.map(result => classifyToolResult(result?.result).kind)
+  const classified = results.map(result => ({ toolName: String(result?.toolName || ""), state: classifyToolResult(result?.result) }))
+  const kinds = classified.map(result => result.state.kind)
+  const imageFailure = classified.find(result => result.toolName === "googleImageAnalysisTool" && result.state.kind !== "success")
+  if (imageFailure) {
+    const code = String(imageFailure.state.parsed?.error?.code || "")
+    if (code === "image_link_expired") return "图片我收到了，但这张图的下载链接已经过期了。你重新发一次原图，我再看。"
+    if (code === "image_download_failed") return "图片我收到了，但这次没能把原图读下来。我不会根据猜测分析 Steam 的报错。"
+    if (code === "vision_timeout") return "图片我收到了，但这次识图等了太久仍没返回结果。我先不根据猜测判断 Steam 的问题。"
+    return "图片我收到了，但这次识图没有拿到可用结果。我不会根据猜测判断 Steam 的问题。"
+  }
   if (kinds.includes("not_found")) {
     return "这次没有找到你要的内容。现有结果里没有依据，我不会拿旧聊天记录补答案。"
   }

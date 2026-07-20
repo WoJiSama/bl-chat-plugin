@@ -11,12 +11,39 @@ const IMAGE_ANALYSIS_PROGRESS_MESSAGES = [
     "我看一下哦，等我盯两眼。",
     "收到收到，我先帮你看看。"
 ];
+const DEFAULT_ANALYSIS_TIMEOUT_MS = 25000;
+
+function redactErrorMessage(error) {
+    return String(error?.message || error || 'unknown error')
+        .replace(/https?:\/\/\S+/g, '[url]')
+        .replace(/sk-[A-Za-z0-9_-]+/g, '[key]')
+        .slice(0, 240);
+}
+
+function imageIdentity(url = '') {
+    try {
+        const parsed = new URL(url);
+        return parsed.searchParams.get('fileid') || `${parsed.origin}${parsed.pathname}`;
+    } catch {
+        return String(url || '');
+    }
+}
+
+function dedupeImageUrls(urls = []) {
+    const seen = new Set();
+    return (Array.isArray(urls) ? urls : []).filter(url => {
+        const key = imageIdentity(url);
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+}
 
 /**
  * 图片处理工具类，用于处理用户的图片相关请求
  */
 export class GoogleImageAnalysisTool extends AbstractTool {
-    constructor() {
+    constructor({ fetchImpl = globalThis.fetch } = {}) {
         super();
         this.name = 'googleImageAnalysisTool';
         this.description = '进行图像分析, 当用户识别图片内容时使用此工具。支持多图片分析，可提取图片中的文字信息并进行理解分析。注意：所有图片URL必须保持完整原始形式，不得修改或简化URL参数。当用户要求查看QQ头像时（如"看下我的头像"、"看下他的头像"、"看下张三的头像"），使用头像URL格式：https://q1.qlogo.cn/g?b=qq&nk={QQ号}&s=640';
@@ -50,6 +77,7 @@ export class GoogleImageAnalysisTool extends AbstractTool {
             required: ['images'],
             additionalProperties: false
         };
+        this.fetchImpl = fetchImpl;
 
     }
 
@@ -181,7 +209,7 @@ export class GoogleImageAnalysisTool extends AbstractTool {
             await this.sendProgress(e);
 
             // 处理所有图片URL
-            const images = await normalizeImageUrls(rawImages);
+            const images = dedupeImageUrls(await normalizeImageUrls(rawImages));
             const prompt = opts.prompt;
 
             if (images.length === 0) {
@@ -200,10 +228,10 @@ export class GoogleImageAnalysisTool extends AbstractTool {
                 const img_urls = await getBase64Image(url, filetypes);
 
                 if (img_urls.includes("该图片链接已过期")) {
-                    return { error: "该图片下载链接已过期，请重新上传" };
+                    return { kind: 'tool_outcome', status: 'error', tool: this.name, error: { code: 'image_link_expired', message: '该图片下载链接已过期，请重新上传' } };
                 }
                 if (img_urls.includes("无效的图片下载链接")) {
-                    return { error: "无效的图片下载链接，请确保适配器支持且图片未过期" };
+                    return { kind: 'tool_outcome', status: 'error', tool: this.name, error: { code: 'image_download_failed', message: '无效的图片下载链接，请确保适配器支持且图片未过期' } };
                 }
 
                 const mimeType = mimeTypes.lookup(filetypes) || 'application/octet-stream';
@@ -220,33 +248,44 @@ export class GoogleImageAnalysisTool extends AbstractTool {
 
             const history = [{ role: "user", content: imgurls }];
             try {
-
-
-                const apiUrl = config.analysisAiConfig?.analysisApiUrl || 'https://api.openai.com/v1/chat/completions'
-                const apiKey = config.analysisAiConfig?.analysisApiKey || 'sk-xxxxxx'
-
-                const requestData = {
-                    model: config.analysisAiConfig?.analysisApiModel || "gemini-3-pro-image-preview",
-                    messages: history
+                const analysisConfig = config.analysisAiConfig || {};
+                const candidates = [analysisConfig, ...(Array.isArray(analysisConfig.providers) ? analysisConfig.providers : [])]
+                    .map((item, index) => ({
+                        apiUrl: item.analysisApiUrl || item.apiUrl || 'https://api.openai.com/v1/chat/completions',
+                        apiKey: item.analysisApiKey || item.apiKey || '',
+                        model: item.analysisApiModel || item.model || 'gemini-3-pro-image-preview',
+                        timeoutMs: Math.max(3000, Number(item.timeoutMs || analysisConfig.timeoutMs) || DEFAULT_ANALYSIS_TIMEOUT_MS),
+                        label: index === 0 ? 'primary' : `fallback_${index}`
+                    }))
+                    .filter((item, index, list) => item.apiKey && list.findIndex(other => `${other.apiUrl}:${other.model}` === `${item.apiUrl}:${item.model}`) === index);
+                const failures = [];
+                for (const candidate of candidates) {
+                    const controller = new AbortController();
+                    const timer = setTimeout(() => controller.abort(), candidate.timeoutMs);
+                    try {
+                        const response = await this.fetchImpl(candidate.apiUrl, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json", Authorization: `Bearer ${candidate.apiKey}` },
+                            body: JSON.stringify({ model: candidate.model, messages: history }),
+                            signal: controller.signal
+                        });
+                        const raw = await response.text();
+                        if (!response.ok) throw Object.assign(new Error(`vision HTTP ${response.status}`), { code: 'vision_http' });
+                        let analysis;
+                        try { analysis = JSON.parse(raw); } catch { throw Object.assign(new Error('vision response is not JSON'), { code: 'vision_invalid_response' }); }
+                        const content = analysis?.choices?.[0]?.message?.content;
+                        if (!String(content || '').trim()) throw Object.assign(new Error('vision response has no content'), { code: 'vision_empty_response' });
+                        globalThis.logger?.info?.(`[图片识别] provider=${candidate.label} model=${candidate.model} images=${images.length} success`);
+                        return { analysis: content, evidence: { kind: 'tool_outcome', status: 'success', tool: this.name, imageCount: images.length, provider: candidate.label } };
+                    } catch (error) {
+                        const code = error?.name === 'AbortError' ? 'vision_timeout' : error?.code || 'vision_request_failed';
+                        failures.push({ provider: candidate.label, code });
+                        this.logWarn(`[图片识别] provider=${candidate.label} model=${candidate.model} code=${code} error=${redactErrorMessage(error)}`);
+                    } finally {
+                        clearTimeout(timer);
+                    }
                 }
-
-                const response = await fetch(apiUrl, {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        Authorization: `Bearer ${apiKey}`,
-                    },
-                    body: JSON.stringify(requestData),
-                })
-
-                const analysis = await response.json()
-                const content = analysis.choices?.[0]?.message?.content
-                if (!String(content || "").trim()) {
-                    return { error: "图片分析没有返回可用内容" };
-                }
-                return {
-                    analysis: content
-                };
+                return { kind: 'tool_outcome', status: 'error', tool: this.name, error: { code: failures.at(-1)?.code || 'vision_unavailable', message: '图片识别没有返回可用内容' }, evidence: { imageCount: images.length, attempts: failures } };
 
                 // const apiUrl = "https://api.pearktrue.cn/api/airecognizeimg/"
                 // const response = await fetch(apiUrl, {
