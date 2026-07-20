@@ -4721,7 +4721,7 @@ ${recentHistory || '(无)'}
 
     if (this.config.globalStyleLearning?.enabled !== false) {
       try {
-        globalStyleLearnerManager.observeMessage(e, this.config.globalStyleLearning)
+        globalStyleLearnerManager.observeMessage(e, this.config.globalStyleLearning, this.config.embeddingAiConfig)
         globalStyleLearnerManager.maybeAutoSummarize(
           this.config.globalStyleLearning,
           this.config.memoryAiConfig
@@ -5113,6 +5113,14 @@ ${recentHistory || '(无)'}
           groupId: e.group_id,
           message: e.msg
         })
+        // 和记忆/情绪读取并发，Embedding 超时或失败只会省略这一层提示。
+        const semanticStylePromptPromise = globalStyleLearnerManager.buildRelevantPrompt(
+          this.config.globalStyleLearning,
+          { query: e.msg || args, embeddingConfig: this.config.embeddingAiConfig }
+        ).catch(error => {
+          logger.warn(`[全局表达学习] 语义提示读取失败: ${error.message}`)
+          return ''
+        })
 
         // 获取情感、记忆、表达学习的 prompt
         const emotionPrompt = this.config.emotionSystem?.enabled
@@ -5140,6 +5148,7 @@ ${recentHistory || '(无)'}
           : ''
         const personaFeedbackPrompt = personaFeedbackManager.buildFeedbackPrompt(this.config.personaGuard)
         const globalStylePrompt = globalStyleLearnerManager.buildPrompt(this.config.globalStyleLearning)
+        const semanticStylePrompt = await semanticStylePromptPromise
 
         // 知识库检索
         let knowledgePrompt = ''
@@ -5170,7 +5179,7 @@ ${recentHistory || '(无)'}
           ? await this.getCurrentGroupContext(e)
           : this.getBasicGroupContext(e)
         const mergedTriggerPrompt = this.buildMergedDirectTriggerPrompt(e)
-        const enhancedPrompts = [identityBindingsPrompt, explicitTeachingPrompt, workflowTeachingPrompt, knowledgeTeachingPrompt, workflowPrompt, groupKnowledgePrompt, mergedTriggerPrompt, emotionPrompt, memoryPrompt, expressionPrompt, personaFeedbackPrompt, globalStylePrompt, knowledgePrompt, memberLookupPrompt, personProfilePrompt].filter(Boolean).join('\n')
+        const enhancedPrompts = [identityBindingsPrompt, explicitTeachingPrompt, workflowTeachingPrompt, knowledgeTeachingPrompt, workflowPrompt, groupKnowledgePrompt, mergedTriggerPrompt, emotionPrompt, memoryPrompt, expressionPrompt, personaFeedbackPrompt, globalStylePrompt, semanticStylePrompt, knowledgePrompt, memberLookupPrompt, personProfilePrompt].filter(Boolean).join('\n')
         const runtimeGroupInfo = {
           group_id: groupContext.groupId,
           group_name: groupContext.groupName

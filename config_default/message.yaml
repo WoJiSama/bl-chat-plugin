@@ -238,6 +238,14 @@ pluginSettings:
     autoSummaryMinNewSamples: 300
     autoSummaryCooldownHours: 12
     autoSummaryMinTotalSamples: 120
+    # 语义召回只注入匿名句式/节奏，不会把群友原话放进提示词。
+    semanticRecallEnabled: true
+    semanticSampleLimit: 240
+    semanticMinSamples: 24
+    semanticPromptExamples: 2
+    semanticSimilarityThreshold: 0.68
+    semanticEmbedTimeoutMs: 1200
+    semanticQueryCacheMinutes: 10
   # 固定身份绑定：把 QQ 号和人设关系绑定，优先级高于群名片/昵称/历史。
   # 示例：
   # identityBindings:

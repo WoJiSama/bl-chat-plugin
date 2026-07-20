@@ -172,6 +172,50 @@ export default [
     component: "InputNumber",
     componentProps: { min: 10, max: 100000, step: 10, placeholder: "120" }
   },
+  { component: "Divider", label: "语义表达召回" },
+  {
+    field: "globalStyleLearning.semanticRecallEnabled",
+    label: "启用语义表达召回",
+    component: "Switch",
+    bottomHelpMessage: "按当前话题召回匿名句式和回复节奏；不把群友原话注入提示词"
+  },
+  {
+    field: "globalStyleLearning.semanticSampleLimit",
+    label: "语义样本上限",
+    component: "InputNumber",
+    componentProps: { min: 30, max: 500, step: 10, placeholder: "240" }
+  },
+  {
+    field: "globalStyleLearning.semanticMinSamples",
+    label: "召回前最小样本数",
+    component: "InputNumber",
+    componentProps: { min: 12, max: 500, step: 4, placeholder: "24" }
+  },
+  {
+    field: "globalStyleLearning.semanticPromptExamples",
+    label: "最多召回句式数",
+    component: "InputNumber",
+    componentProps: { min: 1, max: 4, step: 1, placeholder: "2" }
+  },
+  {
+    field: "globalStyleLearning.semanticSimilarityThreshold",
+    label: "语义相似度阈值",
+    component: "InputNumber",
+    componentProps: { min: 0.4, max: 0.95, step: 0.01, placeholder: "0.68" }
+  },
+  {
+    field: "globalStyleLearning.semanticEmbedTimeoutMs",
+    label: "语义请求超时毫秒",
+    component: "InputNumber",
+    componentProps: { min: 200, max: 5000, step: 100, placeholder: "1200" },
+    bottomHelpMessage: "超时只跳过本次语义提示，不影响正常回复"
+  },
+  {
+    field: "globalStyleLearning.semanticQueryCacheMinutes",
+    label: "语义查询缓存分钟",
+    component: "InputNumber",
+    componentProps: { min: 1, max: 60, step: 1, placeholder: "10" }
+  },
 
   { component: "Divider", label: "用户画像" },
   {
