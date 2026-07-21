@@ -5,7 +5,7 @@ import { Readable, Transform } from "stream"
 import { pipeline } from "stream/promises"
 import {
   BILIBILI_ARCHIVE_VIDEO_MAX_SECONDS,
-  resolveBilibiliPlaybackResources,
+  resolveBilibiliPlaybackResult,
   shouldAttachBilibiliVideo
 } from "./bilibiliMessage.js"
 import { buildMediaArtifactKey } from "./messagePipeline/mediaArtifactStore.js"
@@ -86,9 +86,10 @@ export async function buildBilibiliArchiveRelaySegments(card = {}, {
 
   if (!segmentApi?.video) return { segments, tempFiles, artifactLeases }
   const resolveStartedAt = Date.now()
-  const resources = await resolveBilibiliPlaybackResources(card, {
+  const playback = await resolveBilibiliPlaybackResult(card, {
     maxSeconds: BILIBILI_ARCHIVE_VIDEO_MAX_SECONDS
   })
+  const resources = playback.resources
   onTiming?.("playback", Date.now() - resolveStartedAt)
   for (const resource of resources) {
     const downloadStartedAt = Date.now()
@@ -105,7 +106,10 @@ export async function buildBilibiliArchiveRelaySegments(card = {}, {
     segments.push("\n", segmentApi.video(filePath))
   }
   if (!resources.length || !segments.some(item => item?.type === "video")) {
-    segments.push("\n（视频本体暂时获取失败，已保留视频页面）")
+    const reason = !resources.length
+      ? (playback.failureReason || (card.ep_id ? "B站番剧播放接口未提供可下载资源" : "B站视频播放接口未提供可下载资源"))
+      : "B站已提供播放资源，但视频本体下载失败"
+    segments.push(`\n（${reason}，已保留视频页面）`)
   }
   return { segments, tempFiles, artifactLeases }
 }

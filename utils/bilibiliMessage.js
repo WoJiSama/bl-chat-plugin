@@ -81,6 +81,10 @@ export function extractBilibiliBvid(value = "") {
   return String(value || "").match(/\b(BV[0-9A-Za-z]{8,16})\b/i)?.[1] || ""
 }
 
+export function extractBilibiliEpisodeId(value = "") {
+  return String(value || "").match(/\/bangumi\/play\/ep(\d+)/i)?.[1] || ""
+}
+
 export function extractBilibiliShare(payload = {}) {
   if (!payload || typeof payload !== "object") return null
   const serialized = JSON.stringify(payload)
@@ -94,6 +98,7 @@ export function extractBilibiliShare(payload = {}) {
   const title = compactText(detail.desc || genericTitle || prompt || "B站视频", 300)
   const coverUrl = normalizeUrl(detail.preview || detail.cover || detail.pic || "")
   const bvid = extractBilibiliBvid(shortUrl || serialized)
+  const epId = extractBilibiliEpisodeId(shortUrl || serialized)
 
   return {
     type: "bilibili",
@@ -101,13 +106,14 @@ export function extractBilibiliShare(payload = {}) {
     title,
     card_title: compactText(detail.title || "哔哩哔哩", 80),
     short_url: shortUrl,
-    page_url: bvid ? `https://www.bilibili.com/video/${bvid}` : shortUrl,
-    video_url: bvid ? `https://www.bilibili.com/video/${bvid}` : shortUrl,
+    page_url: bvid ? `https://www.bilibili.com/video/${bvid}` : epId ? `https://www.bilibili.com/bangumi/play/ep${epId}` : shortUrl,
+    video_url: bvid ? `https://www.bilibili.com/video/${bvid}` : epId ? `https://www.bilibili.com/bangumi/play/ep${epId}` : shortUrl,
     cover_url: coverUrl,
     bvid,
+    ep_id: epId,
     shared_by: compactText(detail.host?.nick || "", 80),
     shared_by_qq: detail.host?.uin ? String(detail.host.uin) : "",
-    metadata_status: bvid ? "identified" : "card"
+    metadata_status: bvid || epId ? "identified" : "card"
   }
 }
 
@@ -163,13 +169,22 @@ async function requestBilibiliMetadata(card, { fetchImpl, timeoutMs }) {
   try {
     let resolvedUrl = normalizeUrl(card.page_url || card.short_url || "")
     let bvid = extractBilibiliBvid(card.bvid || resolvedUrl)
+    let epId = String(card.ep_id || extractBilibiliEpisodeId(resolvedUrl)).trim()
     if (!bvid && resolvedUrl) {
       const response = await fetchImpl(resolvedUrl, { headers, redirect: "follow", signal: controller.signal })
       resolvedUrl = normalizeUrl(response.url || resolvedUrl)
       bvid = extractBilibiliBvid(resolvedUrl)
-      if (!bvid && !response?.ok) throw new Error(`B站短链返回 ${response?.status || "未知状态"}`)
+      epId = epId || extractBilibiliEpisodeId(resolvedUrl)
+      if (!bvid && !epId && !response?.ok) throw new Error(`B站短链返回 ${response?.status || "未知状态"}`)
     }
-    if (!bvid) return { ...card, metadata_status: "card" }
+    if (!bvid && !epId) return { ...card, metadata_status: "card" }
+    if (epId && !bvid) {
+      const season = await fetchJson(fetchImpl, `https://api.bilibili.com/pgc/view/web/season?ep_id=${encodeURIComponent(epId)}`, { headers, signal: controller.signal })
+      const episode = season?.result?.episodes?.find(item => String(item?.id) === epId) || season?.result?.episodes?.[0]
+      if (!episode?.cid) return { ...card, ep_id: epId, metadata_status: "bangumi_metadata_failed" }
+      const pageUrl = `https://www.bilibili.com/bangumi/play/ep${epId}`
+      return { ...card, title: compactText(episode.long_title || episode.share_copy || card.title, 300), ep_id: epId, cid: Number(episode.cid), duration: Math.round(Number(episode.duration || 0) / 1000), page_count: 1, pages: [{ page: 1, cid: Number(episode.cid), title: compactText(episode.long_title || card.title, 200), duration: Math.round(Number(episode.duration || 0) / 1000) }], cover_url: normalizeUrl(episode.cover || card.cover_url || ""), page_url: pageUrl, video_url: pageUrl, metadata_status: "resolved_bangumi" }
+    }
 
     const view = await fetchJson(
       fetchImpl,
@@ -207,7 +222,7 @@ export async function enrichBilibiliShare(card = {}, options = {}) {
   if (!card || card.type !== "bilibili") return card
   const fetchImpl = options.fetchImpl || globalThis.fetch
   if (typeof fetchImpl !== "function") return card
-  const key = card.bvid || card.short_url || card.page_url
+  const key = card.bvid || card.ep_id || card.short_url || card.page_url
   if (!key) return card
 
   pruneCache()
@@ -293,12 +308,25 @@ export function shouldAttachBilibiliVideo(card = {}, maxSeconds = BILIBILI_ARCHI
   return duration > 0 && duration <= Math.max(1, Number(maxSeconds) || BILIBILI_ARCHIVE_VIDEO_MAX_SECONDS)
 }
 
+function playbackFailureReason(payload = {}, { isBangumi = false } = {}) {
+  const prefix = isBangumi ? "B站番剧播放接口" : "B站视频播放接口"
+  const code = Number(payload?.code)
+  const message = compactText(payload?.message || payload?.result?.message || "", 80)
+  if (Number.isFinite(code) && code !== 0) {
+    if (/登录|未登录/i.test(message)) return `${prefix}要求登录后才能提供资源`
+    if (/地区|区域|版权|港澳台|海外/i.test(message)) return `${prefix}受地区或版权限制，未提供资源`
+    return `${prefix}返回错误${code}${message ? `：${message}` : ""}`
+  }
+  return `${prefix}未提供可下载资源`
+}
+
 async function requestBilibiliPlaybackResources(card = {}, options = {}) {
-  if (!shouldAttachBilibiliVideo(card, options.maxSeconds)) return []
+  if (!shouldAttachBilibiliVideo(card, options.maxSeconds)) return { resources: [], failureReason: "" }
   const fetchImpl = options.fetchImpl || globalThis.fetch
-  if (typeof fetchImpl !== "function") return []
+  if (typeof fetchImpl !== "function") return { resources: [], failureReason: "播放资源请求能力不可用" }
   const bvid = String(card.bvid || extractBilibiliBvid(card.page_url || card.video_url || "")).trim()
-  if (!bvid) return []
+  const epId = String(card.ep_id || extractBilibiliEpisodeId(card.page_url || card.video_url || "")).trim()
+  if (!bvid && !epId) return { resources: [], failureReason: "未识别到B站视频标识" }
 
   const parts = Array.isArray(card.pages) && card.pages.length
     ? card.pages
@@ -310,27 +338,39 @@ async function requestBilibiliPlaybackResources(card = {}, options = {}) {
     Referer: "https://www.bilibili.com/"
   }
   const resources = []
+  let failureReason = ""
 
   try {
     for (const part of parts.slice(0, 20)) {
       const cid = Number(part?.cid || 0)
       if (!cid) continue
-      const url = [
+      const url = epId ? ["https://api.bilibili.com/pgc/player/web/playurl", `?ep_id=${encodeURIComponent(epId)}`, `&cid=${encodeURIComponent(cid)}`, "&qn=6&fnval=0&fourk=0"].join("") : [
         "https://api.bilibili.com/x/player/playurl",
         `?bvid=${encodeURIComponent(bvid)}`,
         `&cid=${encodeURIComponent(cid)}`,
         "&qn=6&fnval=0&fourk=0"
       ].join("")
       const response = await fetchImpl(url, { headers, signal: controller.signal })
-      if (!response?.ok) continue
+      if (!response?.ok) {
+        failureReason ||= `${epId ? "B站番剧" : "B站视频"}播放接口返回 HTTP ${response?.status || "未知状态"}`
+        continue
+      }
       const payload = await response.json()
-      if (Number(payload?.code) !== 0) continue
-      const durls = Array.isArray(payload?.data?.durl) ? payload.data.durl : []
+      if (Number(payload?.code) !== 0) {
+        failureReason ||= playbackFailureReason(payload, { isBangumi: Boolean(epId) })
+        continue
+      }
+      const playData = epId ? payload?.result : payload?.data
+      const durls = Array.isArray(playData?.durl) ? playData.durl : []
+      if (!durls.length) {
+        failureReason ||= playbackFailureReason(payload, { isBangumi: Boolean(epId) })
+        continue
+      }
       for (const item of durls) {
         const mediaUrl = normalizeUrl(item?.url || "")
         if (!mediaUrl) continue
         resources.push({
-          bvid,
+          bvid: bvid || `ep${epId}`,
           cid,
           page: Number(part?.page || 1),
           quality: 6,
@@ -342,21 +382,22 @@ async function requestBilibiliPlaybackResources(card = {}, options = {}) {
         })
       }
     }
-    return resources
-  } catch {
-    return []
+    return { resources, failureReason: resources.length ? "" : failureReason || `${epId ? "B站番剧" : "B站视频"}播放接口未提供可下载资源` }
+  } catch (error) {
+    return { resources, failureReason: resources.length ? "" : `${epId ? "B站番剧" : "B站视频"}播放资源请求失败：${compactText(error?.message || "未知错误", 80)}` }
   } finally {
     clearTimeout(timer)
   }
 }
 
-export async function resolveBilibiliPlaybackResources(card = {}, options = {}) {
+export async function resolveBilibiliPlaybackResult(card = {}, options = {}) {
   const bvid = String(card.bvid || extractBilibiliBvid(card.page_url || card.video_url || "")).trim()
+  const epId = String(card.ep_id || extractBilibiliEpisodeId(card.page_url || card.video_url || "")).trim()
   const parts = Array.isArray(card.pages) && card.pages.length
     ? card.pages
     : [{ page: 1, cid: card.cid }]
   const identity = parts.map(part => `${Number(part?.page || 1)}:${Number(part?.cid || 0)}`).join(",")
-  const key = bvid ? `${bvid}:${identity}:qn6` : ""
+  const key = (bvid || epId) ? `${bvid || `ep${epId}`}:${identity}:qn6` : ""
   if (!key) return await requestBilibiliPlaybackResources(card, options)
   if (playbackPromiseCache.has(key)) return await playbackPromiseCache.get(key)
   const promise = requestBilibiliPlaybackResources(card, options)
@@ -366,6 +407,10 @@ export async function resolveBilibiliPlaybackResources(card = {}, options = {}) 
   } finally {
     if (playbackPromiseCache.get(key) === promise) playbackPromiseCache.delete(key)
   }
+}
+
+export async function resolveBilibiliPlaybackResources(card = {}, options = {}) {
+  return (await resolveBilibiliPlaybackResult(card, options)).resources
 }
 
 export function clearBilibiliMetadataCache() {

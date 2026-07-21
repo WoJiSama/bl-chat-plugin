@@ -335,8 +335,11 @@ export class MediaOutbox {
       const videoSegments = relaySegments.filter(item => item?.type === "video")
       const nonVideoSegments = relaySegments.filter(item => item?.type !== "video")
       if (relayBuildFailed) nonVideoSegments.push("\n（封面或视频资源暂时获取失败，已保留基本信息和页面）")
-      else if (card.metadata_status && card.metadata_status !== "resolved") {
-        nonVideoSegments.push("\n（视频详情或本体暂时获取失败，已保留当前卡片信息和页面）")
+      else if (card.metadata_status && !["resolved", "resolved_bangumi"].includes(card.metadata_status)) {
+        const reason = card.metadata_status === "bangumi_metadata_failed"
+          ? "已识别为B站番剧集，但番剧详情未返回可播放分集信息"
+          : "视频详情暂时未解析完成"
+        nonVideoSegments.push(`\n（${reason}，已保留当前卡片信息和页面）`)
       }
       const videos = []
       const encodeStartedAt = Date.now()

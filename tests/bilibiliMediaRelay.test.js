@@ -86,3 +86,25 @@ test("concurrent groups reuse one Bilibili MP4 download while keeping separate r
     globalThis.fetch = previousFetch
   }
 })
+
+test("Bangumi relay reports a concrete no-resource failure without exposing an upstream URL", async () => {
+  const previousFetch = globalThis.fetch
+  try {
+    globalThis.fetch = async url => {
+      assert.match(String(url), /pgc\/player\/web\/playurl/)
+      return { ok: true, async json() { return { code: 0, message: "success", result: { durl: [] } } } }
+    }
+    const result = await buildBilibiliArchiveRelaySegments({
+      type: "bilibili",
+      ep_id: "1455179",
+      cid: 917377008,
+      duration: 721
+    }, { segmentApi: { video: file => ({ type: "video", file }) }, logger: { warn() {} } })
+
+    const text = result.segments.filter(item => typeof item === "string").join("")
+    assert.match(text, /B站番剧播放接口未提供可下载资源/)
+    assert.doesNotMatch(text, /temporary|https?:\/\//)
+  } finally {
+    globalThis.fetch = previousFetch
+  }
+})

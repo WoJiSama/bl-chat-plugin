@@ -6,6 +6,7 @@ import {
   extractBilibiliShareFromSegment,
   formatBilibiliHistoryLinks,
   formatBilibiliHistoryText,
+  resolveBilibiliPlaybackResult,
   resolveBilibiliPlaybackResources,
   shouldAttachBilibiliVideo
 } from "../utils/bilibiliMessage.js"
@@ -114,6 +115,32 @@ test("keeps card metadata when Bilibili network enrichment fails", async () => {
   assert.equal(card.short_url, "https://b23.tv/JvNsiRF?share_source=qq")
 })
 
+test("resolves a redirected Bangumi card into a playable episode", async () => {
+  clearBilibiliMetadataCache()
+  const [card] = await enrichBilibiliMessageSegments([
+    { type: "json", data: JSON.stringify({ ...cardPayload, meta: { detail_1: { ...cardPayload.meta.detail_1, qqdocurl: "https://b23.tv/bangumi-test" } } }) }
+  ], "", {
+    fetchImpl: async url => {
+      if (String(url).startsWith("https://b23.tv/")) {
+        return { ok: false, status: 412, url: "https://www.bilibili.com/bangumi/play/ep1455179" }
+      }
+      assert.match(String(url), /pgc\/view\/web\/season\?ep_id=1455179/)
+      return {
+        ok: true,
+        async json() {
+          return { code: 0, result: { episodes: [{ id: 1455179, cid: 917377008, duration: 721000, long_title: "快乐星猫第三季 09", cover: "https://cover.example/bangumi.jpg" }] } }
+        }
+      }
+    }
+  })
+
+  assert.equal(card.metadata_status, "resolved_bangumi")
+  assert.equal(card.ep_id, "1455179")
+  assert.equal(card.cid, 917377008)
+  assert.equal(card.duration, 721)
+  assert.equal(card.page_url, "https://www.bilibili.com/bangumi/play/ep1455179")
+})
+
 test("renders searchable chat history with video and cover links", async t => {
   const card = {
     type: "bilibili",
@@ -213,4 +240,46 @@ test("resolves temporary playback resources for short videos without persisting 
   assert.equal(resources[0].url, "https://video.example/test.mp4?token=temporary")
   assert.equal(resources[0].duration, 120)
   assert.equal(resources[0].size, 123456)
+})
+
+test("resolves Bangumi playback resources from the documented result.durl response", async () => {
+  const resources = await resolveBilibiliPlaybackResources({
+    ep_id: "1455179",
+    duration: 721,
+    pages: [{ page: 1, cid: 917377008, title: "快乐星猫第三季 09", duration: 721 }]
+  }, {
+    fetchImpl: async url => {
+      assert.match(String(url), /pgc\/player\/web\/playurl/)
+      assert.match(String(url), /[?&]ep_id=1455179(?:&|$)/)
+      return {
+        ok: true,
+        async json() {
+          return {
+            code: 0,
+            result: {
+              durl: [{
+                url: "https://video.example/bangumi-low.mp4?temporary=1",
+                length: 721000,
+                size: 654321
+              }]
+            }
+          }
+        }
+      }
+    }
+  })
+
+  assert.equal(resources.length, 1)
+  assert.equal(resources[0].bvid, "ep1455179")
+  assert.equal(resources[0].duration, 721)
+  assert.equal(resources[0].size, 654321)
+})
+
+test("keeps a concrete Bangumi playback restriction reason separate from resources", async () => {
+  const result = await resolveBilibiliPlaybackResult({ ep_id: "1455179", cid: 917377008, duration: 721 }, {
+    fetchImpl: async () => ({ ok: true, async json() { return { code: -403, message: "地区限制" } } })
+  })
+
+  assert.deepEqual(result.resources, [])
+  assert.equal(result.failureReason, "B站番剧播放接口受地区或版权限制，未提供资源")
 })

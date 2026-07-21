@@ -64,7 +64,7 @@ function normalizeMessageSegments(message = [], storeMediaUrl = true) {
   return message.map(seg => {
     if (seg?.type === "bilibili") {
       const next = { type: "bilibili", platform: "bilibili" }
-      for (const key of ["title", "description", "bvid", "aid", "cid", "owner", "owner_mid", "duration", "page_count", "pages", "short_url", "page_url", "video_url", "cover_url", "stats", "shared_by", "shared_by_qq", "published_at", "metadata_status"]) {
+      for (const key of ["title", "description", "bvid", "ep_id", "aid", "cid", "owner", "owner_mid", "duration", "page_count", "pages", "short_url", "page_url", "video_url", "cover_url", "stats", "shared_by", "shared_by_qq", "published_at", "metadata_status"]) {
         if (seg[key] === undefined || (!storeMediaUrl && ["short_url", "page_url", "video_url", "cover_url"].includes(key))) continue
         next[key] = seg[key]
       }
