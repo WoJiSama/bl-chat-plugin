@@ -24,7 +24,9 @@ export const DEFAULT_MESSAGE_PIPELINE_CONFIG = Object.freeze({
   mediaArtifactTtlSeconds: 120,
   mediaArtifactMaxEntries: 8,
   mediaArtifactMaxIdleMb: 512,
-  mediaArtifactMaxEncodedMb: 64
+  mediaArtifactMaxEncodedMb: 64,
+  mediaSharedHostDir: "",
+  mediaSharedContainerDir: ""
 })
 
 function positiveNumber(value, fallback) {
@@ -56,7 +58,9 @@ export function normalizeMessagePipelineConfig(value = {}) {
     mediaArtifactTtlSeconds: positiveNumber(cfg.mediaArtifactTtlSeconds, DEFAULT_MESSAGE_PIPELINE_CONFIG.mediaArtifactTtlSeconds),
     mediaArtifactMaxEntries: positiveNumber(cfg.mediaArtifactMaxEntries, DEFAULT_MESSAGE_PIPELINE_CONFIG.mediaArtifactMaxEntries),
     mediaArtifactMaxIdleMb: positiveNumber(cfg.mediaArtifactMaxIdleMb, DEFAULT_MESSAGE_PIPELINE_CONFIG.mediaArtifactMaxIdleMb),
-    mediaArtifactMaxEncodedMb: nonnegativeNumber(cfg.mediaArtifactMaxEncodedMb, DEFAULT_MESSAGE_PIPELINE_CONFIG.mediaArtifactMaxEncodedMb)
+    mediaArtifactMaxEncodedMb: nonnegativeNumber(cfg.mediaArtifactMaxEncodedMb, DEFAULT_MESSAGE_PIPELINE_CONFIG.mediaArtifactMaxEncodedMb),
+    mediaSharedHostDir: String(cfg.mediaSharedHostDir || "").trim(),
+    mediaSharedContainerDir: String(cfg.mediaSharedContainerDir || "").trim()
   }
 }
 
@@ -100,7 +104,10 @@ export function createMessagePipelineRuntime({
     leaseMs: config.deliveryLeaseSeconds * 1000,
     concurrency: config.deliveryConcurrency,
     prepareConcurrency: config.mediaPrepareConcurrency,
-    artifactStore
+    artifactStore,
+    sharedMedia: config.mediaSharedHostDir && config.mediaSharedContainerDir
+      ? { hostDir: config.mediaSharedHostDir, containerDir: config.mediaSharedContainerDir }
+      : null
   })
   const recent = recentManager || new MessageManager({
     groupMaxMessages: pluginSettings.groupMaxMessages,

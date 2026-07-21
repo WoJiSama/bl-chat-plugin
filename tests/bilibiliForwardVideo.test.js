@@ -27,3 +27,24 @@ test("merged-forward video nodes inline a local MP4 as base64", async t => {
     await fs.promises.unlink(file).catch(() => {})
   }
 })
+
+test("merged-forward video nodes can stage a local MP4 into a configured container share", async () => {
+  const { inlineForwardVideoSegment } = await import("../utils/messagePipeline/deliveryGateway.js")
+  const source = path.join(os.tmpdir(), `bilibili-forward-source-${Date.now()}.mp4`)
+  const hostDir = path.join(os.tmpdir(), `bilibili-forward-share-${Date.now()}`)
+  const staged = []
+  await fs.promises.writeFile(source, Buffer.from("mp4-data"))
+  try {
+    const video = await inlineForwardVideoSegment({ type: "video", file: source }, {
+      sharedMedia: { hostDir, containerDir: "/app/napcat/config/bl-chat-media" },
+      sharedMediaFiles: staged
+    })
+    assert.match(video.file, /^file:\/\/\/app\/napcat\/config\/bl-chat-media\//)
+    assert.equal(staged.length, 1)
+    assert.equal(await fs.promises.readFile(staged[0], "utf8"), "mp4-data")
+  } finally {
+    await fs.promises.unlink(source).catch(() => {})
+    await Promise.all(staged.map(file => fs.promises.unlink(file).catch(() => {})))
+    await fs.promises.rmdir(hostDir).catch(() => {})
+  }
+})

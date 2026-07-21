@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto"
+import fs from "node:fs"
 import { buildBilibiliArchiveRelaySegments, cleanupBilibiliArchiveRelayFiles } from "../bilibiliMediaRelay.js"
 import { enrichBilibiliShare, formatBilibiliHistoryLinks, formatBilibiliHistoryText } from "../bilibiliMessage.js"
 import { buildDouyinArchiveRelaySegments, cleanupDouyinArchiveRelayFiles } from "../douyinMediaRelay.js"
@@ -33,7 +34,7 @@ function serializeMedia(card = {}) {
 }
 
 function emptyRelay() {
-  return { segments: [], tempFiles: [], artifactLeases: [] }
+  return { segments: [], tempFiles: [], artifactLeases: [], sharedMediaFiles: [] }
 }
 
 function deliveryIdFor({ platform, botId, groupId, messageId, eventId }) {
@@ -56,7 +57,8 @@ export class MediaOutbox {
     enrichDouyin = enrichDouyinShare,
     buildBilibili = buildBilibiliArchiveRelaySegments,
     buildDouyin = buildDouyinArchiveRelaySegments,
-    artifactStore = null
+    artifactStore = null,
+    sharedMedia = null
   } = {}) {
     this.store = store
     this.gateway = gateway
@@ -73,6 +75,7 @@ export class MediaOutbox {
     this.buildBilibili = buildBilibili
     this.buildDouyin = buildDouyin
     this.artifactStore = artifactStore
+    this.sharedMedia = sharedMedia
     this.refreshPromises = new Map()
     this.preparedRelays = new Map()
     this.runId = randomUUID()
@@ -190,6 +193,7 @@ export class MediaOutbox {
 
   async releaseRelay(job, relay = emptyRelay()) {
     await Promise.all((relay.artifactLeases || []).map(lease => lease?.release?.()))
+    await Promise.all((relay.sharedMediaFiles || []).map(file => fs.promises.unlink(file).catch(() => {})))
     await (job?.platform === "douyin"
       ? cleanupDouyinArchiveRelayFiles(relay.tempFiles)
       : cleanupBilibiliArchiveRelayFiles(relay.tempFiles))
@@ -344,7 +348,8 @@ export class MediaOutbox {
       const videos = []
       const encodeStartedAt = Date.now()
       for (const video of videoSegments) {
-        videos.push(await inlineForwardVideoSegment(video, { artifactStore: this.artifactStore }))
+        relay.sharedMediaFiles ||= []
+        videos.push(await inlineForwardVideoSegment(video, { artifactStore: this.artifactStore, sharedMedia: this.sharedMedia, sharedMediaFiles: relay.sharedMediaFiles }))
       }
       timings.encode += Date.now() - encodeStartedAt
       const botRoot = globalThis.Bot

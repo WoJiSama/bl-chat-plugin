@@ -1,4 +1,6 @@
 import fs from "node:fs"
+import path from "node:path"
+import { randomUUID } from "node:crypto"
 
 const FORWARD_MEDIA_TIMEOUT_MS = 15 * 60 * 1000
 const mediaTimeoutLeases = new WeakMap()
@@ -34,10 +36,22 @@ export function buildOneBotForwardNodes(nodes = []) {
   }))
 }
 
-export async function inlineForwardVideoSegment(video = {}, { artifactStore = null } = {}) {
+export async function inlineForwardVideoSegment(video = {}, { artifactStore = null, sharedMedia = null, sharedMediaFiles = null } = {}) {
   const data = video?.data && typeof video.data === "object" ? video.data : video
   const file = data?.file || ""
   if (!file || String(file).startsWith("base64://") || /^https?:\/\//i.test(String(file))) return video
+  if (sharedMedia?.hostDir && sharedMedia?.containerDir) {
+    const hostDir = path.resolve(String(sharedMedia.hostDir))
+    const containerDir = String(sharedMedia.containerDir).replace(/\/+$/, "")
+    const extension = path.extname(String(file)) || ".mp4"
+    const targetName = `${Date.now()}-${randomUUID()}${extension}`
+    const target = path.join(hostDir, targetName)
+    await fs.promises.mkdir(hostDir, { recursive: true })
+    await fs.promises.copyFile(file, target)
+    if (Array.isArray(sharedMediaFiles)) sharedMediaFiles.push(target)
+    const staged = `file://${containerDir}/${targetName}`
+    return video?.data ? { ...video, data: { ...video.data, file: staged } } : { ...video, file: staged }
+  }
   const base64File = artifactStore?.encodeFile
     ? await artifactStore.encodeFile(file)
     : `base64://${(await fs.promises.readFile(file)).toString("base64")}`
