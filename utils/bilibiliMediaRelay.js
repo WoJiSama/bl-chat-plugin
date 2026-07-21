@@ -69,7 +69,8 @@ export async function buildBilibiliArchiveRelaySegments(card = {}, {
   segmentApi = globalThis.segment,
   logger = globalThis.logger,
   artifactStore = null,
-  onTiming = null
+  onTiming = null,
+  quality = 6
 } = {}) {
   const segments = []
   const tempFiles = []
@@ -87,7 +88,8 @@ export async function buildBilibiliArchiveRelaySegments(card = {}, {
   if (!segmentApi?.video) return { segments, tempFiles, artifactLeases }
   const resolveStartedAt = Date.now()
   const playback = await resolveBilibiliPlaybackResult(card, {
-    maxSeconds: BILIBILI_ARCHIVE_VIDEO_MAX_SECONDS
+    maxSeconds: BILIBILI_ARCHIVE_VIDEO_MAX_SECONDS,
+    quality
   })
   const resources = playback.resources
   onTiming?.("playback", Date.now() - resolveStartedAt)
@@ -112,7 +114,7 @@ export async function buildBilibiliArchiveRelaySegments(card = {}, {
       : "B站已提供播放资源，但视频本体下载失败"
     segments.push(`\n（${reason}，已保留视频页面）`)
   }
-  return { segments, tempFiles, artifactLeases }
+  return { segments, tempFiles, artifactLeases, qualityOptions: playback.qualityOptions || [] }
 }
 
 export async function cleanupBilibiliArchiveRelayFiles(tempFiles = []) {

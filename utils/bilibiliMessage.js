@@ -320,6 +320,17 @@ function playbackFailureReason(payload = {}, { isBangumi = false } = {}) {
   return `${prefix}未提供可下载资源`
 }
 
+function normalizeQualityOptions(formats = []) {
+  const seen = new Set()
+  return (Array.isArray(formats) ? formats : []).flatMap(item => {
+    const quality = Number(item?.quality)
+    if (!Number.isFinite(quality) || seen.has(quality)) return []
+    seen.add(quality)
+    const label = compactText(item?.new_description || item?.display_desc || item?.format || `${quality}P`, 40)
+    return [{ quality, label }]
+  })
+}
+
 async function requestBilibiliPlaybackResources(card = {}, options = {}) {
   if (!shouldAttachBilibiliVideo(card, options.maxSeconds)) return { resources: [], failureReason: "", previewNotice: "" }
   const fetchImpl = options.fetchImpl || globalThis.fetch
@@ -338,6 +349,7 @@ async function requestBilibiliPlaybackResources(card = {}, options = {}) {
     Referer: "https://www.bilibili.com/"
   }
   const resources = []
+  const qualityOptions = []
   let failureReason = ""
   let previewNotice = ""
 
@@ -345,11 +357,12 @@ async function requestBilibiliPlaybackResources(card = {}, options = {}) {
     for (const part of parts.slice(0, 20)) {
       const cid = Number(part?.cid || 0)
       if (!cid) continue
-      const url = epId ? ["https://api.bilibili.com/pgc/player/web/playurl", `?ep_id=${encodeURIComponent(epId)}`, `&cid=${encodeURIComponent(cid)}`, "&qn=6&fnval=0&fourk=0"].join("") : [
+      const quality = Math.max(1, Number(options.quality) || 6)
+      const url = epId ? ["https://api.bilibili.com/pgc/player/web/playurl", `?ep_id=${encodeURIComponent(epId)}`, `&cid=${encodeURIComponent(cid)}`, `&qn=${quality}&fnval=0&fourk=0`].join("") : [
         "https://api.bilibili.com/x/player/playurl",
         `?bvid=${encodeURIComponent(bvid)}`,
         `&cid=${encodeURIComponent(cid)}`,
-        "&qn=6&fnval=0&fourk=0"
+        `&qn=${quality}&fnval=0&fourk=0`
       ].join("")
       const response = await fetchImpl(url, { headers, signal: controller.signal })
       if (!response?.ok) {
@@ -362,6 +375,9 @@ async function requestBilibiliPlaybackResources(card = {}, options = {}) {
         continue
       }
       const playData = epId ? payload?.result : payload?.data
+      for (const item of normalizeQualityOptions(playData?.support_formats)) {
+        if (!qualityOptions.some(existing => existing.quality === item.quality)) qualityOptions.push(item)
+      }
       const durls = Array.isArray(playData?.durl) ? playData.durl : []
       if (!durls.length) {
         failureReason ||= playbackFailureReason(payload, { isBangumi: Boolean(epId) })
@@ -380,7 +396,7 @@ async function requestBilibiliPlaybackResources(card = {}, options = {}) {
           bvid: bvid || `ep${epId}`,
           cid,
           page: Number(part?.page || 1),
-          quality: 6,
+          quality,
           title: compactText(part?.title || card.title || "", 160),
           duration: Number(item?.length ? item.length / 1000 : part?.duration || 0),
           size: Number(item?.size || 0),
@@ -390,9 +406,9 @@ async function requestBilibiliPlaybackResources(card = {}, options = {}) {
         })
       }
     }
-    return { resources, failureReason: resources.length ? "" : failureReason || `${epId ? "B站番剧" : "B站视频"}播放接口未提供可下载资源`, previewNotice: resources.length ? previewNotice : "" }
+    return { resources, qualityOptions, failureReason: resources.length ? "" : failureReason || `${epId ? "B站番剧" : "B站视频"}播放接口未提供可下载资源`, previewNotice: resources.length ? previewNotice : "" }
   } catch (error) {
-    return { resources, failureReason: resources.length ? "" : `${epId ? "B站番剧" : "B站视频"}播放资源请求失败：${compactText(error?.message || "未知错误", 80)}`, previewNotice: resources.length ? previewNotice : "" }
+    return { resources, qualityOptions, failureReason: resources.length ? "" : `${epId ? "B站番剧" : "B站视频"}播放资源请求失败：${compactText(error?.message || "未知错误", 80)}`, previewNotice: resources.length ? previewNotice : "" }
   } finally {
     clearTimeout(timer)
   }
@@ -405,7 +421,8 @@ export async function resolveBilibiliPlaybackResult(card = {}, options = {}) {
     ? card.pages
     : [{ page: 1, cid: card.cid }]
   const identity = parts.map(part => `${Number(part?.page || 1)}:${Number(part?.cid || 0)}`).join(",")
-  const key = (bvid || epId) ? `${bvid || `ep${epId}`}:${identity}:qn6` : ""
+  const quality = Math.max(1, Number(options.quality) || 6)
+  const key = (bvid || epId) ? `${bvid || `ep${epId}`}:${identity}:qn${quality}` : ""
   if (!key) return await requestBilibiliPlaybackResources(card, options)
   if (playbackPromiseCache.has(key)) return await playbackPromiseCache.get(key)
   const promise = requestBilibiliPlaybackResources(card, options)

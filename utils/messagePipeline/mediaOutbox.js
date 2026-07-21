@@ -338,6 +338,9 @@ export class MediaOutbox {
       const relaySegments = Array.isArray(relay?.segments) ? relay.segments : []
       const videoSegments = relaySegments.filter(item => item?.type === "video")
       const nonVideoSegments = relaySegments.filter(item => item?.type !== "video")
+      if (Array.isArray(relay?.qualityOptions) && relay.qualityOptions.length) {
+        nonVideoSegments.push(`\n可选清晰度：${relay.qualityOptions.map(item => item.label).join("、")}`)
+      }
       if (relayBuildFailed) nonVideoSegments.push("\n（封面或视频资源暂时获取失败，已保留基本信息和页面）")
       else if (card.metadata_status && !["resolved", "resolved_bangumi"].includes(card.metadata_status)) {
         const reason = card.metadata_status === "bangumi_metadata_failed"
