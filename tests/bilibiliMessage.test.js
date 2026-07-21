@@ -242,6 +242,37 @@ test("resolves temporary playback resources for short videos without persisting 
   assert.equal(resources[0].size, 123456)
 })
 
+test("authorized playback sends the requested qn and reports the actual downgraded quality", async () => {
+  const result = await resolveBilibiliPlaybackResult({
+    bvid: "BV1234567890",
+    cid: 987,
+    duration: 120
+  }, {
+    quality: 80,
+    authCookie: "opaque-auth",
+    fetchImpl: async (url, options) => {
+      assert.match(String(url), /[?&]qn=80(?:&|$)/)
+      assert.equal(options.headers.Cookie, "opaque-auth")
+      return {
+        ok: true,
+        async json() {
+          return {
+            code: 0,
+            data: {
+              quality: 64,
+              support_formats: [{ quality: 80, new_description: "1080P" }, { quality: 64, new_description: "720P" }],
+              durl: [{ url: "https://video.example/downshifted.mp4?temporary=1", length: 120000, size: 123456 }]
+            }
+          }
+        }
+      }
+    }
+  })
+
+  assert.equal(result.resources[0].quality, 64)
+  assert.deepEqual(result.qualityOptions, [{ quality: 80, label: "1080P" }, { quality: 64, label: "720P" }])
+})
+
 test("resolves Bangumi playback resources from the documented result.durl response", async () => {
   const resources = await resolveBilibiliPlaybackResources({
     ep_id: "1455179",

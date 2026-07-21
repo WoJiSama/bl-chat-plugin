@@ -17,7 +17,7 @@ function getLogger(logger = globalThis.logger) {
   return logger || { warn() {} }
 }
 
-export async function downloadBilibiliArchiveVideo(resource = {}, { logger = globalThis.logger } = {}) {
+export async function downloadBilibiliArchiveVideo(resource = {}, { logger = globalThis.logger, authCookie = "" } = {}) {
   const candidates = [resource.url, ...(resource.backup_urls || [])].filter(Boolean)
   if (!candidates.length || resource.size > BILIBILI_ARCHIVE_VIDEO_MAX_BYTES) return null
 
@@ -30,11 +30,13 @@ export async function downloadBilibiliArchiveVideo(resource = {}, { logger = glo
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), BILIBILI_ARCHIVE_VIDEO_DOWNLOAD_TIMEOUT_MS)
     try {
-      const response = await fetch(url, {
-        headers: {
+      const headers = {
           Referer: "https://www.bilibili.com/",
           "User-Agent": "Mozilla/5.0"
-        },
+        }
+      if (authCookie) headers.Cookie = String(authCookie)
+      const response = await fetch(url, {
+        headers,
         signal: controller.signal
       })
       if (!response.ok || !response.body) continue
@@ -70,7 +72,8 @@ export async function buildBilibiliArchiveRelaySegments(card = {}, {
   logger = globalThis.logger,
   artifactStore = null,
   onTiming = null,
-  quality = 6
+  quality = 6,
+  authCookie = ""
 } = {}) {
   const segments = []
   const tempFiles = []
@@ -89,7 +92,8 @@ export async function buildBilibiliArchiveRelaySegments(card = {}, {
   const resolveStartedAt = Date.now()
   const playback = await resolveBilibiliPlaybackResult(card, {
     maxSeconds: BILIBILI_ARCHIVE_VIDEO_MAX_SECONDS,
-    quality
+    quality,
+    authCookie
   })
   const resources = playback.resources
   onTiming?.("playback", Date.now() - resolveStartedAt)
@@ -99,9 +103,9 @@ export async function buildBilibiliArchiveRelaySegments(card = {}, {
     const key = buildMediaArtifactKey("bilibili", resource)
     const useArtifactStore = Boolean(artifactStore && key)
     const lease = useArtifactStore
-      ? await artifactStore.acquire(key, () => downloadBilibiliArchiveVideo(resource, { logger }))
+      ? await artifactStore.acquire(key, () => downloadBilibiliArchiveVideo(resource, { logger, authCookie }))
       : null
-    const filePath = useArtifactStore ? lease?.filePath : await downloadBilibiliArchiveVideo(resource, { logger })
+    const filePath = useArtifactStore ? lease?.filePath : await downloadBilibiliArchiveVideo(resource, { logger, authCookie })
     onTiming?.("download", Date.now() - downloadStartedAt)
     if (!filePath) continue
     if (lease) artifactLeases.push(lease)
@@ -114,7 +118,14 @@ export async function buildBilibiliArchiveRelaySegments(card = {}, {
       : "B站已提供播放资源，但视频本体下载失败"
     segments.push(`\n（${reason}，已保留视频页面）`)
   }
-  return { segments, tempFiles, artifactLeases, qualityOptions: playback.qualityOptions || [] }
+  return {
+    segments,
+    tempFiles,
+    artifactLeases,
+    qualityOptions: playback.qualityOptions || [],
+    actualQuality: playback.resources?.[0]?.quality || 0,
+    failureReason: playback.failureReason || ""
+  }
 }
 
 export async function cleanupBilibiliArchiveRelayFiles(tempFiles = []) {

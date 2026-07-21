@@ -127,3 +127,35 @@ test("Bangumi relay labels a preview clip without exposing an upstream URL", asy
     globalThis.fetch = previousFetch
   }
 })
+
+test("explicit high-quality relay forwards authorization only to playback and media download", async () => {
+  const previousFetch = globalThis.fetch
+  const seen = []
+  try {
+    globalThis.fetch = async (url, options = {}) => {
+      seen.push({ playback: String(url).includes("x/player/playurl"), cookie: options.headers?.Cookie || "" })
+      if (String(url).includes("x/player/playurl")) {
+        assert.match(String(url), /[?&]qn=80(?:&|$)/)
+        return { ok: true, async json() { return { code: 0, data: { quality: 80, durl: [{ url: "https://video.example/high.mp4?temporary=1", size: 4 }] } } } }
+      }
+      return {
+        ok: true,
+        headers: { get: name => name === "content-length" ? "4" : null },
+        body: Readable.toWeb(Readable.from(Buffer.from("high")))
+      }
+    }
+    const result = await buildBilibiliArchiveRelaySegments({ type: "bilibili", bvid: "BV1234567890", cid: 1, duration: 2 }, {
+      quality: 80,
+      authCookie: "opaque-auth",
+      segmentApi: { video: file => ({ type: "video", file }) },
+      logger: { warn() {} }
+    })
+
+    assert.ok(result.segments.some(part => part?.type === "video"))
+    assert.equal(result.actualQuality, 80)
+    assert.deepEqual(seen, [{ playback: true, cookie: "opaque-auth" }, { playback: false, cookie: "opaque-auth" }])
+    await cleanupBilibiliArchiveRelayFiles(result.tempFiles)
+  } finally {
+    globalThis.fetch = previousFetch
+  }
+})

@@ -348,6 +348,7 @@ async function requestBilibiliPlaybackResources(card = {}, options = {}) {
     "User-Agent": "Mozilla/5.0",
     Referer: "https://www.bilibili.com/"
   }
+  if (options.authCookie) headers.Cookie = String(options.authCookie)
   const resources = []
   const qualityOptions = []
   let failureReason = ""
@@ -375,6 +376,7 @@ async function requestBilibiliPlaybackResources(card = {}, options = {}) {
         continue
       }
       const playData = epId ? payload?.result : payload?.data
+      const actualQuality = Math.max(1, Number(playData?.quality) || quality)
       for (const item of normalizeQualityOptions(playData?.support_formats)) {
         if (!qualityOptions.some(existing => existing.quality === item.quality)) qualityOptions.push(item)
       }
@@ -396,7 +398,7 @@ async function requestBilibiliPlaybackResources(card = {}, options = {}) {
           bvid: bvid || `ep${epId}`,
           cid,
           page: Number(part?.page || 1),
-          quality,
+          quality: actualQuality,
           title: compactText(part?.title || card.title || "", 160),
           duration: Number(item?.length ? item.length / 1000 : part?.duration || 0),
           size: Number(item?.size || 0),
@@ -423,7 +425,8 @@ export async function resolveBilibiliPlaybackResult(card = {}, options = {}) {
   const identity = parts.map(part => `${Number(part?.page || 1)}:${Number(part?.cid || 0)}`).join(",")
   const quality = Math.max(1, Number(options.quality) || 6)
   const key = (bvid || epId) ? `${bvid || `ep${epId}`}:${identity}:qn${quality}` : ""
-  if (!key) return await requestBilibiliPlaybackResources(card, options)
+  // 授权请求不能与匿名/旧会话共享 in-flight 播放结果，避免权限边界穿透缓存。
+  if (!key || options.authCookie) return await requestBilibiliPlaybackResources(card, options)
   if (playbackPromiseCache.has(key)) return await playbackPromiseCache.get(key)
   const promise = requestBilibiliPlaybackResources(card, options)
   playbackPromiseCache.set(key, promise)

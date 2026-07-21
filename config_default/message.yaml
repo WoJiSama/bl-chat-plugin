@@ -40,6 +40,10 @@ pluginSettings:
     # 可选：NapCat 等容器可见的共享媒体目录；配置后视频不会以大 Base64 穿过 OneBot WebSocket。
     mediaSharedHostDir: ""
     mediaSharedContainerDir: ""
+  # 显式 `.高清搬运 清晰度 B站链接` 的授权范围；自动搬运始终匿名使用最低清晰度。
+  bilibiliQualityRelay:
+    enabled: true
+    highQualityWhitelist: {}
   # 长期聊天归档：只追加保存结构化文本/CQ元数据，不下载图片或视频。用于管理员按群号、QQ、关键词和前后文查询。
   messageArchive:
     enabled: false
