@@ -33,6 +33,14 @@ test("explicit from-scratch generation outranks edit-like wording about the futu
   assert.equal(classifyImageTaskPolicy({ text, hasImages: false }), "image_generation")
 })
 
+test("a drawing request with a prompt label is not mistaken for an edit because it says 融合", async () => {
+  const { classifyImageTaskPolicy, shouldRequireImageEditBase } = await import("../utils/imageTaskPolicy.js")
+  const text = "希洛帮我画画，提示词为：整体风格融合水墨速写、赛璐璐与半厚涂质感。画面采用低机位仰视构图，人物占据画面主体。"
+
+  assert.equal(shouldRequireImageEditBase(text), false)
+  assert.equal(classifyImageTaskPolicy({ text, hasImages: false }), "image_generation")
+})
+
 test("real references to an existing image still require an edit base", async () => {
   const {
     classifyImageTaskPolicy,
