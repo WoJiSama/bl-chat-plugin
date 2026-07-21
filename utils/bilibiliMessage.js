@@ -321,12 +321,12 @@ function playbackFailureReason(payload = {}, { isBangumi = false } = {}) {
 }
 
 async function requestBilibiliPlaybackResources(card = {}, options = {}) {
-  if (!shouldAttachBilibiliVideo(card, options.maxSeconds)) return { resources: [], failureReason: "" }
+  if (!shouldAttachBilibiliVideo(card, options.maxSeconds)) return { resources: [], failureReason: "", previewNotice: "" }
   const fetchImpl = options.fetchImpl || globalThis.fetch
-  if (typeof fetchImpl !== "function") return { resources: [], failureReason: "播放资源请求能力不可用" }
+  if (typeof fetchImpl !== "function") return { resources: [], failureReason: "播放资源请求能力不可用", previewNotice: "" }
   const bvid = String(card.bvid || extractBilibiliBvid(card.page_url || card.video_url || "")).trim()
   const epId = String(card.ep_id || extractBilibiliEpisodeId(card.page_url || card.video_url || "")).trim()
-  if (!bvid && !epId) return { resources: [], failureReason: "未识别到B站视频标识" }
+  if (!bvid && !epId) return { resources: [], failureReason: "未识别到B站视频标识", previewNotice: "" }
 
   const parts = Array.isArray(card.pages) && card.pages.length
     ? card.pages
@@ -339,6 +339,7 @@ async function requestBilibiliPlaybackResources(card = {}, options = {}) {
   }
   const resources = []
   let failureReason = ""
+  let previewNotice = ""
 
   try {
     for (const part of parts.slice(0, 20)) {
@@ -367,10 +368,10 @@ async function requestBilibiliPlaybackResources(card = {}, options = {}) {
         continue
       }
       const previewDurationMs = durls.reduce((total, item) => total + Math.max(0, Number(item?.length) || 0), 0)
-      if (playData?.is_preview) {
+      const isPreview = Boolean(playData?.is_preview)
+      if (isPreview) {
         const previewDuration = previewDurationMs ? formatBilibiliDuration(previewDurationMs / 1000) : "短时"
-        failureReason ||= `${epId ? "B站番剧" : "B站视频"}仅提供约${previewDuration}试看资源，未附带不完整视频`
-        continue
+        previewNotice ||= `${epId ? "B站番剧" : "B站视频"}仅提供约${previewDuration}试看，本体为试看片段`
       }
       for (const item of durls) {
         const mediaUrl = normalizeUrl(item?.url || "")
@@ -383,14 +384,15 @@ async function requestBilibiliPlaybackResources(card = {}, options = {}) {
           title: compactText(part?.title || card.title || "", 160),
           duration: Number(item?.length ? item.length / 1000 : part?.duration || 0),
           size: Number(item?.size || 0),
+          is_preview: isPreview,
           url: mediaUrl,
           backup_urls: (Array.isArray(item?.backup_url) ? item.backup_url : []).map(normalizeUrl).filter(Boolean)
         })
       }
     }
-    return { resources, failureReason: resources.length ? "" : failureReason || `${epId ? "B站番剧" : "B站视频"}播放接口未提供可下载资源` }
+    return { resources, failureReason: resources.length ? "" : failureReason || `${epId ? "B站番剧" : "B站视频"}播放接口未提供可下载资源`, previewNotice: resources.length ? previewNotice : "" }
   } catch (error) {
-    return { resources, failureReason: resources.length ? "" : `${epId ? "B站番剧" : "B站视频"}播放资源请求失败：${compactText(error?.message || "未知错误", 80)}` }
+    return { resources, failureReason: resources.length ? "" : `${epId ? "B站番剧" : "B站视频"}播放资源请求失败：${compactText(error?.message || "未知错误", 80)}`, previewNotice: resources.length ? previewNotice : "" }
   } finally {
     clearTimeout(timer)
   }

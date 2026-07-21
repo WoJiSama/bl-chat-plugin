@@ -91,6 +91,7 @@ export async function buildBilibiliArchiveRelaySegments(card = {}, {
   })
   const resources = playback.resources
   onTiming?.("playback", Date.now() - resolveStartedAt)
+  if (playback.previewNotice) segments.push(`\n（${playback.previewNotice}）`)
   for (const resource of resources) {
     const downloadStartedAt = Date.now()
     const key = buildMediaArtifactKey("bilibili", resource)

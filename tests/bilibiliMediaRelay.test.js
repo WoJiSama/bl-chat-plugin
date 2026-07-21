@@ -87,23 +87,29 @@ test("concurrent groups reuse one Bilibili MP4 download while keeping separate r
   }
 })
 
-test("Bangumi relay reports a concrete preview failure without exposing an upstream URL", async () => {
+test("Bangumi relay labels a preview clip without exposing an upstream URL", async () => {
   const previousFetch = globalThis.fetch
   try {
     globalThis.fetch = async url => {
-      assert.match(String(url), /pgc\/player\/web\/playurl/)
-      return {
-        ok: true,
-        async json() {
-          return {
-            code: 0,
-            message: "success",
-            result: {
-              is_preview: true,
-              durl: [{ url: "https://video.example/preview.mp4?temporary=1", length: 360000, size: 4 }]
+      if (String(url).includes("pgc/player/web/playurl")) {
+        return {
+          ok: true,
+          async json() {
+            return {
+              code: 0,
+              message: "success",
+              result: {
+                is_preview: true,
+                durl: [{ url: "https://video.example/preview.mp4?temporary=1", length: 360000, size: 4 }]
+              }
             }
           }
         }
+      }
+      return {
+        ok: true,
+        headers: { get: name => name === "content-length" ? "4" : null },
+        body: Readable.toWeb(Readable.from(Buffer.from("test")))
       }
     }
     const result = await buildBilibiliArchiveRelaySegments({
@@ -114,8 +120,9 @@ test("Bangumi relay reports a concrete preview failure without exposing an upstr
     }, { segmentApi: { video: file => ({ type: "video", file }) }, logger: { warn() {} } })
 
     const text = result.segments.filter(item => typeof item === "string").join("")
-    assert.match(text, /B站番剧仅提供约6:00试看资源，未附带不完整视频/)
+    assert.match(text, /B站番剧仅提供约6:00试看，本体为试看片段/)
     assert.doesNotMatch(text, /temporary|https?:\/\//)
+    assert.ok(result.segments.some(item => item?.type === "video"))
   } finally {
     globalThis.fetch = previousFetch
   }
