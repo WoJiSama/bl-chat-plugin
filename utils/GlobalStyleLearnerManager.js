@@ -37,6 +37,7 @@ const DEFAULT_CONFIG = {
   autoEvolutionMinEvidence: 6,
   autoEvolutionMinUniqueUsers: 2,
   autoEvolutionMinPositiveRatio: 0.75,
+  autoEvolutionShadowEvidence: 3,
   autoEvolutionDemoteRatio: 0.5,
   autoEvolutionActiveWeight: 3,
   autoEvolutionMaxCandidates: 60
@@ -178,6 +179,7 @@ function normalizeConfig(config = {}) {
     autoEvolutionMinEvidence: safeNumber(config.autoEvolutionMinEvidence, DEFAULT_CONFIG.autoEvolutionMinEvidence, 3, 50),
     autoEvolutionMinUniqueUsers: safeNumber(config.autoEvolutionMinUniqueUsers, DEFAULT_CONFIG.autoEvolutionMinUniqueUsers, 1, 20),
     autoEvolutionMinPositiveRatio: safeNumber(config.autoEvolutionMinPositiveRatio, DEFAULT_CONFIG.autoEvolutionMinPositiveRatio, 0.5, 1),
+    autoEvolutionShadowEvidence: safeNumber(config.autoEvolutionShadowEvidence, DEFAULT_CONFIG.autoEvolutionShadowEvidence, 1, 20),
     autoEvolutionDemoteRatio: safeNumber(config.autoEvolutionDemoteRatio, DEFAULT_CONFIG.autoEvolutionDemoteRatio, 0, 0.8),
     autoEvolutionActiveWeight: safeNumber(config.autoEvolutionActiveWeight, DEFAULT_CONFIG.autoEvolutionActiveWeight, 1, 10),
     autoEvolutionMaxCandidates: safeNumber(config.autoEvolutionMaxCandidates, DEFAULT_CONFIG.autoEvolutionMaxCandidates, 10, 200),
@@ -364,7 +366,7 @@ function createEmptyMemory() {
       last: null
     },
     semanticBackfill: { cursor: 0, completed: false, retries: 0, lastErrorAt: "" },
-    autoEvolution: { recentReplies: [], candidates: [], promoted: 0, demoted: 0, observedOutcomes: 0 },
+    autoEvolution: { recentReplies: [], candidates: [], promoted: 0, demoted: 0, shadowed: 0, observedOutcomes: 0, policyVersion: 1, history: [] },
     aiRules: {
       absorb: [],
       avoid: []
@@ -400,7 +402,8 @@ function ensureMemoryShape(memory = {}) {
       ...base.autoEvolution,
       ...(memory.autoEvolution || {}),
       recentReplies: Array.isArray(memory.autoEvolution?.recentReplies) ? memory.autoEvolution.recentReplies : [],
-      candidates: Array.isArray(memory.autoEvolution?.candidates) ? memory.autoEvolution.candidates : []
+      candidates: Array.isArray(memory.autoEvolution?.candidates) ? memory.autoEvolution.candidates : [],
+      history: Array.isArray(memory.autoEvolution?.history) ? memory.autoEvolution.history : []
     },
     aiRules: {
       absorb: Array.isArray(memory.aiRules?.absorb) ? memory.aiRules.absorb : [],
@@ -1085,10 +1088,16 @@ export class GlobalStyleLearnerManager {
     const evidence = (Number(candidate.positive) || 0) + (Number(candidate.negative) || 0)
     const ratio = evidence ? (Number(candidate.positive) || 0) / evidence : 0
     const autoHash = this.hashText(`auto:${key}`)
-    if (candidate.status !== "active" && evidence >= cfg.autoEvolutionMinEvidence && candidate.speakers.length >= cfg.autoEvolutionMinUniqueUsers && ratio >= cfg.autoEvolutionMinPositiveRatio) {
+    if (candidate.status === "candidate" && evidence >= cfg.autoEvolutionMinEvidence && candidate.speakers.length >= cfg.autoEvolutionMinUniqueUsers && ratio >= cfg.autoEvolutionMinPositiveRatio) {
+      candidate.status = "shadow"
+      candidate.shadowAt = nowIso()
+      state.shadowed = (Number(state.shadowed) || 0) + 1
+    } else if (candidate.status === "shadow" && evidence >= cfg.autoEvolutionMinEvidence + cfg.autoEvolutionShadowEvidence && ratio >= cfg.autoEvolutionMinPositiveRatio) {
       candidate.status = "active"
       candidate.promotedAt = nowIso()
       state.promoted = (Number(state.promoted) || 0) + 1
+      state.policyVersion = (Number(state.policyVersion) || 1) + 1
+      state.history = [{ at: nowIso(), action: "promote", scene: reply.sceneKey, style: style.key, version: state.policyVersion }, ...state.history].slice(0, 60)
       this.enqueueSemanticSample({
         hash: autoHash,
         scene: { key: reply.sceneKey, descriptor: reply.scene, patterns: [style.rule] },
@@ -1101,12 +1110,24 @@ export class GlobalStyleLearnerManager {
       candidate.status = "demoted"
       candidate.demotedAt = nowIso()
       state.demoted = (Number(state.demoted) || 0) + 1
+      state.policyVersion = (Number(state.policyVersion) || 1) + 1
+      state.history = [{ at: nowIso(), action: "demote", scene: reply.sceneKey, style: style.key, version: state.policyVersion }, ...state.history].slice(0, 60)
       memory.semanticSamples = memory.semanticSamples.filter(item => item.hash !== autoHash)
       this.logger?.info?.(`[全局表达学习] 自主策略撤销 scene=${reply.sceneKey} style=${style.key} evidence=${evidence} ratio=${ratio.toFixed(2)}`)
     }
     state.candidates = state.candidates
       .sort((left, right) => String(right.lastSeenAt || "").localeCompare(String(left.lastSeenAt || "")))
       .slice(0, cfg.autoEvolutionMaxCandidates)
+  }
+
+  buildAutoEvolutionView(config = {}) {
+    const memory = this.readMemory(config)
+    const state = memory.autoEvolution || {}
+    const items = (state.candidates || []).slice(0, 12)
+    return [
+      `自主风格策略 v${state.policyVersion || 1}：候选 ${items.length}，影子 ${state.shadowed || 0}，采纳 ${state.promoted || 0}，撤销 ${state.demoted || 0}`,
+      ...items.map((item, index) => `${index + 1}. [${item.status}] ${item.sceneKey} / ${item.replyStyle}：+${item.positive || 0} -${item.negative || 0}，用户 ${item.speakers?.length || 0}`)
+    ].join("\n")
   }
 
   recordSemanticRecall(memory, cfg, result = {}) {

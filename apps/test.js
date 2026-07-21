@@ -7238,6 +7238,7 @@ ${mcpPrompts}
       ".表达学习 记忆 - 看希洛当前会吸收/避开的表达策略",
       ".表达学习 报告 - 看样本和离散特征统计",
       ".表达学习 总结 - 调用模型，把脱敏样本沉淀成表达规则",
+      ".表达学习 候选 - 看自主学习候选和影子策略",
       ".表达学习 清空 - 清空全局表达学习记忆"
     ].join("\n")
 
@@ -7271,6 +7272,10 @@ ${mcpPrompts}
     }
     if (/报告/.test(subCommand)) {
       await e.reply(globalStyleLearnerManager.buildReport(this.config.globalStyleLearning))
+      return true
+    }
+    if (/候选|自主/.test(subCommand)) {
+      await e.reply(globalStyleLearnerManager.buildAutoEvolutionView(this.config.globalStyleLearning))
       return true
     }
     if (/记忆/.test(subCommand)) {

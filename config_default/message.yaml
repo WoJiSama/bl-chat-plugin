@@ -256,6 +256,7 @@ pluginSettings:
     autoEvolutionMinEvidence: 6
     autoEvolutionMinUniqueUsers: 2
     autoEvolutionMinPositiveRatio: 0.75
+    autoEvolutionShadowEvidence: 3
     autoEvolutionDemoteRatio: 0.5
     autoEvolutionActiveWeight: 3
     autoEvolutionMaxCandidates: 60
