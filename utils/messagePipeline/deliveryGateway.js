@@ -1,5 +1,8 @@
 import fs from "node:fs"
 
+const FORWARD_MEDIA_TIMEOUT_MS = 15 * 60 * 1000
+const mediaTimeoutLeases = new WeakMap()
+
 export class DeliveryError extends Error {
   constructor(message, { retryable = true, uncertain = false, retcode = null } = {}) {
     super(message)
@@ -52,6 +55,33 @@ function compactReceipt(result) {
   }
 }
 
+function oneBotAdapter(root) {
+  const adapters = Array.isArray(root?.adapter) ? root.adapter : []
+  return adapters.find(adapter => adapter?.name === "OneBotv11" && adapter?.id === "QQ") || null
+}
+
+async function withForwardMediaTimeout(root, task) {
+  const adapter = oneBotAdapter(root)
+  if (!adapter || !Number.isFinite(Number(adapter.timeout))) return await task()
+
+  let lease = mediaTimeoutLeases.get(adapter)
+  if (!lease) {
+    lease = { originalTimeout: Number(adapter.timeout), active: 0 }
+    mediaTimeoutLeases.set(adapter, lease)
+  }
+  lease.active += 1
+  adapter.timeout = Math.max(Number(adapter.timeout), FORWARD_MEDIA_TIMEOUT_MS)
+  try {
+    return await task()
+  } finally {
+    lease.active -= 1
+    if (lease.active <= 0) {
+      adapter.timeout = lease.originalTimeout
+      mediaTimeoutLeases.delete(adapter)
+    }
+  }
+}
+
 export class DeliveryGateway {
   constructor({ botRoot = () => globalThis.Bot, logger = globalThis.logger } = {}) {
     this.botRoot = botRoot
@@ -66,16 +96,17 @@ export class DeliveryGateway {
   }
 
   async sendGroupForward({ botId, groupId, nodes }) {
+    const root = typeof this.botRoot === "function" ? this.botRoot() : this.botRoot
     const bot = this.resolveBot(botId)
     if (typeof bot?.sendApi !== "function") {
       throw new DeliveryError(`Bot ${botId || "unknown"} 当前没有可用的 OneBot sendApi`)
     }
     let result
     try {
-      result = await bot.sendApi("send_group_forward_msg", {
+      result = await withForwardMediaTimeout(root, () => bot.sendApi("send_group_forward_msg", {
         group_id: Number(groupId),
         messages: buildOneBotForwardNodes(nodes)
-      })
+      }))
     } catch (error) {
       throw new DeliveryError(error.message || "OneBot 调用异常", {
         retryable: false,

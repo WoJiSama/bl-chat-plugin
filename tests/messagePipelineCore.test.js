@@ -100,6 +100,26 @@ test("delivery gateway resolves a bot after restart and validates retcode", asyn
   )
 })
 
+test("delivery gateway extends the OneBot timeout only while forwarding media", async () => {
+  const adapter = { id: "QQ", name: "OneBotv11", timeout: 60_000 }
+  let timeoutDuringSend = 0
+  const root = {
+    adapter: [adapter],
+    bots: {
+      "1": {
+        async sendApi() {
+          timeoutDuringSend = adapter.timeout
+          return { retcode: 0, data: { message_id: 99 } }
+        }
+      }
+    }
+  }
+  const gateway = new DeliveryGateway({ botRoot: () => root })
+  await gateway.sendGroupForward({ botId: "1", groupId: "2", nodes: [] })
+  assert.equal(timeoutDuringSend, 15 * 60 * 1000)
+  assert.equal(adapter.timeout, 60_000)
+})
+
 test("delivery gateway rejects missing receipts and does not retry uncertain transport errors", async () => {
   const missing = new DeliveryGateway({
     botRoot: () => ({ bots: { "1": { sendApi: async () => undefined } } })
