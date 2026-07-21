@@ -283,3 +283,23 @@ test("keeps a concrete Bangumi playback restriction reason separate from resourc
   assert.deepEqual(result.resources, [])
   assert.equal(result.failureReason, "B站番剧播放接口受地区或版权限制，未提供资源")
 })
+
+test("does not relay a Bangumi preview clip as if it were the full episode", async () => {
+  const result = await resolveBilibiliPlaybackResult({ ep_id: "411084", cid: 1, duration: 1492 }, {
+    fetchImpl: async () => ({
+      ok: true,
+      async json() {
+        return {
+          code: 0,
+          result: {
+            is_preview: true,
+            durl: [{ url: "https://video.example/preview.mp4?temporary=1", length: 360109, size: 123456 }]
+          }
+        }
+      }
+    })
+  })
+
+  assert.deepEqual(result.resources, [])
+  assert.equal(result.failureReason, "B站番剧仅提供约6:00试看资源，未附带不完整视频")
+})

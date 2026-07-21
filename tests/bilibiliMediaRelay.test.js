@@ -87,12 +87,24 @@ test("concurrent groups reuse one Bilibili MP4 download while keeping separate r
   }
 })
 
-test("Bangumi relay reports a concrete no-resource failure without exposing an upstream URL", async () => {
+test("Bangumi relay reports a concrete preview failure without exposing an upstream URL", async () => {
   const previousFetch = globalThis.fetch
   try {
     globalThis.fetch = async url => {
       assert.match(String(url), /pgc\/player\/web\/playurl/)
-      return { ok: true, async json() { return { code: 0, message: "success", result: { durl: [] } } } }
+      return {
+        ok: true,
+        async json() {
+          return {
+            code: 0,
+            message: "success",
+            result: {
+              is_preview: true,
+              durl: [{ url: "https://video.example/preview.mp4?temporary=1", length: 360000, size: 4 }]
+            }
+          }
+        }
+      }
     }
     const result = await buildBilibiliArchiveRelaySegments({
       type: "bilibili",
@@ -102,7 +114,7 @@ test("Bangumi relay reports a concrete no-resource failure without exposing an u
     }, { segmentApi: { video: file => ({ type: "video", file }) }, logger: { warn() {} } })
 
     const text = result.segments.filter(item => typeof item === "string").join("")
-    assert.match(text, /B站番剧播放接口未提供可下载资源/)
+    assert.match(text, /B站番剧仅提供约6:00试看资源，未附带不完整视频/)
     assert.doesNotMatch(text, /temporary|https?:\/\//)
   } finally {
     globalThis.fetch = previousFetch

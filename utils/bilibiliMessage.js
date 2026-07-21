@@ -366,6 +366,12 @@ async function requestBilibiliPlaybackResources(card = {}, options = {}) {
         failureReason ||= playbackFailureReason(payload, { isBangumi: Boolean(epId) })
         continue
       }
+      const previewDurationMs = durls.reduce((total, item) => total + Math.max(0, Number(item?.length) || 0), 0)
+      if (playData?.is_preview) {
+        const previewDuration = previewDurationMs ? formatBilibiliDuration(previewDurationMs / 1000) : "短时"
+        failureReason ||= `${epId ? "B站番剧" : "B站视频"}仅提供约${previewDuration}试看资源，未附带不完整视频`
+        continue
+      }
       for (const item of durls) {
         const mediaUrl = normalizeUrl(item?.url || "")
         if (!mediaUrl) continue
