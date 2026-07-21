@@ -34,9 +34,10 @@ export function hasExplicitImageEditAction(text = "", { hasImages = false, hasRe
 }
 
 export function shouldRequireImageEditBase(text = "", options = {}) {
-  if (isStandaloneImageGenerationRequest(text, options)) return false
-  return hasExplicitImageEditAction(text, options) ||
-    (hasExplicitImageGenerationRequest(text) && hasExistingImageAnchor(text))
+  // Whether a message refers to an existing image is a factual boundary. The
+  // generation-vs-edit intent inside a free-form prompt belongs to the model.
+  if (options.hasImages || options.hasRecentBotImage || !hasExistingImageAnchor(text)) return false
+  return hasExplicitImageEditAction(text, options) || hasExplicitImageGenerationRequest(text)
 }
 
 export function shouldPreferImageGeneration(text = "", options = {}) {

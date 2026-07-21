@@ -5528,7 +5528,12 @@ ${mcpPrompts}
           }
         }
 
-        const semanticDecision = !toolScopeLocked && toolChoice === "auto" && !preferImageGeneration
+        // Let the semantic planner choose generation versus editing for prose prompts.
+        // With no supplied image, image-edit/analysis tools are not valid choices.
+        const semanticSessionTools = images?.length
+          ? session.tools
+          : (session.tools || []).filter(tool => !["googleImageEditTool", "googleImageAnalysisTool"].includes(tool?.function?.name))
+        const semanticDecision = !toolScopeLocked && toolChoice === "auto"
           ? await this.classifySemanticToolIntent({
               e,
               args,
@@ -5540,7 +5545,7 @@ ${mcpPrompts}
               groupUserMessages: session.groupUserMessages,
               avatarDrawReference: session.avatarDrawReference,
               groupWorkflowPrompt: workflowPrompt,
-              sessionTools: session.tools
+              sessionTools: semanticSessionTools
             })
           : null
         const semanticToolCall = semanticDecision?.toolName
@@ -5595,7 +5600,7 @@ ${mcpPrompts}
           }
         }
 
-        if (!toolScopeLocked && toolChoice === "auto" && isImageGenerationRequest(currentIntentText)) {
+        if (!toolScopeLocked && toolChoice === "auto" && preferImageGeneration) {
           session.tools = this.getToolsByName(["bananaTool"])
           if (session.tools?.length) {
             toolChoice = { type: "function", function: { name: "bananaTool" } }

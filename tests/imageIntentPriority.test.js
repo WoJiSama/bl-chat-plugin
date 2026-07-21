@@ -61,6 +61,13 @@ test("real references to an existing image still require an edit base", async ()
   assert.equal(isStandaloneImageGenerationRequest("帮我生成图片，把人物姿势变成蹲姿", { hasImages: true }), false)
 })
 
+test("unanchored edit-like prose is left for semantic tool selection instead of demanding a base image", async () => {
+  const { shouldRequireImageEditBase } = await import("../utils/imageTaskPolicy.js")
+
+  assert.equal(shouldRequireImageEditBase("帮我把人物衣服换成黑色，画面要有电影感"), false)
+  assert.equal(shouldRequireImageEditBase("把原图人物的衣服换成黑色"), true)
+})
+
 test("empty image failures use natural wording without internal upstream terms", async () => {
   const { buildImageFailureReply } = await import("../utils/imageFailurePolicy.js")
   const reply = buildImageFailureReply("未接收到有效图片")
