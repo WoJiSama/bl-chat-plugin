@@ -109,7 +109,8 @@ export async function buildBilibiliArchiveRelaySegments(card = {}, {
     })
     usedAuthorizedRetry = true
   }
-  const resources = playback.resources
+  const authorizedStillPreview = usedAuthorizedRetry && playback.resources?.some(resource => resource?.is_preview)
+  const resources = authorizedStillPreview ? [] : playback.resources
   onTiming?.("playback", Date.now() - resolveStartedAt)
   if (playback.previewNotice) segments.push(`\n（${playback.previewNotice}）`)
   for (const resource of resources) {
@@ -128,7 +129,9 @@ export async function buildBilibiliArchiveRelaySegments(card = {}, {
   }
   if (!resources.length || !segments.some(item => item?.type === "video")) {
     const reason = !resources.length
-      ? (playback.failureReason || (card.ep_id ? "B站番剧播放接口未提供可下载资源" : "B站视频播放接口未提供可下载资源"))
+      ? (authorizedStillPreview
+          ? "已使用授权账号复试，但B站仍只提供试看资源"
+          : playback.failureReason || (card.ep_id ? "B站番剧播放接口未提供可下载资源" : "B站视频播放接口未提供可下载资源"))
       : "B站已提供播放资源，但视频本体下载失败"
     segments.push(`\n（${reason}，已保留视频页面）`)
   }
