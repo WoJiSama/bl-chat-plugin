@@ -159,3 +159,74 @@ test("explicit high-quality relay forwards authorization only to playback and me
     globalThis.fetch = previousFetch
   }
 })
+
+test("automatic relay retries with the authorized account only after B站 returns a preview", async () => {
+  const previousFetch = globalThis.fetch
+  const playbackCookies = []
+  try {
+    globalThis.fetch = async (url, options = {}) => {
+      if (String(url).includes("x/player/playurl")) {
+        playbackCookies.push(options.headers?.Cookie || "")
+        const authorized = Boolean(options.headers?.Cookie)
+        return {
+          ok: true,
+          async json() {
+            return {
+              code: 0,
+              data: authorized
+                ? { quality: 6, durl: [{ url: "https://video.example/full.mp4?temporary=1", length: 600000, size: 4 }] }
+                : { quality: 6, is_preview: true, durl: [{ url: "https://video.example/preview.mp4?temporary=1", length: 60000, size: 4 }] }
+            }
+          }
+        }
+      }
+      assert.equal(options.headers?.Cookie, "opaque-auth")
+      return {
+        ok: true,
+        headers: { get: name => name === "content-length" ? "4" : null },
+        body: Readable.toWeb(Readable.from(Buffer.from("full")))
+      }
+    }
+    const result = await buildBilibiliArchiveRelaySegments({ type: "bilibili", bvid: "BV1234567890", cid: 1, duration: 600 }, {
+      autoAuthRetryCookie: "opaque-auth",
+      segmentApi: { video: file => ({ type: "video", file }) },
+      logger: { warn() {} }
+    })
+
+    assert.deepEqual(playbackCookies, ["", "opaque-auth"])
+    assert.equal(result.usedAuthorizedRetry, true)
+    assert.ok(result.segments.some(part => part?.type === "video"))
+    await cleanupBilibiliArchiveRelayFiles(result.tempFiles)
+  } finally {
+    globalThis.fetch = previousFetch
+  }
+})
+
+test("ordinary automatic relay never includes an authorization cookie", async () => {
+  const previousFetch = globalThis.fetch
+  const seenCookies = []
+  try {
+    globalThis.fetch = async (url, options = {}) => {
+      seenCookies.push(options.headers?.Cookie || "")
+      if (String(url).includes("x/player/playurl")) {
+        return { ok: true, async json() { return { code: 0, data: { quality: 6, durl: [{ url: "https://video.example/ordinary.mp4?temporary=1", size: 4 }] } } } }
+      }
+      return {
+        ok: true,
+        headers: { get: name => name === "content-length" ? "4" : null },
+        body: Readable.toWeb(Readable.from(Buffer.from("test")))
+      }
+    }
+    const result = await buildBilibiliArchiveRelaySegments({ type: "bilibili", bvid: "BVORDINARY1", cid: 1, duration: 2 }, {
+      autoAuthRetryCookie: "opaque-auth",
+      segmentApi: { video: file => ({ type: "video", file }) },
+      logger: { warn() {} }
+    })
+
+    assert.deepEqual(seenCookies, ["", ""])
+    assert.equal(result.usedAuthorizedRetry, false)
+    await cleanupBilibiliArchiveRelayFiles(result.tempFiles)
+  } finally {
+    globalThis.fetch = previousFetch
+  }
+})

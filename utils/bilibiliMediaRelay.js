@@ -73,7 +73,8 @@ export async function buildBilibiliArchiveRelaySegments(card = {}, {
   artifactStore = null,
   onTiming = null,
   quality = 6,
-  authCookie = ""
+  authCookie = "",
+  autoAuthRetryCookie = ""
 } = {}) {
   const segments = []
   const tempFiles = []
@@ -90,22 +91,35 @@ export async function buildBilibiliArchiveRelaySegments(card = {}, {
 
   if (!segmentApi?.video) return { segments, tempFiles, artifactLeases }
   const resolveStartedAt = Date.now()
-  const playback = await resolveBilibiliPlaybackResult(card, {
+  let playback = await resolveBilibiliPlaybackResult(card, {
     maxSeconds: BILIBILI_ARCHIVE_VIDEO_MAX_SECONDS,
     quality,
     authCookie
   })
+  let usedAuthorizedRetry = Boolean(authCookie)
+  const shouldRetryWithAuthorizedAccount = !authCookie && autoAuthRetryCookie && (
+    playback.resources?.some(resource => resource?.is_preview)
+    || /要求登录/.test(String(playback.failureReason || ""))
+  )
+  if (shouldRetryWithAuthorizedAccount) {
+    playback = await resolveBilibiliPlaybackResult(card, {
+      maxSeconds: BILIBILI_ARCHIVE_VIDEO_MAX_SECONDS,
+      quality,
+      authCookie: autoAuthRetryCookie
+    })
+    usedAuthorizedRetry = true
+  }
   const resources = playback.resources
   onTiming?.("playback", Date.now() - resolveStartedAt)
   if (playback.previewNotice) segments.push(`\n（${playback.previewNotice}）`)
   for (const resource of resources) {
     const downloadStartedAt = Date.now()
-    const key = buildMediaArtifactKey("bilibili", resource)
+    const key = buildMediaArtifactKey(usedAuthorizedRetry ? "bilibili-auth" : "bilibili", resource)
     const useArtifactStore = Boolean(artifactStore && key)
     const lease = useArtifactStore
-      ? await artifactStore.acquire(key, () => downloadBilibiliArchiveVideo(resource, { logger, authCookie }))
+      ? await artifactStore.acquire(key, () => downloadBilibiliArchiveVideo(resource, { logger, authCookie: usedAuthorizedRetry ? (authCookie || autoAuthRetryCookie) : "" }))
       : null
-    const filePath = useArtifactStore ? lease?.filePath : await downloadBilibiliArchiveVideo(resource, { logger, authCookie })
+    const filePath = useArtifactStore ? lease?.filePath : await downloadBilibiliArchiveVideo(resource, { logger, authCookie: usedAuthorizedRetry ? (authCookie || autoAuthRetryCookie) : "" })
     onTiming?.("download", Date.now() - downloadStartedAt)
     if (!filePath) continue
     if (lease) artifactLeases.push(lease)
@@ -124,7 +138,8 @@ export async function buildBilibiliArchiveRelaySegments(card = {}, {
     artifactLeases,
     qualityOptions: playback.qualityOptions || [],
     actualQuality: playback.resources?.[0]?.quality || 0,
-    failureReason: playback.failureReason || ""
+    failureReason: playback.failureReason || "",
+    usedAuthorizedRetry
   }
 }
 

@@ -57,6 +57,8 @@ export class MediaOutbox {
     enrichDouyin = enrichDouyinShare,
     buildBilibili = buildBilibiliArchiveRelaySegments,
     buildDouyin = buildDouyinArchiveRelaySegments,
+    autoBilibiliMemberAuth = false,
+    getBilibiliAuthCookie = () => "",
     artifactStore = null,
     sharedMedia = null
   } = {}) {
@@ -74,6 +76,8 @@ export class MediaOutbox {
     this.enrichDouyin = enrichDouyin
     this.buildBilibili = buildBilibili
     this.buildDouyin = buildDouyin
+    this.autoBilibiliMemberAuth = autoBilibiliMemberAuth === true
+    this.getBilibiliAuthCookie = getBilibiliAuthCookie
     this.artifactStore = artifactStore
     this.sharedMedia = sharedMedia
     this.refreshPromises = new Map()
@@ -181,6 +185,10 @@ export class MediaOutbox {
 
   async buildRelay(job, card, onTiming) {
     const options = { segmentApi, logger: this.logger, artifactStore: this.artifactStore, onTiming }
+    if (job.platform === "bilibili" && this.autoBilibiliMemberAuth) {
+      // 仅在 relay 识别出试看/登录限制后使用；普通自动搬运不会发送 Cookie。
+      options.autoAuthRetryCookie = String(this.getBilibiliAuthCookie?.() || "")
+    }
     return job.platform === "douyin"
       ? await this.buildDouyin(card, options)
       : await this.buildBilibili(card, options)

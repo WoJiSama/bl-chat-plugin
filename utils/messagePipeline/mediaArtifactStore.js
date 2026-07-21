@@ -156,11 +156,11 @@ export class MediaArtifactStore {
 
 export function buildMediaArtifactKey(platform, identity = {}) {
   const type = String(platform || "media").toLowerCase()
-  if (type === "bilibili") {
+  if (type === "bilibili" || type === "bilibili-auth") {
     const bvid = String(identity.bvid || "").trim()
     const part = String(identity.cid || identity.page || 1)
     const quality = String(identity.quality || identity.qn || 6)
-    return bvid ? `bilibili:${bvid}:${part}:qn${quality}` : ""
+    return bvid ? `${type}:${bvid}:${part}:qn${quality}` : ""
   }
   if (type === "douyin") {
     const awemeId = String(identity.aweme_id || identity.awemeId || "").trim()

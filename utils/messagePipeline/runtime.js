@@ -5,6 +5,7 @@ import { MediaOutbox } from "./mediaOutbox.js"
 import { MediaArtifactStore } from "./mediaArtifactStore.js"
 import { MessagePipeline } from "./messagePipeline.js"
 import { getMissingRedisJobCapabilities, RedisJobStore } from "./redisJobStore.js"
+import { BilibiliAuthManager } from "../BilibiliAuthManager.js"
 
 const RUNTIME_KEY = Symbol.for("bl-chat-plugin.message-pipeline.runtime")
 
@@ -104,6 +105,8 @@ export function createMessagePipelineRuntime({
     leaseMs: config.deliveryLeaseSeconds * 1000,
     concurrency: config.deliveryConcurrency,
     prepareConcurrency: config.mediaPrepareConcurrency,
+    autoBilibiliMemberAuth: pluginSettings.bilibiliQualityRelay?.autoUseAuthorizedForMemberOnly !== false,
+    getBilibiliAuthCookie: () => new BilibiliAuthManager().cookie(),
     artifactStore,
     sharedMedia: config.mediaSharedHostDir && config.mediaSharedContainerDir
       ? { hostDir: config.mediaSharedHostDir, containerDir: config.mediaSharedContainerDir }
