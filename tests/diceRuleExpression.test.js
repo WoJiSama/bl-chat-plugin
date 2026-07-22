@@ -2,6 +2,7 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import fs from "node:fs"
 import path from "node:path"
+import { fileURLToPath } from "node:url"
 import YAML from "yaml"
 import {
   collectExpressionReferences,
@@ -9,6 +10,8 @@ import {
   parseDiceRuleExpression
 } from "../utils/DiceRuleExpression.js"
 import { validateDiceRulePack } from "../utils/DiceRuleSchema.js"
+
+const examplesDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../docs/dice-rules/examples")
 
 test("custom rule expressions respect precedence, references and short-circuit conditions", () => {
   const result = evaluateDiceRuleExpression(
@@ -44,7 +47,6 @@ test("expression sandbox rejects unknown references, blocked paths and unknown f
 })
 
 test("all documented example rule packs pass strict schema validation", () => {
-  const examplesDir = path.resolve("docs/dice-rules/examples")
   const files = fs.readdirSync(examplesDir).filter(file => file.endsWith(".yaml"))
   assert.ok(files.length >= 4, "教程至少应保留三份 V1 示例和一份 V2 团务示例")
   for (const file of files) {

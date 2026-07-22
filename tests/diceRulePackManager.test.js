@@ -3,8 +3,11 @@ import assert from "node:assert/strict"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { fileURLToPath } from "node:url"
 import { DiceManager } from "../utils/DiceManager.js"
 import { DiceRulePackManager, resolveDiceRuleImportSource } from "../utils/DiceRulePackManager.js"
+
+const examplesDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../docs/dice-rules/examples")
 
 function createRuntime(options = {}) {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "dice-rule-pack-test-"))
@@ -705,7 +708,6 @@ test("archive and restore roll back directory moves when index commit fails", as
 test("every documented example can be previewed, enabled and execute its first command", async t => {
   const runtime = createRuntime()
   t.after(runtime.cleanup)
-  const examplesDir = path.resolve("docs/dice-rules/examples")
   for (const file of fs.readdirSync(examplesDir).filter(name => name.endsWith(".yaml")).sort()) {
     const source = fs.readFileSync(path.join(examplesDir, file), "utf8")
     const staged = await runtime.manager.stageImport(source, "master")
