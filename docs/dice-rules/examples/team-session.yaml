@@ -1,0 +1,232 @@
+version: 1
+id: ember-team
+name: 余烬团务示例
+aliases: [ember, 余烬]
+description: 规则运行时 2.0 的完整团务示例，包含目标、权限、暗骰、对抗、状态、物品、能力、先攻与事件。
+
+compatibility:
+  min_runtime: "2.0"
+  package_version: "2.0.0"
+
+identity:
+  display_name: "{attr.name}"
+  fallback: "{sender.card}"
+
+character:
+  fields:
+    name:
+      type: string
+      label: 角色名
+      default: "{sender.card}"
+      max_length: 30
+    hp:
+      type: integer
+      label: 生命
+      default: 12
+      min: 0
+      max: 12
+    mp:
+      type: integer
+      label: 法力
+      default: 6
+      min: 0
+      max: 6
+    armor:
+      type: integer
+      label: 护甲
+      default: 0
+      min: 0
+      max: 10
+    secret_note:
+      type: string
+      label: 秘密
+      default: 未记录
+      max_length: 100
+      secret: true
+    defense:
+      type: integer
+      label: 有效防御
+      formula: "attr.armor + (inventory.shield.equipped ? 2 : 0)"
+
+group:
+  fields:
+    threat:
+      type: integer
+      label: 威胁
+      default: 0
+      min: 0
+      max: 20
+    supplies:
+      type: integer
+      label: 团队补给
+      default: 5
+      min: 0
+      max: 10
+    gm_goal:
+      type: string
+      label: GM目标
+      default: 未设置
+      max_length: 100
+      secret: true
+
+statuses:
+  poison:
+    label: 中毒
+    description: 每次行动结束按层数扣除生命。
+    default_duration: 2
+    max_stacks: 3
+    tick: turn_end
+    on_tick:
+      - op: subtract
+        field: hp
+        value: "status.stacks"
+      - op: clamp
+        field: hp
+        min: 0
+        max: 12
+  guarding:
+    label: 防御姿态
+    description: 生效时增加护甲，到期或主动移除时恢复。
+    default_duration: 1
+    max_stacks: 1
+    tick: turn_end
+    on_apply:
+      - { op: add, field: armor, value: 2 }
+    on_expire:
+      - { op: subtract, field: armor, value: 2 }
+
+items:
+  potion:
+    label: 治疗药水
+    description: 可堆叠的普通物品。
+    stackable: true
+    max_quantity: 10
+  shield:
+    label: 余烬盾
+    description: 装备后由 defense 派生字段提供额外防御。
+    stackable: false
+    max_quantity: 1
+    slot: hand
+  wand:
+    label: 施法杖
+    stackable: false
+    max_quantity: 1
+    slot: hand
+
+abilities:
+  fireball:
+    label: 火球术
+    description: 消耗角色法力，使用后进入两回合冷却。
+    kind: spell
+    max_rank: 3
+    cooldown: 2
+    resource_scope: actor
+    resource_field: mp
+    resource_cost: 2
+  rally:
+    label: 集结
+    description: 消耗团队补给，使用后进入一回合冷却。
+    kind: skill
+    max_rank: 1
+    cooldown: 1
+    resource_scope: group
+    resource_field: supplies
+    resource_cost: 1
+
+events:
+  session_start:
+    - { op: set, scope: group, field: threat, value: 1 }
+  round_start:
+    - { op: add, scope: group, field: threat, value: 1 }
+  session_end:
+    - { op: set, scope: group, field: threat, value: 0 }
+
+tables:
+  omen:
+    label: 余烬征兆
+    entries:
+      - { weight: 3, text: 火星转瞬即逝, value: 0, tags: [calm] }
+      - { weight: 1, text: 灰烬逆风升起, value: 1, tags: [danger] }
+
+commands:
+  - id: check
+    aliases: [check, 检定]
+    label: 基础检定
+    description: 不带参数的基础检定，也是导入预览使用的第一条命令。
+    rolls:
+      main: "1d20"
+    draws:
+      omen: omen
+    branches:
+      - when: "roll.main.total >= 15"
+        result: 成功
+        tags: [success]
+      - result: 失败
+        tags: [failure]
+    output: "{actor}检定：{roll.main.detail}，{result}；征兆：{table.omen.text}。"
+
+  - id: strike
+    aliases: [strike, 攻击]
+    label: 攻击目标
+    arguments:
+      - id: victim
+        label: 目标
+        type: actor
+        required: true
+        allowed: [member, npc]
+      - id: damage
+        label: 伤害
+        type: integer
+        required: true
+        min: 0
+        max: 12
+    actions:
+      - { op: subtract, scope: target, target: victim, field: hp, value: "arg.damage" }
+      - { op: clamp, scope: target, target: victim, field: hp, min: 0, max: 12 }
+    output: "{actor}攻击{target.name}，造成{arg.damage}点伤害；目标HP={target.attr.hp}。"
+
+  - id: poison_target
+    aliases: [poison, 施毒]
+    label: 施加中毒
+    permission: gm
+    arguments:
+      - { id: victim, type: actor, required: true, allowed: [member, npc] }
+    actions:
+      - { op: add_status, scope: target, target: victim, status: poison, duration: 2, stacks: 1 }
+    output: "已给{target.name}施加中毒。"
+
+  - id: secret_search
+    aliases: [secret, 暗查]
+    label: 秘密调查
+    visibility: gm
+    rolls:
+      clue: "1d100"
+    output: "{actor}的秘密调查结果：{roll.clue.detail}。"
+    public_output: "{actor}进行了一次秘密调查，结果已交给GM。"
+
+  - id: duel
+    aliases: [duel, 对抗]
+    label: 对抗检定
+    arguments:
+      - { id: rival, type: actor, required: true, allowed: [member, npc] }
+    opposed:
+      target: rival
+      actor_value: "1d20 + derived.defense"
+      target_value: "1d20 + target.derived.defense"
+      mode: higher
+      tie: tie
+    output: "{actor}与{target.name}对抗：{opposed.actor} vs {opposed.target}；胜者={opposed.winner}。"
+
+  - id: use_fireball
+    aliases: [fireball, 火球]
+    label: 使用火球术
+    actions:
+      - { op: use_ability, ability: fireball }
+    output: "{actor}使用火球术；剩余法力={attr.mp}，冷却={abilities.fireball.cooldown}。"
+
+limits:
+  max_dice_count: 50
+  max_rolls: 8
+  max_expression_length: 300
+  max_output_length: 1000
+  max_table_entries: 50

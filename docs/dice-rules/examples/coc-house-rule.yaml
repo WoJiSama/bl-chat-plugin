@@ -1,0 +1,64 @@
+version: 1
+id: house-coc-rule
+name: COC 房规检定示例
+aliases: [mycoc, 房规]
+description: 这是新命令示例，不覆盖内置 .ra/.rc/.sc。
+
+identity:
+  display_name: "{attr.name}"
+  fallback: "{sender.card}"
+
+character:
+  fields:
+    name:
+      type: string
+      label: 调查员
+      default: "{sender.card}"
+      max_length: 30
+    skill:
+      type: integer
+      label: 默认技能
+      default: 50
+      min: 1
+      max: 100
+    luck:
+      type: integer
+      label: 幸运
+      default: 50
+      min: 0
+      max: 100
+
+commands:
+  - id: check
+    aliases: [check, 检定]
+    label: 房规检定
+    arguments:
+      - id: target
+        label: 目标值
+        type: integer
+        default: 0
+        min: 0
+        max: 100
+    rolls:
+      check: "1d100"
+    let:
+      effective_target: "arg.target > 0 ? arg.target : attr.skill"
+    branches:
+      - when: "roll.check.total == 1"
+        result: 大成功
+        actions:
+          - op: add
+            field: luck
+            value: 1
+          - op: clamp
+            field: luck
+            min: 0
+            max: 100
+      - when: "roll.check.total <= floor(let.effective_target / 5)"
+        result: 极难成功
+      - when: "roll.check.total <= let.effective_target"
+        result: 成功
+      - when: "roll.check.total >= 96 && let.effective_target < 50"
+        result: 大失败
+      - result: 失败
+    output: "{actor} 房规检定：{roll.check.total}/{let.effective_target}，{result}。"

@@ -75,6 +75,7 @@ pluginSettings:
     baseDir: data/uma_race
   diceSystem:
     enabled: true
+    customRulesEnabled: true
     defaultRule: "0"
     maxDiceCount: 100
     maxDiceSides: 100000

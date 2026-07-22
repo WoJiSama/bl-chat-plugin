@@ -26,6 +26,7 @@ function knownCompactLatinRule(headPattern, compactArgs = []) {
 export const DICE_COMMAND_RULES = Object.freeze([
   { reg: exactRule("骰娘|dice"), fnc: "showHelp" },
   { reg: `^${DICE_COMMAND_PREFIX_PATTERN}(?:骰娘|dice)\\s*(?:帮助|help)\\s*$`, fnc: "showHelp" },
+  { reg: argumentRule("骰规则", { allowCompactLatin: true }), fnc: "manageDiceRules" },
   { reg: argumentRule("help|帮助", { allowCompactLatin: true }), fnc: "help" },
   { reg: knownCompactLatinRule("bot|dismiss|bye", ["on", "off", "bye", "dismiss"]), fnc: "botControl" },
   { reg: knownCompactLatinRule("reply", ["on", "off"]), fnc: "replyControl" },

@@ -56,7 +56,9 @@ test("dice commands accept ASCII or Chinese periods and optional argument spaces
     [".cast1", "dndUtility"],
     [".namednd5", "nameDnd"],
     [".db120 100", "db"],
-    [".nnAlice", "nn"]
+    [".nnAlice", "nn"],
+    [".骰规则导入", "manageDiceRules"],
+    ["。骰规则 启用 fate-lite", "manageDiceRules"]
   ]
 
   for (const [message, expected] of cases) {

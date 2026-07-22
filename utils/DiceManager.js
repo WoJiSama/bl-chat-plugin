@@ -1,7 +1,9 @@
 import fs from "fs"
 import path from "path"
 import { createRequire } from "module"
+import { withFileLock } from "./fileLock.js"
 import { collectMentionTargetIds, getMentionTargetId, stripCqMentions } from "./mentionTargets.js"
+import { KeyedSerialQueue } from "./messagePipeline/keyedSerialQueue.js"
 
 const require = createRequire(import.meta.url)
 let yamlParser = null
@@ -11,6 +13,7 @@ try {
 
 const DEFAULT_CONFIG = {
   enabled: true,
+  customRulesEnabled: true,
   defaultRule: "0",
   maxDiceCount: 100,
   maxDiceSides: 100000,
@@ -210,9 +213,10 @@ function normalizeDiceExpression(expr = "") {
 }
 
 class DiceExpressionParser {
-  constructor(expr, config) {
+  constructor(expr, config, random = Math.random) {
     this.expr = normalizeDiceExpression(expr)
     this.config = config
+    this.random = typeof random === "function" ? random : Math.random
     this.pos = 0
     this.diceCount = 0
     this.detailParts = []
@@ -308,7 +312,7 @@ class DiceExpressionParser {
     this.diceCount += count
     if (this.diceCount > this.config.maxDiceCount) throw new Error(`单次最多掷 ${this.config.maxDiceCount} 颗骰子`)
 
-    const rolls = Array.from({ length: count }, () => rollInt(sides))
+    const rolls = Array.from({ length: count }, () => Math.floor(this.random() * sides) + 1)
     const suffix = this.parseDiceSuffix(count)
     let kept = [...rolls]
     let suffixText = ""
@@ -345,6 +349,7 @@ export class DiceManager {
     this.cwd = cwd
     this.logger = logger
     this.writeChain = Promise.resolve()
+    this.stateQueue = new KeyedSerialQueue()
   }
 
   getConfig() {
@@ -404,10 +409,21 @@ export class DiceManager {
       const file = this.getDataPath(config)
       ensureDir(path.dirname(file))
       const tmp = `${file}.${process.pid}.tmp`
-      fs.writeFileSync(tmp, JSON.stringify(state, null, 2), "utf8")
-      fs.renameSync(tmp, file)
+      try {
+        fs.writeFileSync(tmp, JSON.stringify(state, null, 2), "utf8")
+        fs.renameSync(tmp, file)
+      } finally {
+        try { fs.rmSync(tmp, { force: true }) } catch {}
+      }
     })
     return this.writeChain
+  }
+
+  async withStateTransaction(work, config = this.getConfig()) {
+    return await this.stateQueue.run("state", () => withFileLock(
+      path.join(this.getDataDir(config), "locks", "state.lock"),
+      work
+    ))
   }
 
   isLogActive(groupId, config = this.getConfig()) {
@@ -459,6 +475,28 @@ export class DiceManager {
     }
     ensureDir(path.dirname(log.file))
     await fs.promises.appendFile(log.file, JSON.stringify(record) + "\n", "utf8")
+  }
+
+  async recordStructuredRuleEvent(e, event = {}, state = null, config = this.getConfig()) {
+    if (!config.enabled || !e?.group_id) return false
+    const groupId = String(e.group_id)
+    const currentState = state || this.readState(config)
+    const log = currentState.groups?.[groupId]?.log
+    if (!log?.active || !log.file) return false
+    const sender = e.sender || {}
+    const record = {
+      at: new Date().toISOString(),
+      time: Date.now(),
+      type: "dice_rule",
+      groupId,
+      userId: String(e.user_id || sender.user_id || ""),
+      name: sender.card || sender.nickname || String(e.user_id || ""),
+      messageId: e.message_id || "",
+      ...event
+    }
+    ensureDir(path.dirname(log.file))
+    await fs.promises.appendFile(log.file, JSON.stringify(record) + "\n", "utf8")
+    return true
   }
 
   async startLog(e, raw = "") {
@@ -882,8 +920,8 @@ export class DiceManager {
     return { rounds: 1, expr: raw }
   }
 
-  rollExpression(expr = "1d100", config = this.getConfig()) {
-    return new DiceExpressionParser(expr || "1d100", config).parse()
+  rollExpression(expr = "1d100", config = this.getConfig(), random = Math.random) {
+    return new DiceExpressionParser(expr || "1d100", config, random).parse()
   }
 
   rollD100(modifier = 0) {
@@ -1462,6 +1500,7 @@ export class DiceManager {
       ".buff / .ss / .cast / .longrest / .ds - DND Buff、法术位、长休、死亡豁免",
       ".ww / .dx / .ek / .ekgen / .rsr - 其它规则基础骰与随机选择",
       ".find 关键词 - 搜索本地词条；.set d20 - 设置默认骰",
+      ".骰规则帮助 - 固定点命令的 YAML 规则包、角色权限与团务系统",
       ".log new [标题] / .log on / .log off / .log get / .log end - 跑团记录与导出"
     ].join("\n")
   }

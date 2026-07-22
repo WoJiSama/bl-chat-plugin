@@ -10,6 +10,12 @@ export default [
     bottomHelpMessage: "纯命令式 COC 骰娘，不接入 AI 工具，不消耗模型 token"
   },
   {
+    field: "diceSystem.customRulesEnabled",
+    label: "启用自定义规则包",
+    component: "Switch",
+    bottomHelpMessage: "允许主人导入 YAML 规则包，并由群管理员在当前群启用；规则表达式不执行任意脚本"
+  },
+  {
     field: "diceSystem.defaultRule",
     label: "默认规则",
     component: "Select",

@@ -1,0 +1,123 @@
+version: 1
+id: shadow-stateful
+name: 暗影试炼
+aliases: [shadow, 暗影]
+description: 展示派生属性、伤害、资源和随机表。
+
+identity:
+  display_name: "{attr.name}（{attr.title}）"
+  fallback: "{sender.card}"
+
+character:
+  fields:
+    name:
+      type: string
+      label: 角色名
+      default: "{sender.card}"
+      max_length: 30
+    title:
+      type: string
+      label: 称号
+      default: "旅人"
+      max_length: 20
+    agility:
+      type: integer
+      label: 敏捷
+      default: 45
+      min: 0
+      max: 100
+    injury:
+      type: integer
+      label: 伤势
+      default: 0
+      min: 0
+      max: 100
+    effective_agility:
+      type: integer
+      label: 有效敏捷
+      formula: "attr.agility - attr.injury"
+    max_hp:
+      type: integer
+      label: 最大生命
+      default: 12
+      min: 1
+      max: 99
+    hp:
+      type: integer
+      label: 生命
+      default: 12
+      min: 0
+      max: 99
+    status:
+      type: string
+      label: 状态
+      default: "正常"
+      enum: [正常, 受伤, 倒下]
+
+tables:
+  critical:
+    label: 暴击效果
+    entries:
+      - weight: 4
+        text: "伤害 +1"
+        value: 1
+      - weight: 1
+        text: "伤害翻倍"
+        value: 2
+
+commands:
+  - id: evade
+    aliases: [evade, 闪避]
+    label: 闪避检定
+    arguments:
+      - id: difficulty
+        label: 难度
+        type: integer
+        required: true
+        min: 0
+        max: 100
+    rolls:
+      check: "1d100"
+    branches:
+      - when: "roll.check.total <= derived.effective_agility - arg.difficulty"
+        result: 完美闪避
+      - when: "roll.check.total <= derived.effective_agility"
+        result: 闪避成功
+      - result: 闪避失败
+    output: "{actor} 闪避：{roll.check.total}/{derived.effective_agility}，{result}。"
+
+  - id: strike
+    aliases: [strike, 攻击]
+    label: 攻击检定
+    arguments:
+      - id: defense
+        label: 防御
+        type: integer
+        required: true
+        min: 0
+        max: 200
+    rolls:
+      attack: "1d100"
+      damage: "1d6 + floor(derived.effective_agility / 20)"
+    draws:
+      critical: critical
+    branches:
+      - when: "roll.attack.total <= 5"
+        result: 暴击
+        actions:
+          - op: subtract
+            field: hp
+            value: "roll.damage.total * table.critical.value"
+          - op: clamp
+            field: hp
+            min: 0
+            max: "attr.max_hp"
+          - op: set
+            field: status
+            value: "attr.hp <= 0 ? '倒下' : '受伤'"
+        output: "{actor} 暴击！伤害 {roll.damage.total}，效果：{table.critical.text}。"
+      - when: "roll.attack.total <= arg.defense"
+        result: 命中
+        output: "{actor} 命中，伤害 {roll.damage.total}。"
+      - result: 未命中
+        output: "{actor} 攻击未命中。"

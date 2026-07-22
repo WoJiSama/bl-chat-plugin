@@ -1,0 +1,52 @@
+version: 1
+id: fate-lite
+name: Fate Lite
+aliases: [fate, 命运]
+description: 使用四颗 Fate 骰进行叙事检定。
+
+identity:
+  display_name: "{attr.name}"
+  fallback: "{sender.card}"
+
+character:
+  fields:
+    name:
+      type: string
+      label: 角色名
+      default: "{sender.card}"
+      max_length: 30
+    skill:
+      type: integer
+      label: 技能
+      default: 0
+      min: -3
+      max: 8
+
+dice_sets:
+  fate:
+    label: Fate 骰
+    faces: [-1, -1, 0, 0, 1, 1]
+
+commands:
+  - id: check
+    aliases: [check, 检定]
+    label: Fate 检定
+    description: "用 4 颗 Fate 骰和当前技能对抗难度。"
+    arguments:
+      - id: difficulty
+        label: 难度
+        type: integer
+        required: true
+        min: -10
+        max: 20
+    rolls:
+      fate: "dice('fate', 4)"
+    let:
+      total: "roll.fate.total + attr.skill"
+    branches:
+      - when: "let.total >= arg.difficulty + 3"
+        result: 出色成功
+      - when: "let.total >= arg.difficulty"
+        result: 成功
+      - result: 失败
+    output: "{actor}：{roll.fate.detail} + 技能 {attr.skill} = {let.total}，难度 {arg.difficulty}，{result}。"
